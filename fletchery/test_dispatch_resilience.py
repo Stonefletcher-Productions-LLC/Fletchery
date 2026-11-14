@@ -181,7 +181,7 @@ class DispatchResilienceTests(unittest.IsolatedAsyncioTestCase):
         engine, gh, runtime = self.engine(tasks)
         await engine.once()
         self.assertNotIn(1, {n for role, n, _ in runtime.calls if role == "worker"})
-        self.assertIn("missing issue #95", engine._waiting[1])
+        self.assertIn("#95, which does not exist", engine._waiting[1])  # deadends.py: a dead end says so
 
     async def test_zero_budget_starts_neither_fixer_nor_merger(self):
         task = Task(1, "Fix the PR", labels=[label_for(PR)])

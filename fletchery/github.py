@@ -162,6 +162,14 @@ class GitHub:
             return bool(pr and pr.get("merged_at"))
         return repository is None or it.get("state_reason") == "completed"
 
+    def issue_info(self, number: int) -> dict | None:
+        """The issue (or PR) as GitHub has it, with "merged" for a PR: what deadends.classify_dependency reads."""
+        it = self.api(f"repos/{self.repo}/issues/{number}")
+        if it and it.get("pull_request") and it.get("state") == "closed":
+            pr = self.api(f"repos/{self.repo}/pulls/{number}")
+            it = dict(it, merged=bool(pr and pr.get("merged_at")))
+        return it
+
     def set_status(self, number: int, status: str) -> None:
         """`status` is a plain state (queued, running, pr, blocked); the issue gets "<label>:<state>"."""
         it = self.api(f"repos/{self.repo}/issues/{number}", fresh=True)  # never drop a label someone just added
@@ -412,6 +420,7 @@ class FakeGitHub:
         self.comments: dict[int, list[str]] = {}
         self.feedback: dict[int, list[Feedback]] = {}
         self.notes: dict[int, list[tuple[str, str, str]]] = {}  # comments people left (author, at, body)
+        self.infos: dict[int, dict] = {}  # issue_info answers for issues that are not tasks here
         self.status_text = ""
         self.writes: list[str] = []
         self._next_pr = 9000
@@ -424,6 +433,14 @@ class FakeGitHub:
         if repository is not None:
             return (repository.lower(), number) in self.repository_closed
         return number in self.closed or (number in self.tasks and self.tasks[number].closed)
+
+    def issue_info(self, number):
+        if number in self.infos:
+            return self.infos[number]
+        if number in self.tasks:
+            t = self.tasks[number]
+            return {"number": number, "state": "closed" if t.closed else "open", "labels": [{"name": l} for l in t.labels]}
+        return None
 
     def set_status(self, number, status):
         t = self.tasks[number]

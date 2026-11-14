@@ -1790,7 +1790,7 @@ function renderStatus(d) {
   const cols = {pr: [], blocked: []};
   const live = new Set(d.live.map(a => a.task));
   for (const t of d.tasks) {
-    const col = live.has(t.number) && t.status !== "pr" ? "running" : t.status;
+    const col = live.has(t.number) && t.status !== "pr" ? "running" : t.needs_person ? "blocked" : t.status;
     if (cols[col]) cols[col].push(t);
   }
   const empty = {pr: "None yet. A worker's PR appears here once it is opened.", blocked: "Nothing needs you."};
@@ -1923,7 +1923,7 @@ function renderStatus(d) {
         why = a ? `${esc(a.stage)}, started ${ago(a.since)} ago` : (t.since ? "Started " + ago(t.since) + " ago" : "");
       }
       if (k === "pr") why = t.pr ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>` + (t.fix_attempts ? `, fixed ${t.fix_attempts}×` : "") : "PR open";
-      if (k === "blocked") return `<li><button type="button" class="t" data-ny="${t.number}"><span class="num">#${t.number}</span> <span class="ttl">${esc(t.title)}${workerRankBadge(t.worker_rank)}</span></button><span class="why">Click to read and answer. Send re-queues it.</span></li>`;
+      if (k === "blocked") return `<li><button type="button" class="t" data-ny="${t.number}"><span class="num">#${t.number}</span> <span class="ttl">${esc(t.title)}${workerRankBadge(t.worker_rank)}</span></button><span class="why">${t.needs_person ? "Queued but stuck: " + esc(t.why.replace(/^needs a person: /, "")) : "Click to read and answer. Send re-queues it."}</span></li>`;
       return `<li><a class="t" href="${esc(t.url)}" target="_blank" rel="noopener"><span class="num">#${t.number}</span> ${esc(t.title)}</a><span class="why">${why}</span></li>`;
     }).join("") : `<li class="empty">${empty[k]}</li>`;
   }
@@ -1963,8 +1963,8 @@ function renderStatus(d) {
 
 
 function renderOverview(d) {
-  const blocked = d.tasks.filter(t => t.status === "blocked");
-  const queued = d.tasks.filter(t => t.status === "queued");
+  const blocked = d.tasks.filter(t => t.status === "blocked" || t.needs_person);
+  const queued = d.tasks.filter(t => t.status === "queued" && !t.needs_person);
   const prs = d.merge ? d.merge.length : d.tasks.filter(t => t.status === "pr").length;
   const integrations = (d.integration_queue?.requests || []).filter(r => ["queued", "draining", "running", "blocked"].includes(r.state));
   const merge = integrations.find(r => r.kind === "merge");

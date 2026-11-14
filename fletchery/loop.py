@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from config import Config
+import deadends
 import graph
 from graph import BLOCKED, PR, QUEUED, RUNNING, Task, readiness, pick
 from github import PullRequest, Feedback
@@ -66,6 +67,7 @@ class State:
     emergency_repairs: dict = field(default_factory=dict)      # task -> build/merge evidence; repair classification survives restart
     resource_waits: dict = field(default_factory=dict)        # task -> earliest readiness check (ISO); survives restart
     blocker_checked: dict = field(default_factory=dict)       # task -> last planner dispatch; fair across deferred blocks
+    dead_end_noted: dict = field(default_factory=dict)        # task -> dead prerequisites last reported on it (deadends.py)
 
     @staticmethod
     def load(path: Path) -> "State":
@@ -556,6 +558,14 @@ class Engine:
                                    f"merge the latest {cfg.base_branch} into this branch, resolve any conflicts, and fix "
                                    "what the round reported, then re-run the issue's named checks. Round report: "
                                    + excluded.get("why", ""), now()))
+            elif deadends.check_repair_due(pr, st.pr_checks.get(str(pr_num)) or {}, st.seen.get(str(pr_num))):
+                # Failed its PR check at this head, the fixer took the report and ended without a new commit: nothing
+                # would ever check or repair it again (LifeShare 2026-11-14: 16 tasks idle for up to 2 days).
+                chk = st.pr_checks[str(pr_num)]
+                if not self.dry_run:
+                    chk["retried"] = now()
+                    st.fix_attempts[str(pr_num)] = max(0, cfg.fixer_attempts - 1)
+                fb.append(Feedback(pr_num, "check", deadends.fresh_check_text(chk, cfg.base_branch), now()))
             plans = re.findall(r"<!-- fletchery-blocker-applied:([a-f0-9]+) -->", task.body or "")
             if task.status == QUEUED and plans and st.repair_continuations.get(str(pr_num)) != plans[-1]:
                 # The planner explicitly authorized a bounded continuation on an
@@ -626,6 +636,7 @@ class Engine:
             unknown = dependency_errors.intersection(tasks[number].depends_on)
             if unknown:
                 rd.waiting[number] = "prerequisite status unavailable; retrying GitHub for " + ", ".join(f"#{d}" for d in sorted(unknown))
+        self._dead_end_dependencies(tasks, rd.waiting, closed_deps, dependency_errors)
         fixing = {t.number for t in by_pr.values()}
         for pr_num, t in by_pr.items():
             # A queued task with an open PR moves only through fixers; say why when none started (it showed "ready").
@@ -637,8 +648,9 @@ class Engine:
                 rd.waiting[t.number] = ("needs a person: PR #%d is parked (deferred twice at this head): %s"
                                         % (pr_num, " ".join(str(parked.get("why", "")).split())[:240])).strip()
                 continue
-            stuck = exhausted_wait(t.number, pr, st.merge_excluded.get(str(pr_num), {}),
-                                   st.fix_attempts.get(str(pr_num), 0), cfg.fixer_attempts, st.seen.get(str(pr_num)))
+            stuck = (exhausted_wait(t.number, pr, st.merge_excluded.get(str(pr_num), {}),
+                                    st.fix_attempts.get(str(pr_num), 0), cfg.fixer_attempts, st.seen.get(str(pr_num)))
+                     or deadends.check_stuck_wait(pr, st.pr_checks.get(str(pr_num)) or {}, st.seen.get(str(pr_num))))
             rd.waiting[t.number] = stuck or f"repairing PR #{pr_num}: waits for new feedback or a free repair slot"
         rd.ready = [t for t in rd.ready if t.number not in self.active and t.number not in fixing]
         free_resources = []
@@ -2118,6 +2130,58 @@ class Engine:
             bits.append(f"fixed {r['fix_attempts']}×")
         return "- " + " · ".join(bits)
 
+    def _dead_end_dependencies(self, tasks: dict[int, Task], waiting: dict[int, str], closed: set[int],
+                               unknown: set[int]) -> None:
+        """Queued tasks that depend on an issue Fletchery can't see: give a lost task label back, or say plainly that
+        a person must fix the prerequisite (wait reason, Needs you, one comment on the task). deadends.py has why."""
+        gh, st = self.ctx.gh, self.state
+        verdicts: dict[int, tuple[str, str]] = {}
+        for n, t in sorted(tasks.items()):
+            if t.status != QUEUED or not waiting.get(n, "").startswith("depends on missing issue"):
+                continue
+            missing = [d for d in t.depends_on if d not in tasks and d not in closed and d not in unknown]
+            if not missing:
+                continue
+            dead, waits = [], []
+            for d in missing:
+                if d not in verdicts:
+                    try:
+                        verdicts[d] = deadends.classify_dependency(gh.issue_info(d))
+                    except Exception as e:
+                        self.ctx.log(f"#{d}: prerequisite check deferred: {type(e).__name__}: {e}")
+                        verdicts[d] = ("wait", "could not be read from GitHub; retrying")
+                    if verdicts[d][0] == "relabel":
+                        self.last_plan.append(f"label #{d} {graph.PREFIX} ({verdicts[d][1]})")
+                        if not self.dry_run:
+                            try:
+                                gh.add_labels(d, [graph.PREFIX])
+                                gh.comment(d, f"Fletchery: this issue {verdicts[d][1]}, so it was invisible and the tasks "
+                                              f"that depend on it could never start. Gave the `{graph.PREFIX}` label back. "
+                                              f"To take an issue off Fletchery, remove its `{graph.PREFIX}:*` label too.")
+                                self.ctx.log(f"#{d}: gave the {graph.PREFIX} label back ({verdicts[d][1]})")
+                                verdicts[d] = ("wait", f"got its `{graph.PREFIX}` label back; it appears next pass")
+                            except Exception as e:
+                                self.ctx.log(f"#{d}: could not relabel: {type(e).__name__}: {e}")
+                                verdicts[d] = ("dead", verdicts[d][1])
+                action, why = verdicts[d]
+                (dead if action == "dead" else waits).append((d, why))
+            if dead:
+                waiting[n] = deadends.dead_end_reason(dead)
+                mark = ",".join(str(d) for d, _ in dead)
+                if st.dead_end_noted.get(str(n)) != mark and not self.dry_run:
+                    try:
+                        gh.comment(n, deadends.dead_end_comment(dead))
+                        st.dead_end_noted[str(n)] = mark
+                    except Exception as e:
+                        self.ctx.log(f"#{n}: could not report its dead-end prerequisite: {type(e).__name__}: {e}")
+            else:
+                open_deps = [d for d in t.depends_on if d in tasks]
+                waiting[n] = ", ".join(x for x in (
+                    graph.waits_text(tasks, open_deps) if open_deps else "",
+                    ("" if open_deps else "waits for ") + ", ".join(f"#{d} ({why})" for d, why in waits)) if x)
+        for n in [k for k in st.dead_end_noted if int(k) not in tasks or not waiting.get(int(k), "").startswith(deadends.NEEDS)]:
+            del st.dead_end_noted[n]
+
     # ---- the dashboard's view of the last pass ----
     def make_snapshot(self, tasks: dict[int, Task], prs: dict[int, PullRequest], waiting: dict[int, str],
                       outcomes: list[Outcome]) -> dict:
@@ -2127,6 +2191,7 @@ class Engine:
         for t in sorted(tasks.values(), key=lambda t: (t.created_at, t.number)):
             rows.append({"number": t.number, "title": t.title, "status": t.status.split(":")[-1],
                          "why": waiting.get(t.number, "ready" if t.status == QUEUED else ""),
+                         "needs_person": t.status == QUEUED and waiting.get(t.number, "").startswith(deadends.NEEDS),
                          "depends": t.depends_on, "pr": t.pr_number, "branch": t.branch,
                          "fix_attempts": st.fix_attempts.get(str(t.pr_number), 0) if t.pr_number else 0,
                          "since": st.running.get(str(t.number), ""), "url": f"{url}/issues/{t.number}",
@@ -2230,6 +2295,10 @@ class Engine:
             L += section("In the lane, PR not found", [f"- #{t.number} {t.title}" for t in no_pr], "")
         blocked = [t for t in tasks.values() if t.status == BLOCKED]
         L += section("Blocked (needs a person)", [f"- #{t.number} {t.title}" for t in blocked], "(none)")
+        stuck = [t for t in tasks.values() if t.status == QUEUED and waiting.get(t.number, "").startswith(deadends.NEEDS)]
+        if stuck:
+            L += section("Queued but stuck (needs a person)",
+                         [f"- #{t.number} {t.title}: {waiting[t.number][len(deadends.NEEDS):][:300]}" for t in stuck], "")
         if multi:
             rows = []
             for a in pool.view(self.stats()):
