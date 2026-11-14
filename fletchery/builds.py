@@ -326,7 +326,15 @@ class Builds:
             url = pub.release({**row, "name": self.engine.cfg.name}, zips)
             gone = pub.prune(max(1, int(p.get("keep") or 3)))
             drive = ""
-            if p.get("driveDir"):
+            if p.get("driveRemote"):
+                try:
+                    old, links = publish.to_remote(zips, str(p["driveRemote"]), self.engine.cfg.name or "Build",
+                                                   max(1, int(p.get("keep") or 3)), str(p.get("rclone") or "rclone"))
+                    row["drive"] = links[0] if len(links) == 1 else " ".join(links)
+                    drive = f" Drive: {row['drive']}" + (f" (removed {', '.join(old)})." if old else ".")
+                except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+                    drive = f" Not uploaded to {p['driveRemote']}: {e}"
+            elif p.get("driveDir"):
                 try:
                     old = publish.to_drive(zips, Path(p["driveDir"]), self.engine.cfg.name or "Build", max(1, int(p.get("keep") or 3)))
                     drive = f" Copied to {p['driveDir']}" + (f" (removed {', '.join(old)})." if old else ".")
