@@ -9,7 +9,11 @@ Turned on in the profile, in `workers.builds`:
 optional: "repo" (default: the project repository), "partGb" (largest zip, default 1.9: GitHub refuses release files
 of 2 GiB or more), "driveDir" (a folder that a sync app such as Google Drive for desktop uploads, e.g.
 "G:\\My Drive\\LifeShare Builds": the zips are moved there instead of deleted, and only the newest `keep` builds' zips
-stay in it; share that folder once by link and every build in it can be downloaded without a GitHub account).
+stay in it; share that folder once by link and every build in it can be downloaded without a GitHub account),
+"driveRemote" (preferred over driveDir: an rclone remote and folder, e.g. "gdrive:LifeShare Builds". The zips are uploaded
+straight to Google Drive with `rclone copyto`, then checked there by size and MD5 before the build counts as copied, and
+older builds' zips are deleted from the remote beyond `keep`. Drive for desktop stalled for hours on a 1.9 GB zip on
+2026-11-14; rclone uploads in resumable chunks and retries. "rclone" names the binary, default "rclone").
 
 What happens to a finished build (`publish` on its row):
     zipping    the package folder is zipped without debug symbols (*.pdb) or Saved folders (logs, saves and settings
@@ -166,3 +170,55 @@ def to_drive(zips: list[Path], drive_dir: Path, prefix: str, keep: int) -> list[
                 f.unlink()
                 removed.append(f.name)
     return removed
+
+
+def _rclone(cli: str, *args: str, timeout: float = 60) -> str:
+    p = subprocess.run([cli, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    if p.returncode:
+        raise RuntimeError(f"rclone {args[0]} failed: {(p.stderr or p.stdout).strip()[-400:]}")
+    return p.stdout
+
+
+def _md5(path: Path) -> str:
+    import hashlib
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def to_remote(zips: list[Path], remote: str, prefix: str, keep: int, cli: str = "rclone") -> tuple[list[str], list[str]]:
+    """Upload this build's zips to an rclone remote folder (Google Drive), verify each arrived whole (size and MD5 as
+    Drive reports them), then delete older builds' zips there beyond the newest `keep`. Returns the names removed.
+    Raises when an upload or the check fails, so the caller can say so instead of claiming a copy that isn't there."""
+    import json
+    remote = remote.rstrip("/")
+    for z in zips:
+        _rclone(cli, "copyto", str(z), f"{remote}/{z.name}", "--drive-chunk-size", "64M", "--retries", "5",
+                "--low-level-retries", "20", "--stats", "0", timeout=6 * 3600)
+    listing = json.loads(_rclone(cli, "lsjson", remote, "--hash", "--files-only", timeout=300) or "[]")
+    there = {e["Name"]: e for e in listing}
+    for z in zips:
+        e = there.get(z.name)
+        if not e or int(e.get("Size", -1)) != z.stat().st_size:
+            raise RuntimeError(f"{z.name} is not on {remote} at full size after the upload")
+        want = (e.get("Hashes") or {}).get("md5") or (e.get("Hashes") or {}).get("MD5")
+        if want and want.lower() != _md5(z):
+            raise RuntimeError(f"{z.name} on {remote} does not match the local file (MD5)")
+    links = [_rclone(cli, "link", f"{remote}/{z.name}", timeout=120).strip() for z in zips]
+    builds: dict[str, str] = {}
+    for e in listing:
+        name = e["Name"]
+        if not (name.startswith(prefix + "-") and name.endswith(".zip")):
+            continue
+        key = name[:-4].rsplit("-part", 1)[0] if "-part" in name else name[:-4]
+        builds[key] = max(builds.get(key, ""), str(e.get("ModTime") or ""))
+    removed = []
+    for key in sorted(builds, key=builds.get, reverse=True)[max(1, keep):]:
+        for e in listing:
+            n = e["Name"]
+            if n == f"{key}.zip" or (n.startswith(f"{key}-part") and n.endswith(".zip")):
+                _rclone(cli, "deletefile", f"{remote}/{n}", timeout=300)
+                removed.append(n)
+    return removed, links

@@ -2589,11 +2589,12 @@ function renderBuilds(d) {
       ? `<button type="button" data-build-cancel="${esc(b.id)}" data-build-label="${label} build ${esc(b.version)}">${label}</button>` : "";
     const log = b.job ? `<a href="/api/jobs/log?id=${esc(b.job)}" target="_blank" rel="noopener">Log</a>` : "";
     const dl = b.download && /^https:\/\/github\.com\//.test(b.download) ? `<a href="${esc(b.download)}" target="_blank" rel="noopener">Download</a>` : "";
+    const drv = b.drive && /^https:\/\/drive\.google\.com\//.test(b.drive) ? `<a href="${esc(b.drive.split(" ")[0])}" target="_blank" rel="noopener">Drive</a>` : "";
     const pub = {zipping: "Zipping for download…", uploading: "Uploading for download…", failed: "Download upload failed", skipped: "Not uploaded"}[b.publish];
     const pubNote = pub ? `<div class="meta">${esc(pub)}${b.publish_reason && b.publish !== "zipping" ? ": " + esc(b.publish_reason) : ""}</div>` : "";
     const note = b.state === "done" && b.output ? "Package: " + b.output : b.reason;
     return `<li class="build-row ${esc(b.state)}"><div><b>${esc(b.version)}</b> <span class="chip">${esc(b.repeat ? "Repeats daily" : BUILD_STATE[b.state] || b.state)}</span></div>
-      <div class="acts">${dl} ${log} ${cancel}</div>
+      <div class="acts">${dl} ${drv} ${log} ${cancel}</div>
       <div class="meta">${what} · ${when}</div>
       ${note ? `<div class="meta">${esc(note)}</div>` : ""}${pubNote}</li>`;
   };

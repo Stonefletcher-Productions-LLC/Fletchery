@@ -112,6 +112,37 @@ class ZipTests(unittest.TestCase):
                          ["LifeShare-0.4.0-b-part1.zip", "LifeShare-0.4.0-b-part2.zip", "LifeShare-0.4.1-c.zip", "notes.txt"])
         self.assertFalse(new.exists())
 
+    def test_remote_upload_is_checked_and_old_builds_pruned(self):
+        import json
+        z = self.root / "LifeShare-0.4.3-c.zip"
+        z.write_bytes(b"build")
+        listing = [{"Name": "LifeShare-0.4.1-a.zip", "Size": 1, "ModTime": "2026-11-13T00:00:00Z"},
+                   {"Name": "LifeShare-0.4.2-b.zip", "Size": 1, "ModTime": "2026-11-14T00:00:00Z"},
+                   {"Name": "notes.txt", "Size": 1, "ModTime": "2026-11-01T00:00:00Z"},
+                   {"Name": z.name, "Size": 5, "ModTime": "2026-11-14T21:00:00Z",
+                    "Hashes": {"md5": publish._md5(z)}}]
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv[1:])
+            out = json.dumps(listing) if argv[1] == "lsjson" else ("https://drive.google.com/open?id=X\n" if argv[1] == "link" else "")
+            return mock.Mock(returncode=0, stdout=out, stderr="")
+        with mock.patch("publish.subprocess.run", side_effect=run):
+            removed, links = publish.to_remote([z], "gdrive:LifeShare Builds", "LifeShare", 2)
+        self.assertEqual(removed, ["LifeShare-0.4.1-a.zip"])
+        self.assertEqual(links, ["https://drive.google.com/open?id=X"])
+        self.assertEqual(calls[0][:3], ["copyto", str(z), "gdrive:LifeShare Builds/" + z.name])
+        self.assertIn(["deletefile", "gdrive:LifeShare Builds/LifeShare-0.4.1-a.zip"], calls)
+
+    def test_remote_upload_fails_loudly_when_the_file_is_not_there(self):
+        z = self.root / "LifeShare-0.4.3-c.zip"
+        z.write_bytes(b"build")
+        def run(argv, **kw):
+            return mock.Mock(returncode=0, stdout="[]" if argv[1] == "lsjson" else "", stderr="")
+        with mock.patch("publish.subprocess.run", side_effect=run):
+            with self.assertRaises(RuntimeError):
+                publish.to_remote([z], "gdrive:B", "LifeShare", 3)
+
 
 class HookTests(Base):
     def done_row(self, version, finished, output):
