@@ -107,6 +107,8 @@ jobs:
           python fletchery/test_emergency_workers.py
           python fletchery/test_exhausted_repairs.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python fletchery/test_dead_ends.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_plans.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_worker_handoff.py
