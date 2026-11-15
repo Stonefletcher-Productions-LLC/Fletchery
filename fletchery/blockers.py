@@ -15,6 +15,7 @@ CHILD = "<!-- fletchery-prerequisite:"
 RETRY = "<!-- fletchery-auto-retry:"
 APPLIED = "<!-- fletchery-blocker-applied:"
 COMPLETED = "<!-- fletchery-blocker-completed:"
+STRONG_RETRY = "<!-- fletchery-escalated-retry:"
 POLICY = 3  # 3 (2026-11-15): verdicts are made by the escalation agents; older needs-a-person verdicts are re-planned once
 
 
@@ -87,14 +88,20 @@ def pending(thread: dict) -> bool:
     return not plan or not plan.get("needs_human") or plan.get("policy", 1) < POLICY
 
 
-def constrain(plan: dict, thread: dict) -> dict:
-    """Keep repeated repairs bounded, while allowing a generated prerequisite itself to be repaired."""
+def constrain(plan: dict, thread: dict, strong: str = "") -> dict:
+    """Keep repeated repairs bounded, while allowing a generated prerequisite itself to be repaired.
+
+    `strong`: the planner is an escalation agent (escalation.py). Its retry for a failure gets one more go past the
+    caps, run by that agent itself: the caps were written for cheap agents repeating themselves, and on 2026-11-15
+    they sent seven LifeShare tasks to Needs you that no strong agent had ever tried."""
     if not isinstance(plan, dict):
         return plan
     reason = ""
     body = thread.get("body", "")
     if CHILD in body and (plan.get("issues") or plan.get("reuse")):
         reason = "This generated prerequisite needs more prerequisites; clarify its scope instead of expanding recursively."
+    if plan.get("retry") and strong and f"{STRONG_RETRY}{failure_key(thread)} -->" not in body:
+        return {**plan, "strong": strong}
     if plan.get("retry"):
         marker = f"{RETRY}{failure_key(thread)} -->"
         if marker in body:
@@ -147,6 +154,7 @@ async def resolve(task, ctx, out):
     from pipeline import _LimitGuard, _account, _paused, Limited
     from runtime import role_prompt
     pool, agent = ctx.agents, None
+    strong_agents: list[str] = []
     try:
         thread = ctx.gh.issue_thread(task.number)
         if thread.get("state") != "open" or graph.PREFIX not in thread.get("labels", []):
@@ -182,6 +190,7 @@ async def resolve(task, ctx, out):
                 # not the cheapest planner: a cheap planner's "needs a person" was final and filled Needs you.
                 import escalation
                 strong = [a for a in escalation.agents(pool) if pool.specs[a].enabled and pool.available(a, "planner")]
+                strong_agents = strong
                 if strong:
                     agent = strong[0]
                 else:
@@ -226,7 +235,7 @@ async def resolve(task, ctx, out):
             _account(out, r)
             if not r.ok:
                 return out
-            plan = constrain(r.output, thread)
+            plan = constrain(r.output, thread, agent if agent in strong_agents else "")
             # Old/custom planners that return no work must not churn on every poll.
             if isinstance(plan, dict) and not any(plan.get(k) for k in ("issues", "reuse", "retry", "needs_human")):
                 plan = {"issues": [], "reuse": [], "needs_human": "No actionable prerequisite identified; clarify the blocker."}
@@ -244,7 +253,13 @@ async def resolve(task, ctx, out):
             return out
         if plan.get("retry"):
             marker = f"{RETRY}{failure_key(thread)} -->"
-            ctx.gh.edit_body(task.number, current["body"].rstrip() + "\n\n## Automatic continuation\n\n" +
+            body = current["body"].rstrip()
+            if plan.get("strong"):
+                # The escalation agent that planned the retry also runs it: the cheap agent already failed this.
+                from agents import _AGENT_LINE
+                body = _AGENT_LINE.sub("", body).rstrip()
+                marker += f"\n{STRONG_RETRY}{failure_key(thread)} -->\nAgent: {plan['strong']}"
+            ctx.gh.edit_body(task.number, body + "\n\n## Automatic continuation\n\n" +
                              plan["retry"].strip() + f"\n\n{marker}\n{APPLIED}{key} -->\n")
             ctx.gh.set_status(task.number, graph.QUEUED)
             out.result, out.detail = "retry_fix", "Concrete correction recorded; queued to continue the existing branch"

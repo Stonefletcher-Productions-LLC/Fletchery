@@ -126,5 +126,20 @@ class DeskTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.why(engine).startswith("needs a person"))
 
 
+class StrongRetryTests(unittest.TestCase):
+    def thread(self, body):
+        return {"body": body, "comments": [{"fletchery": True, "id": 1, "body": "Fletchery fixer (attempt 2) could not fix PR #5: lock"}]}
+
+    def test_strong_planner_gets_one_retry_past_the_caps(self):
+        import blockers
+        body = "x " + " ".join(f"{blockers.RETRY}k{i} -->" for i in range(3))
+        plan = {"retry": "Merge Test-Staging and fix LSBuild.h", "issues": [], "reuse": [], "needs_human": ""}
+        self.assertTrue(blockers.constrain(plan, self.thread(body))["needs_human"])
+        strong = blockers.constrain(plan, self.thread(body), "opus")
+        self.assertEqual((strong["retry"], strong["strong"]), (plan["retry"], "opus"))
+        used = body + f" {blockers.STRONG_RETRY}{blockers.failure_key(self.thread(body))} -->"
+        self.assertTrue(blockers.constrain(plan, self.thread(used), "opus")["needs_human"])
+
+
 if __name__ == "__main__":
     unittest.main()
