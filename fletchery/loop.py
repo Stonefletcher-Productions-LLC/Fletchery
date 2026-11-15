@@ -631,7 +631,7 @@ class Engine:
                     t.rules = rules_mod.load(Path(cfg.project_root), cfg.project_root)
                     self._start(blockers.resolve(t, self.ctx, Outcome(t.number, "blocked")), t.number, None, None, emergency=emergency)
                 break
-        rd = readiness(tasks, closed_deps, repository_closed)
+        rd = readiness(tasks, closed_deps, repository_closed, self._stackable(tasks, prs) if cfg.stack_depth > 0 else None)
         for number in rd.waiting:
             unknown = dependency_errors.intersection(tasks[number].depends_on)
             if unknown:
@@ -974,6 +974,7 @@ class Engine:
             repository_closed = verify(declarations) if verify else set()
             self._repository_closed = repository_closed
             ready = rounds.without_failed_dependencies(ready, st.merge_excluded, self._tasks, known_closed, repository_closed)
+            ready = self._without_orphaned_stacks(ready)
         except Exception as e:  # GitHub down: try again next pass
             self.merge_why = f"couldn't list the PRs: {type(e).__name__}"
             self.ctx.log(f"merge rounds: {type(e).__name__}: {e}")
@@ -1749,6 +1750,52 @@ class Engine:
         elif self.merge_backlog <= low:
             self.backlog_paused = False
         return self.backlog_paused
+
+    def _without_orphaned_stacks(self, ready: list) -> list:
+        """Drop a stacked PR whose parent PR closed without merging: it still carries that PR's commits, and landing it
+        would bring them in unreviewed. Its fixer is told to take them out (merge_excluded at this head)."""
+        st, gh, cfg = self.state, self.ctx.gh, self.ctx.cfg
+        numbers = {p.number for p in ready}
+        keep = []
+        for p in ready:
+            m = graph.STACK_MARK.search(p.body or "")
+            parent_pr = int(m.group(2)) if m else 0
+            if not parent_pr or parent_pr in numbers:
+                keep.append(p)
+                continue
+            info = gh.issue_info(parent_pr) or {}
+            if info.get("state") != "closed" or info.get("merged"):
+                keep.append(p)
+                continue
+            st.merge_excluded[str(p.number)] = {
+                "head": p.head_sha, "round": 0, "at": now(), "disposition": "failed",
+                "why": (f"PR #{p.number} was stacked on PR #{parent_pr}, which closed without merging, so this branch "
+                        f"still carries its commits. Merge the latest {cfg.base_branch} into this branch, take out "
+                        f"PR #{parent_pr}'s changes this task does not need, and push.")}
+            self.ctx.log(f"merge rounds: #{p.number} left out: its stack parent PR #{parent_pr} closed unmerged")
+        if len(keep) != len(ready):
+            st.save(self.state_dir / "state.json")
+        return keep
+
+    def _stackable(self, tasks: dict, prs: dict) -> dict[int, str]:
+        """Open tasks whose PR a dependent may start on (graph.stack_parent): the PR is open on its task's own
+        branch, labelled for merging (so it passed review and, with a PC check, that check), and no round has left it
+        out or parked it at its current head. Issue number -> PR branch."""
+        st, cfg = self.state, self.ctx.cfg
+        label = cfg.merge_label or "ready"
+        out: dict[int, str] = {}
+        for n, t in tasks.items():
+            pr = prs.get(t.pr_number) if t.pr_number is not None else None
+            if t.status != PR or pr is None or label not in pr.labels or pr.head != t.branch:
+                continue
+            if graph.STACK_MARK.search(pr.body or ""):
+                continue  # one level only: a stacked PR is not a base for another
+            for record in (st.merge_excluded.get(str(pr.number)) or {}, st.merge_parked.get(str(pr.number)) or {}):
+                if record.get("head") == pr.head_sha:
+                    break
+            else:
+                out[n] = pr.head
+        return out
 
     def free_slots(self) -> int:
         """Normal capacity excludes the independently bounded emergency slot."""
