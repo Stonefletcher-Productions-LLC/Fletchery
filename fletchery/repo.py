@@ -144,9 +144,10 @@ class Repo:
                 raise RuntimeError("Task evidence checkout belongs to another local branch")
             return path.resolve()
 
-    def worktree(self, number: int, slug: str, branch: str, lease_file: str = "") -> Path:
+    def worktree(self, number: int, slug: str, branch: str, lease_file: str = "", stack_on: str = "") -> Path:
         """Return this task's owned active checkout. Escalated attempts use fresh paths;
-        the original checkout and all generated/staged content remain untouched."""
+        the original checkout and all generated/staged content remain untouched. `stack_on`: a brand-new branch starts
+        at that dependency's PR branch instead of the base (graph.stack_parent); an existing branch is never moved."""
         with _TASK_CHECKOUT_LOCK:
             state = self._task_checkout_state()
             path, local_branch = self._task_location(number, slug, branch, state)
@@ -162,9 +163,52 @@ class Repo:
             branches = self.git("branch", "--list", local_branch)
             if branches:
                 self._create_task_checkout(number, path, local_branch)
+            elif stack_on:
+                start = self.stack_start(stack_on)
+                self._create_task_checkout(number, path, local_branch, start)
+                self._remember_stack(path, self.git("rev-parse", start))
             else:
                 self._create_task_checkout(number, path, local_branch, f"{self.remote}/{self.base}")
             return path
+
+    def stack_start(self, parent_branch: str) -> str:
+        """Fetch a dependency's PR branch to start a stacked task on; refuses names that could be options or the base."""
+        if (not parent_branch or parent_branch.startswith("-") or ".." in parent_branch
+                or parent_branch in (self.base, "main", "master")):
+            raise RuntimeError(f"Refusing to stack on branch {parent_branch!r}")
+        self.git("fetch", "--no-tags", self.remote, f"+refs/heads/{parent_branch}:refs/remotes/{self.remote}/{parent_branch}")
+        return f"{self.remote}/{parent_branch}"
+
+    def _stacks_file(self) -> Path:
+        return self.worktree_root / ".task-stacks.json"
+
+    def _remember_stack(self, path: Path, sha: str) -> None:
+        """Which checkout started on which parent PR head, beside the checkout records (no git config: pushes and
+        diffs of ordinary tasks must not cost extra git calls)."""
+        from rounds import write_file
+        try:
+            data = json.loads(self._stacks_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data[str(Path(path).resolve())] = sha
+        write_file(str(self._stacks_file()), data)
+
+    def stack_base(self, wt: Path) -> str:
+        """The parent PR head a stacked task started on, while it has not landed on the base yet; else "".
+        Once the parent lands, the task's own work is again everything after the base."""
+        try:
+            sha = json.loads(self._stacks_file().read_text(encoding="utf-8")).get(str(Path(wt).resolve()), "")
+        except (OSError, ValueError):
+            return ""
+        if not sha:
+            return ""
+        landed = subprocess.run(["git", "merge-base", "--is-ancestor", sha, f"{self.remote}/{self.base}"], cwd=wt,
+                                env=self.env, capture_output=True, timeout=120).returncode == 0
+        return "" if landed else sha
+
+    def _own(self, wt: Path) -> str:
+        """What this task's own changes are measured against: the stack base while stacked, else the base branch."""
+        return self.stack_base(wt) or f"{self.remote}/{self.base}"
 
     def _branch_holders(self, local_branch: str) -> list[Path]:
         """Worktrees git lists with `local_branch` checked out (folders may be missing)."""
@@ -240,7 +284,12 @@ class Repo:
             attempt = uuid.uuid4().hex[:12]
             replacement = self.worktree_root / f"{number}-{slug}-attempt-{attempt}"
             candidate_branch = f"fletchery/task-{number}-attempt-{attempt}"
-            self._create_task_checkout(number, replacement, candidate_branch, f"{self.remote}/{self.base}")
+            # A stacked task's fresh attempt starts where the first one did (its parent's PR head), not at the base,
+            # or it would lose the parent's work it was written on.
+            stacked = self.stack_base(path)
+            self._create_task_checkout(number, replacement, candidate_branch, stacked or f"{self.remote}/{self.base}")
+            if stacked:
+                self._remember_stack(replacement, stacked)
             state["preserved"].append({"path": str(path.resolve()), "local_branch": local_branch,
                                        "head": self.head(path), "reason": reason[:4000], "at": now_iso()})
             state["active"][branch] = {"path": str(replacement.resolve()), "local_branch": candidate_branch}
@@ -336,11 +385,11 @@ class Repo:
         return {name for name in files if name not in own_names}
 
     def changed_files(self, wt: Path) -> list[str]:
-        out = self.git("diff", "--no-renames", "--name-only", f"{self.remote}/{self.base}...HEAD", cwd=wt, check=False)
+        out = self.git("diff", "--no-renames", "--name-only", f"{self._own(wt)}...HEAD", cwd=wt, check=False)
         return [l for l in out.splitlines() if l]
 
     def has_commits(self, wt: Path) -> bool:
-        return bool(self.git("log", "--oneline", f"{self.remote}/{self.base}..HEAD", cwd=wt, check=False))
+        return bool(self.git("log", "--oneline", f"{self._own(wt)}..HEAD", cwd=wt, check=False))
 
     def dirty(self, wt: Path) -> bool:
         return bool(self.git("status", "--porcelain", cwd=wt))
@@ -365,7 +414,7 @@ class Repo:
         publication through the project's delivery helper, or the normal hook for deletions."""
         tracked = self.lfs_tracked(wt, self.changed_files(wt))
         if tracked:
-            grant = self._asset_grant(wt, tracked, f"{self.remote}/{self.base}...HEAD")
+            grant = self._asset_grant(wt, tracked, f"{self._own(wt)}...HEAD")
             self._publish_assets(wt, branch, grant)
             return
         self.git("push", "--no-verify", "-u", self.remote, f"HEAD:{branch}", cwd=wt)
@@ -418,10 +467,16 @@ class FakeRepo:
     def fetch_base(self):
         self.fetched += 1
 
-    def worktree(self, number, slug, branch, lease_file=""):
+    def worktree(self, number, slug, branch, lease_file="", stack_on=""):
         p = self.active_checkouts.get(branch, self.worktree_root / f"{number}-{slug}")
         p.mkdir(parents=True, exist_ok=True)
+        if stack_on:
+            self.stacked = getattr(self, "stacked", {})
+            self.stacked[number] = stack_on
         return p
+
+    def stack_base(self, wt):
+        return ""
 
     def existing_task_worktree(self, number, slug, branch):
         path = self.active_checkouts.get(branch, self.worktree_root / f"{number}-{slug}")
