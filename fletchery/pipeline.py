@@ -85,6 +85,7 @@ class Outcome:
     attempts: list[dict] = field(default_factory=list)  # [{"agent", "difficulty", "role", "ok", "why"}]: what Stats learns from
     worker_rank: str = ""    # capacity bucket at first admission
     costs: dict = field(default_factory=dict)  # agent -> USD this outcome spent on it (writer and reviewer apart)
+    report: dict = field(default_factory=dict)  # the session's own answer, where the caller needs more than detail (escalation)
 
 
 @dataclass
@@ -575,7 +576,47 @@ def fixer_agent(ctx: Context, task: Task, attempt: int) -> str | None:
     return c.agent if c else None
 
 
-async def _fix_session(task, pr, attempt, ctx, out, rt, wt, fb, agent) -> Outcome:
+async def escalate_pr(task: Task, pr: PullRequest, why: str, agent: str, earlier: list[str], ctx: Context) -> Outcome:
+    """One escalation session (escalation.py): a strong agent, a fresh merge of the base, a large turn budget. It never
+    hands on to the blocker planner; the engine reads the report (fixed, closed, needs the owner, or gave up)."""
+    import escalation
+    cfg, repo, pool = ctx.cfg, ctx.repo, ctx.agents
+    out = Outcome(task.number, "gave_up", pr_number=pr.number, agent=agent)
+    if pool is None or not pool.available(agent, "fixer"):
+        out.result, out.detail = "agent_paused", f"{agent} is not free for an escalation"
+        return out
+    if ctx.live:
+        ctx.live.stage(task.number, f"Escalated to {agent}: PR #{pr.number}", task.title, kind="fix")
+    pool.acquire(agent)
+    try:
+        await asyncio.to_thread(_load_notes, ctx, task)
+        await asyncio.to_thread(repo.fetch_base)
+        try:
+            wt = await asyncio.to_thread(repo.repair_worktree, task.number, task.slug, pr.head, pr.head_sha)
+            await asyncio.to_thread(repo.ensure_repair_checkout, wt, pr.head, pr.head_sha, cfg.heavy_lease_file)
+        except LeaseBusy:
+            return _resource_wait(ctx, out, "heavy")
+        task.rules = rules_mod.load(wt, cfg.project_root)
+        rt = _LimitGuard(pool.runtime(agent), ctx, task.number, agent)
+        ctx.task_agents[str(task.number)] = agent
+        ctx.log(f"PR #{pr.number} (task #{task.number}) escalated to {agent}")
+        fb = "### escalation\n" + escalation.brief(why, cfg.base_branch, agent, earlier)
+        budget = max(cfg.fixer_budget_usd, getattr(cfg, "planner_budget_usd", 0) or 0) * 3
+        return await _fix_session(task, pr, 1, ctx, out, rt, wt, fb, agent, max_turns=escalation.MAX_TURNS,
+                                  budget_usd=budget)
+    except Limited as e:
+        if _paused(ctx, out, e, f"PR #{pr.number} escalation"):
+            return out
+        out.result, out.detail = "limited", str(e.args[0])[:200]
+        return out
+    finally:
+        pool.release(agent)
+        if ctx.live:
+            ctx.live.done(task.number)
+
+
+async def _fix_session(task, pr, attempt, ctx, out, rt, wt, fb, agent, max_turns: int | None = None,
+                       budget_usd: float | None = None) -> Outcome:
     cfg, gh, repo = ctx.cfg, ctx.gh, ctx.repo
     local_branch = await asyncio.to_thread(_branch_at, repo, wt, task.branch)
     fb += f"\n\nThe local repair branch is `{local_branch}`. The controller alone pushes the checked fix to existing PR branch `{pr.head}`; do not push or recreate its branch."
@@ -584,9 +625,15 @@ async def _fix_session(task, pr, attempt, ctx, out, rt, wt, fb, agent) -> Outcom
     issue = _issue_text(task) + (ctx.handoffs.note(task.number, wt) if ctx.handoffs else "")
     prompt = role_prompt("fixer", task.rules, project=cfg.name, issue=issue, branch=local_branch, base=cfg.base_branch, pr=str(pr.number),
                          feedback=fb, freeze=_freeze_text(cfg))
-    r = await rt.run("fixer", prompt, wt, cfg.fixer_budget_usd, cfg.fixer_max_turns)
+    r = await rt.run("fixer", prompt, wt, budget_usd or cfg.fixer_budget_usd, max_turns or cfg.fixer_max_turns)
     _account(out, r)
+    out.report = dict(r.output or {}) if isinstance(r.output, dict) else {}
     if await _checkpoint(ctx, task, out, wt, "repair writing", r.output, pr):
+        return out
+    if r.ok and (r.output.get("needs_alex") or r.output.get("close")) and not r.output.get("gave_up"):
+        # Escalation verdicts (escalation.py): nothing to check or push; the engine acts on the report.
+        out.detail = str(r.output.get("needs_alex") or r.output.get("close"))
+        out.result = "escalated"
         return out
     if not r.ok or r.output.get("gave_up"):
         out.detail = r.error or r.output.get("gave_up", "")

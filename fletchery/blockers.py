@@ -15,7 +15,7 @@ CHILD = "<!-- fletchery-prerequisite:"
 RETRY = "<!-- fletchery-auto-retry:"
 APPLIED = "<!-- fletchery-blocker-applied:"
 COMPLETED = "<!-- fletchery-blocker-completed:"
-POLICY = 2
+POLICY = 3  # 3 (2026-11-15): verdicts are made by the escalation agents; older needs-a-person verdicts are re-planned once
 
 
 def failures(thread: dict) -> list[dict]:
@@ -178,10 +178,17 @@ async def resolve(task, ctx, out):
                            json.dumps(plan, ensure_ascii=False) + "\n-->")
         if plan is None:
             if pool is not None:
-                choice = pool.choose("Plan prerequisite tasks", thread["body"], [], 0, role="planner")
-                if not choice:
-                    return out
-                agent = choice.agent
+                # The verdict that decides whether the owner is asked comes from the strongest agents (escalation.py),
+                # not the cheapest planner: a cheap planner's "needs a person" was final and filled Needs you.
+                import escalation
+                strong = [a for a in escalation.agents(pool) if pool.specs[a].enabled and pool.available(a, "planner")]
+                if strong:
+                    agent = strong[0]
+                else:
+                    choice = pool.choose("Plan prerequisite tasks", thread["body"], [], 0, role="planner")
+                    if not choice:
+                        return out
+                    agent = choice.agent
                 pool.acquire(agent)
             rt = pool.runtime(agent) if pool is not None else ctx.runtime
             cwd = await asyncio.to_thread(planner_root, task, ctx)
@@ -192,8 +199,11 @@ async def resolve(task, ctx, out):
                     "Do not implement, create issues, send comments or change files yourself. "
                     "Return JSON with issues (at most 3 independent same-project tasks, each title, body, depends_on: []), "
                     "reuse (existing issue numbers), retry (concrete instructions to repair/resume THIS branch), "
-                    "and needs_human (empty unless a real decision, credentials, "
-                    "missing input or inaccessible repository/capability requires a person). Never invent a decision "
+                    "and needs_human (empty unless only the project owner can do the next step: an exact settings.json allow line, "
+                    "a GitHub page and button, an account or credential, or a product decision the docs do not answer; "
+                    "write the exact action and your recommendation). Missing Build-PC runs, imports, captures or node "
+                    "evidence are lane checks to carry in retry, not owner actions; design questions are answered from "
+                    "the project's docs and issue chain in retry. Never invent a decision "
                     "or make another issue that the same restricted worker cannot execute. Include acceptance checks. "
                     "Reuse existing work rather than duplicating it. Do not create a prerequisite depending on its parent. "
                     "Read the task worktree's saved draft prerequisites and relevant source/review evidence. "

@@ -202,6 +202,9 @@ class GitHub:
     def close_issue(self, number: int) -> None:
         self.api(f"repos/{self.repo}/issues/{number}", "PATCH", {"state": "closed", "state_reason": "completed"})
 
+    def close_pr(self, number: int) -> None:
+        self.api(f"repos/{self.repo}/pulls/{number}", "PATCH", {"state": "closed"})
+
     def edit_body(self, number: int, body: str) -> None:
         self.api(f"repos/{self.repo}/issues/{number}", "PATCH", {"body": body})
 
@@ -528,6 +531,9 @@ class FakeGitHub:
 
     def closed_by_merged_pr(self, number, base):
         return getattr(self, "closed_by_merge", {}).get(number)
+
+    def close_pr(self, number):
+        self.writes.append(f"close PR #{number}")
 
     def close_issue(self, number):  # also what the lane does when a PR with "Closes #n" lands
         self.writes.append(f"close #{number}")
