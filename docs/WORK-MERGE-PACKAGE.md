@@ -185,3 +185,14 @@ run `npm ci --prefix ui` followed by `npm test --prefix ui`. Set
 `overview-light.png`, `merge-pr-progress-dark.png`, and `merge-windows-dark.png`.
 
 If an interrupted round lands through a separate recovery, the CLI recovery route can reconcile it using the round number and landing PR. Planned windows or a merge hold must be active. Fletchery verifies the landing branch and every saved PR head with GitHub before clearing recovery.
+
+## Is work flowing?
+
+The status page has a **Flow (last 24 h)** section: PRs opened, repairs per PR, give-ups, merge rounds and the PRs
+they landed (from `<state>/rounds.jsonl`), the time from an open task's issue to its PR, and the slot-hours that were
+free while tasks were queued, filed under the most common reason those tasks gave (needs a person, waits for a
+dependency to merge, waits for a repair, waits for an agent, waits for a machine or lease, on hold).
+
+When slots stay free for 30 minutes with tasks queued and nothing starts (and Fletchery is not deliberately holding
+work), Fletchery comments once on the **Fletchery round alerts** issue with each cause, its count and an example task,
+and again when tasks start. `python fletchery/test_flow.py` covers the rules.
