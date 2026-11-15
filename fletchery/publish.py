@@ -13,7 +13,8 @@ stay in it; share that folder once by link and every build in it can be download
 "driveRemote" (preferred over driveDir: an rclone remote and folder, e.g. "gdrive:LifeShare Builds". The zips are uploaded
 straight to Google Drive with `rclone copyto`, then checked there by size and MD5 before the build counts as copied, and
 older builds' zips are deleted from the remote beyond `keep`. Drive for desktop stalled for hours on a 1.9 GB zip on
-2026-11-14; rclone uploads in resumable chunks and retries. "rclone" names the binary, default "rclone").
+2026-11-14; rclone uploads in resumable chunks and retries. "rclone" names the binary, default "rclone"),
+"driveKeep" (how many builds stay on Drive, default `keep`; Alex 2026-11-15: two at most on Drive).
 
 What happens to a finished build (`publish` on its row):
     zipping    the package folder is zipped without debug symbols (*.pdb) or Saved folders (logs, saves and settings

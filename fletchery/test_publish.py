@@ -179,6 +179,18 @@ class HookTests(Base):
         self.wait()
         self.assertNotIn("publish", old)
 
+    def test_drive_keeps_its_own_count(self):
+        self.engine.cfg.builds = {"publish": {"to": "github", "keep": 3, "driveRemote": "gdrive:B", "driveKeep": 2}}
+        self.engine.ctx.gh = FakeGitHub()
+        row = self.done_row("0.4.0", "2026-11-12T04:00:00+00:00", package(self.engine.state_dir))
+        with mock.patch("publish.subprocess.run", return_value=mock.Mock(returncode=0)), \
+                mock.patch("publish.to_remote", return_value=([], ["https://drive.google.com/x"])) as remote:
+            self.b._publish_next()
+            self.wait()
+        self.assertEqual(row["publish"], "published", row.get("publish_reason"))
+        self.assertEqual(remote.call_args[0][3], 2)
+        self.assertEqual(row["drive"], "https://drive.google.com/x")
+
     def test_missing_folder_is_skipped_and_upload_failure_recorded(self):
         self.engine.cfg.builds = {"publish": {"to": "github", "keep": 3}}
         self.engine.ctx.gh = FakeGitHub()
