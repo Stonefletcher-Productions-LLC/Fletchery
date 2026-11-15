@@ -53,6 +53,7 @@ class State:
     merge_parked: dict = field(default_factory=dict)           # PR -> {head, count, why, parked}: deferred again and again at one head
     merge_split: dict = field(default_factory=dict)            # {from_round, why, groups: [[{pr, head}]]}: a failed batch tried in parts
     merge_base_red: dict = field(default_factory=dict)         # {round, why, at}: the base branch itself fails; only fixes go in
+    flow: dict = field(default_factory=dict)                   # idle slots with a queue and why (flow.py)
     merge_starved: dict = field(default_factory=dict)          # {since, blocked, alerted, retried}: ready PRs but none eligible (watchdog.py)
     storage_last: dict = field(default_factory=dict)          # latest bounded cleanup result
     storage_requested: bool = False
@@ -726,6 +727,13 @@ class Engine:
         # Merge eligibility must see this pass's issue dependencies, including on
         # the very first pass after startup rather than the previous snapshot.
         self._tasks, self._prs, self._waiting = tasks, prs, rd.waiting
+        if not self.dry_run:
+            import flow
+            try:
+                flow.idle_pass(self, self.free_slots(), sum(1 for t in tasks.values() if t.status == QUEUED),
+                               len(chosen), bool(worker_paused or backlog_full or not budget_left), rd.waiting)
+            except Exception as e:  # the report never stops dispatch
+                self.ctx.log(f"flow: {type(e).__name__}: {e}")
         self.snapshot = self.make_snapshot(tasks, prs, rd.waiting, [])
         self._maybe_storage(tasks, draining)
 
@@ -1280,6 +1288,11 @@ class Engine:
         if request_id:
             res["request_id"] = request_id
         self.state.merge_last = res
+        try:
+            import flow
+            flow.record_round(self.state_dir, n, res, [p.number for p in batch])
+        except Exception as e:
+            self.ctx.log(f"flow: could not record round {n}: {type(e).__name__}: {e}")
         self.state.save(self.state_dir / "state.json")
         if res["result"] in ("failed", "crashed", "checkout_failed"):
             try:
@@ -2266,6 +2279,11 @@ class Engine:
         L += section("Running", [f"- #{t.number} {t.title} (since {st.running.get(str(t.number), '?')}{by(t)})" for t in running], "(nothing)")
         queued = [t for t in tasks.values() if t.status == QUEUED]
         L += section("Queue", [f"- #{t.number} {t.title}: {waiting.get(t.number, 'ready')}" for t in queued], "(empty)")
+        try:
+            import flow
+            L += flow.report(self.state_dir, tasks, st.flow)
+        except Exception as e:
+            L += [f"## Flow (last 24 h)", f"- (could not build the report: {type(e).__name__})", ""]
         merge = self.merge_rows(tasks, prs)
         mv = self.merge_view
         L += ["## Merge", f"**Now:** {mv['headline']}", ""]
