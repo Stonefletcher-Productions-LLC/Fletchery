@@ -98,7 +98,11 @@ Rules say how; the issue says what. A task a worker finishes on its own usually 
 - **Where**, if you know: a file, a screen, a function.
 - **How to tell it worked**: what a person would see, or which test should pass.
 - **What not to touch**, if there is a nearby trap.
-- `Depends on: #12` on its own line if it must wait for another task.
+- `Depends on: #12` on its own line if it must wait for another task. Once #12's PR is labelled `ready` (it passed
+  review and the PR check), a task whose only open dependency is #12 starts on that PR's branch instead of waiting for
+  it to merge; its PR says "Stacked on PR #n" and merge rounds land it with or after the parent. Only one level stacks,
+  and a task with two open dependencies still waits. Write `Depends on (merged): #12` when the task needs #12 landed
+  on the base first (asset imports, captures of the merged game). `workers.stackDepth: 0` turns stacking off.
 
 Comments on the issue count too: every worker reads the issue and all its comments before starting, so answering a
 question in a comment and re-queueing the task is the normal way to steer.

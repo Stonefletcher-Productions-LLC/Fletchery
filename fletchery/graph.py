@@ -21,7 +21,10 @@ def label_for(state: str) -> str:
 def is_status_label(name: str) -> bool:
     return name.startswith(PREFIX + ":") and name.split(":", 1)[1] in STATES
 
-_DEPENDS = re.compile(r"^\s*depends\s+on\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+# `Depends on: #n` or `Depends on (merged): #n`. The second form never stacks: the task needs #n landed on the base
+# (asset imports, native captures), not just its PR's branch.
+_DEPENDS = re.compile(r"^\s*depends\s+on\s*(\(\s*merged\s*\))?\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+STACK_MARK = re.compile(r"<!-- fletchery-stacked-on:(\d+):(\d+):([0-9a-f]{7,40}) -->")
 _GATE = re.compile(r"^\s*gate\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 _IMPORTS = re.compile(r"^\s*lane-imports\s*:\s*(.*)$", re.IGNORECASE | re.MULTILINE)
 _ISSUE_REF = re.compile(r"(?:(?P<repo>[\w.-]+/[\w.-]+))?#(?P<number>\d+)")
@@ -86,6 +89,10 @@ class Task:
     closed: bool = False
     created_at: str = ""
     pr_number: int | None = None  # the open PR that says "Closes #<number>", if any
+    stack_on: str = ""            # set by readiness(): start this task on that PR branch instead of the base
+    stack_parent: int | None = None  # the dependency whose PR branch it starts on
+    stack_pr: int | None = None      # that dependency's PR
+    stack_sha: str = ""              # the parent PR head this task's branch started on (set by the pipeline)
     notes: str = ""               # people's comments on the issue, filled just before a session (pipeline.py)
     rules: object = None          # the project's rules (rules.Rules), loaded from the task's worktree
 
@@ -97,9 +104,18 @@ class Task:
     def repository_dependencies(self) -> set[tuple[str, int]]:
         return {(repo.lower(), int(number)) for repo, number in self._dependency_refs() if repo}
 
+    @property
+    def merged_dependencies(self) -> set[int]:
+        """Dependencies named on a `Depends on (merged):` line: they must land before this task starts."""
+        out: set[int] = set()
+        for line in _DEPENDS.finditer(self.body or ""):
+            if line.group(1):
+                out.update(int(number) for repo, number in _ISSUE_REF.findall(line.group(2)) if not repo)
+        return out
+
     def _dependency_refs(self):
         for line in _DEPENDS.finditer(self.body or ""):
-            yield from _ISSUE_REF.findall(line.group(1))
+            yield from _ISSUE_REF.findall(line.group(2))
 
     @property
     def gates(self) -> list[str]:
@@ -167,10 +183,34 @@ def find_cycles(tasks: dict[int, Task]) -> set[int]:
     return on_cycle
 
 
+def stack_parent(tasks: dict[int, Task], t: Task, open_deps: list[int], stackable: dict[int, str],
+                 known_closed: set[int], repository_closed: set[tuple[str, int]]) -> int | None:
+    """The one open dependency `t` may start on top of, or None.
+
+    LifeShare 2026-11-15: 67 of 91 queued tasks waited for a dependency's PR to land on Test-Staging while 9 of 10
+    slots sat idle. A dependency whose PR has passed review and its PR check (`stackable`: issue -> PR branch) is good
+    enough to build on. Only one level: the parent itself must have nothing open under it, so it is based on the base
+    branch, and a task with two open dependencies waits (a branch has one starting point)."""
+    if len(open_deps) != 1:
+        return None
+    d = open_deps[0]
+    if d not in stackable or d in t.merged_dependencies:
+        return None
+    parent = tasks.get(d)
+    if parent is None or parent.repository_dependencies - repository_closed:
+        return None
+    if any(x not in known_closed for x in parent.depends_on):
+        return None
+    return d
+
+
 def readiness(tasks: dict[int, Task], known_closed: set[int] | None = None,
-              repository_closed: set[tuple[str, int]] | None = None) -> Readiness:
+              repository_closed: set[tuple[str, int]] | None = None,
+              stackable: dict[int, str] | None = None) -> Readiness:
     """Which queued tasks may run now. `tasks` are the open `foreman` issues; `known_closed` are issue numbers that are
-    closed (dependencies that are done). A dependency that is neither open-and-known nor closed is treated as missing."""
+    closed (dependencies that are done). A dependency that is neither open-and-known nor closed is treated as missing.
+    `stackable` (issue -> PR branch) lists dependencies whose PR is ready to build on; a task whose only open dependency
+    is one of them is ready, with `stack_on` set to that branch (see stack_parent)."""
     known_closed = known_closed or set()
     repository_closed = repository_closed or set()
     cycles = find_cycles(tasks)
@@ -197,11 +237,29 @@ def readiness(tasks: dict[int, Task], known_closed: set[int] | None = None,
         if missing:
             waiting[n] = "depends on missing issue " + ", ".join(f"#{d}" for d in missing)
         elif open_deps:
-            waiting[n] = waits_text(tasks, open_deps)
+            d = stack_parent(tasks, t, open_deps, stackable, known_closed, repository_closed) if stackable else None
+            if d is None:
+                waiting[n] = waits_text(tasks, open_deps)
+            else:
+                t.stack_on, t.stack_parent, t.stack_pr = stackable[d], d, tasks[d].pr_number
+                ready.append(t)
         else:
+            t.stack_on, t.stack_parent, t.stack_pr = "", None, None
             ready.append(t)
     ready.sort(key=lambda t: (t.created_at, t.number))
     return Readiness(ready, waiting)
+
+
+def stack_note(t: Task) -> str:
+    """What a stacked task's worker and reviewer are told, so they build on the parent and review only their own part."""
+    if not t.stack_on:
+        return ""
+    pr = f"PR #{t.stack_pr}" if t.stack_pr else "its PR"
+    return (f"\n\n## Stacked on #{t.stack_parent}\nThis task depends on #{t.stack_parent}, whose {pr} (branch "
+            f"`{t.stack_on}`) has passed review and its PR check but has not merged yet. This branch starts from that "
+            "PR's head, so its changes are already here: build on them, and change them only where this task needs it. "
+            "Judge and describe only the commits after that starting point. The merge round lands both PRs together, "
+            "the parent first.\n")
 
 
 def waits_text(tasks: dict[int, Task], deps: list[int]) -> str:

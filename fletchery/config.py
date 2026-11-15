@@ -38,7 +38,7 @@ WORKER_KEYS = {
     "taskBackupDir": "task_backup_dir", "taskBackupDays": "task_backup_days", "diskReportRoot": "disk_report_root",
     "emergencyWorkers": "emergency_workers", "workerRankLimits": "worker_rank_limits",
     "assetTasks": "asset_tasks", "workerAllowedTools": "worker_allowed_tools", "workerDirs": "worker_dirs",
-    "autoPrerequisites": "auto_prerequisites",
+    "autoPrerequisites": "auto_prerequisites", "stackDepth": "stack_depth",
     "enabled": "workers_enabled", "projectRoot": "project_root", "baseBranch": "base_branch", "assignee": "assignee",
     "worktreeRoot": "worktree_root", "stateDir": "state_dir", "maxParallel": "max_parallel", "pollMinutes": "poll_minutes",
     "model": "model", "auth": "auth", "limitBackoffMinutes": "limit_backoff_minutes",
@@ -99,6 +99,7 @@ class Config:
     worker_allowed_tools: list = None
     worker_dirs: list = None
     auto_prerequisites: bool = True          # turn actionable blocks into dependencies, not repeated human prompts
+    stack_depth: int = 1                     # a task may start on its one open dependency's PR branch once that PR is `ready` (0 = off)
     poll_minutes: float = 10
     dashboard_port: int = 8770               # http://127.0.0.1:<port> while Fletchery runs
     model: str = ""                          # "" = the Claude CLI's default

@@ -345,13 +345,19 @@ async def _attempt(task: Task, ctx: Context, out: Outcome, agent: str | None, hi
     except Exception as e:  # a network blip says nothing about the task (LifeShare #1071/#1101, 2026-11-07)
         return await asyncio.to_thread(_requeue_or_block, ctx, task, out, f"could not fetch the base branch: {e}")
     try:
-        wt = await asyncio.to_thread(repo.worktree, task.number, task.slug, task.branch, cfg.heavy_lease_file)
+        if task.stack_on:
+            wt = await asyncio.to_thread(repo.worktree, task.number, task.slug, task.branch, cfg.heavy_lease_file,
+                                         task.stack_on)
+        else:
+            wt = await asyncio.to_thread(repo.worktree, task.number, task.slug, task.branch, cfg.heavy_lease_file)
         await asyncio.to_thread(repo.ensure_task_checkout, task.number, task.slug, task.branch, wt, cfg.heavy_lease_file)
     except LeaseBusy:
         return _resource_wait(ctx, out, "heavy")
     except Exception as e:
         return _block(ctx, out, f"could not make the worktree: {e}")
     local_branch = await asyncio.to_thread(_branch_at, repo, wt, task.branch)
+    if task.stack_on:
+        task.stack_sha = await asyncio.to_thread(repo.stack_base, wt)
     task.rules = rules_mod.load(wt, cfg.project_root)
     async def fail(why, infra=False):
         return await _fail(ctx, task, out, wt, agent, why, infra)
@@ -724,7 +730,7 @@ def _history_text(history: list[str]) -> str:
 
 
 def _issue_text(task: Task) -> str:
-    text = f"Issue #{task.number}: {task.title}\n\n{task.body or '(no body)'}"
+    text = f"Issue #{task.number}: {task.title}\n\n{task.body or '(no body)'}" + graph.stack_note(task)
     if task.notes:
         text += ("\n\n## Comments on the issue (oldest first; a later comment overrides an earlier one and the body)\n\n"
                  + task.notes)
@@ -888,6 +894,10 @@ def _requeue_or_block(ctx: Context, task: Task, out: Outcome, why: str) -> Outco
     return out
 
 
+def _stack_sha(task: Task) -> str:
+    return task.stack_sha or "0000000"
+
+
 def pr_body(task: Task, report: dict, results: list[gates_mod.GateResult], review: dict, cfg: Config,
             out: Outcome | None = None) -> str:
     steps = [f"- {s}" for s in report.get("build_steps", [])] or ["- Tools\\Build.ps1"]
@@ -897,6 +907,12 @@ def pr_body(task: Task, report: dict, results: list[gates_mod.GateResult], revie
     if task.repository_dependencies:
         refs = ", ".join(f"{repo}#{number}" for repo, number in sorted(task.repository_dependencies))
         lines[1:1] = ["", f"Depends on: {refs}"]
+    if task.stack_on and task.stack_pr:
+        # Rounds already keep a PR out until its open dependency's PR is in the same candidate (rounds.py); the line
+        # tells people, and the marker lets Fletchery spot a parent PR that closed without merging (loop.py).
+        lines[1:1] = ["", f"**Stacked on PR #{task.stack_pr}** (#{task.stack_parent}): this branch contains that PR's "
+                          "commits, so it lands with or after it.",
+                      f"<!-- fletchery-stacked-on:{task.stack_parent}:{task.stack_pr}:{_stack_sha(task)} -->"]
     if report.get("save_version"):
         lines += ["", f"**Save version:** {report['save_version']}"]
     if report.get("likely_conflicts"):
