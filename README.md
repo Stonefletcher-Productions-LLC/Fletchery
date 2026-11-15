@@ -411,7 +411,8 @@ output during data validation and native specs when available. The round checkpo
 | PRs are labelled `ready` but no round starts | Read the newest comment on the **Fletchery round alerts** issue: it lists each PR and what holds it (a conflict, a failed head, a park, a prerequisite). A new head on a PR frees it at once |
 | "Can't reach Fletchery's backend" | The app restarts it by itself. If it stays, quit from the tray and reopen; the log is under **Open log folder** in the tray menu |
 | The backend stopped after an install and never came back | It exits (code 75) to reload new code, and only the app or `shell\Start-Fletchery.ps1` starts it again. A backend started bare with `python -m fletchery run` has neither: run it through `Start-Fletchery.ps1 -Profile <file>` instead |
-| A task keeps landing under **Needs you** | Read the last comment on its issue: it says what a person must decide |
+| A task keeps landing under **Needs you** | It only gets there after the escalation agents (`routing.escalationAgents`, default opus then fable) tried to fix or classify it. "Only you can do this: …" names the exact action; "… could not fix or classify it" retries by itself 24 h later. To keep the desk off PRs someone lands by hand, list them in `<state>\escalation-hold.json` as `{"prs": [n], "until": "<ISO>"}` |
+| The backend is down after a reboot or a sign-out | Register the watchdog once: `shell\Register-FletcheryWatch.ps1`. Every 10 min it starts the supervisor when nothing runs and alerts on the round-alerts issue when passes stall |
 | The Build Lane panel is missing | Fill in the Build Lane's status file (and pause file, drive) in **Settings** |
 | Fletchery did not start: Python | Install Python 3.10+ from python.org with *Add to PATH*, then run the installer again |
 

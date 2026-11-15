@@ -113,6 +113,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_dead_ends.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python fletchery/test_escalation.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_plans.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_worker_handoff.py

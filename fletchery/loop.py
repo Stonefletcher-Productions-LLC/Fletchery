@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from config import Config
 import deadends
+import escalation
 import graph
 from graph import BLOCKED, PR, QUEUED, RUNNING, Task, readiness, pick
 from github import PullRequest, Feedback
@@ -69,6 +70,7 @@ class State:
     resource_waits: dict = field(default_factory=dict)        # task -> earliest readiness check (ISO); survives restart
     blocker_checked: dict = field(default_factory=dict)       # task -> last planner dispatch; fair across deferred blocks
     dead_end_noted: dict = field(default_factory=dict)        # task -> dead prerequisites last reported on it (deadends.py)
+    escalations: dict = field(default_factory=dict)          # task -> {key, tier, agent, running, verdict, action, summary, at} (escalation.py)
 
     @staticmethod
     def load(path: Path) -> "State":
@@ -639,6 +641,7 @@ class Engine:
                 rd.waiting[number] = "prerequisite status unavailable; retrying GitHub for " + ", ".join(f"#{d}" for d in sorted(unknown))
         self._dead_end_dependencies(tasks, rd.waiting, closed_deps, dependency_errors)
         fixing = {t.number for t in by_pr.values()}
+        escalation_budget = [0 if paused or not budget_left else escalation.MAX_PER_PASS]
         for pr_num, t in by_pr.items():
             # A queued task with an open PR moves only through fixers; say why when none started (it showed "ready").
             if t.status != QUEUED or t.number in self.active:
@@ -646,12 +649,15 @@ class Engine:
             parked = st.merge_parked.get(str(pr_num)) or {}
             pr = prs.get(pr_num)
             if parked and pr is not None and parked.get("head") == pr.head_sha:
-                rd.waiting[t.number] = ("needs a person: PR #%d is parked (deferred twice at this head): %s"
-                                        % (pr_num, " ".join(str(parked.get("why", "")).split())[:240])).strip()
-                continue
-            stuck = (exhausted_wait(t.number, pr, st.merge_excluded.get(str(pr_num), {}),
-                                    st.fix_attempts.get(str(pr_num), 0), cfg.fixer_attempts, st.seen.get(str(pr_num)))
-                     or deadends.check_stuck_wait(pr, st.pr_checks.get(str(pr_num)) or {}, st.seen.get(str(pr_num))))
+                stuck = ("needs a person: PR #%d is parked (deferred twice at this head): %s"
+                         % (pr_num, " ".join(str(parked.get("why", "")).split())[:240])).strip()
+            else:
+                stuck = (exhausted_wait(t.number, pr, st.merge_excluded.get(str(pr_num), {}),
+                                        st.fix_attempts.get(str(pr_num), 0), cfg.fixer_attempts, st.seen.get(str(pr_num)))
+                         or deadends.check_stuck_wait(pr, st.pr_checks.get(str(pr_num)) or {}, st.seen.get(str(pr_num))))
+            if stuck.startswith(deadends.NEEDS) and pr is not None:
+                # Nothing goes to Needs you before a strong agent has had a go (escalation.py).
+                stuck = self._escalate_stuck(t, pr, stuck, worker_paused, escalation_budget) or stuck
             rd.waiting[t.number] = stuck or f"repairing PR #{pr_num}: waits for new feedback or a free repair slot"
         rd.ready = [t for t in rd.ready if t.number not in self.active and t.number not in fixing]
         free_resources = []
@@ -1831,6 +1837,93 @@ class Engine:
                 return numbers
             numbers.update(deps)
 
+    def _escalation_held(self, pr_num: int) -> bool:
+        """`<state>/escalation-hold.json` {"prs": [..], "until": ISO}: PRs a person or another session is landing by
+        hand; the desk leaves them alone until then."""
+        try:
+            data = json.loads((self.state_dir / "escalation-hold.json").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return False
+        until = str(data.get("until", ""))
+        if until and until < now():
+            return False
+        return pr_num in {int(x) for x in data.get("prs", []) if str(x).isdigit()}
+
+    def _escalate_stuck(self, task, pr, why: str, worker_paused: bool, budget: list) -> str:
+        """A queued task that would say "needs a person": hand it to the next escalation tier, or say where it stands.
+        Returns the dashboard text, or "" to keep `why` (no escalation agent configured, or held)."""
+        st, pool = self.state, self.ctx.agents
+        tiers = [a for a in escalation.agents(pool) if pool.specs[a].enabled]
+        if not tiers or self._escalation_held(pr.number):
+            return ""
+        key = escalation.failure_key(pr.head_sha, why)
+        record = st.escalations.get(str(task.number))
+        tier = escalation.next_tier(record, key, len(tiers))
+        if tier is None or task.number in self.active:
+            return escalation.wait_text(record, key, tiers)
+        agent = tiers[tier]
+        if not pool.available(agent, "fixer"):
+            return f"{escalation.ESCALATED}{agent} when it is free (a stronger agent looks before it reaches you)"
+        emergency = self.emergency_free() > 0 and bool(self.cfg.emergency_workers)
+        if budget[0] <= 0 or (not emergency and (worker_paused or self.free_slots() <= 0)):
+            return f"{escalation.ESCALATED}{agent} at the next free slot (a stronger agent looks before it reaches you)"
+        budget[0] -= 1
+        earlier = list((record or {}).get("history", [])) if record and record.get("key") == key else []
+        self.last_plan.append(f"escalate PR #{pr.number} (task #{task.number}) to {agent}")
+        if self.dry_run:
+            return f"{escalation.ESCALATED}{agent}"
+        st.escalations[str(task.number)] = {"key": key, "tier": tier, "agent": agent, "running": True, "at": now(),
+                                            "pr": pr.number, "why": why[:500], "history": earlier[-4:]}
+        st.save(self.state_dir / "state.json")
+        import pipeline
+        self._start(pipeline.escalate_pr(task, pr, why, agent, earlier, self.ctx), task.number, pr.number,
+                    st.seen.get(str(pr.number)), emergency=emergency)
+        return f"{escalation.ESCALATED}{agent}: fixing or classifying it before it reaches you"
+
+    def _settle_escalation(self, o) -> None:
+        """Record what an escalation session decided, and act on a close verdict."""
+        st, gh = self.state, self.ctx.gh
+        rec = st.escalations.get(str(o.task))
+        if not rec or not rec.get("running"):
+            return
+        rec["running"] = False
+        rec["at"] = now()
+        report = o.report or {}
+        if o.result in ("limited", "signed_out", "agent_paused", "waiting_resource", "requeue", "handed_off"):
+            rec["tier"] = int(rec.get("tier", 0)) - 1  # not a real try: the same tier goes again
+            return
+        summary = " ".join(str(report.get("summary") or o.detail or "").split())[:600]
+        rec["summary"] = summary
+        rec.setdefault("history", []).append(f"{rec.get('agent')}: {o.result}: {summary[:300]}")
+        if o.result == "fixed":
+            rec["verdict"] = "fixed"
+            if o.pr_number:
+                st.fix_attempts[str(o.pr_number)] = 0
+            return
+        action, kind = str(report.get("needs_alex") or ""), str(report.get("needs_alex_kind") or "")
+        if o.result == "escalated" and escalation.accept_owner_action(action, kind):
+            rec["verdict"], rec["action"] = "needs_alex", action
+            try:
+                gh.comment(o.task, f"Fletchery escalation ({rec.get('agent')}): this needs you ({kind}).\n\n{action}\n\n{summary}")
+            except Exception as e:
+                self.ctx.log(f"#{o.task}: escalation comment deferred: {e}")
+            return
+        if o.result == "escalated" and report.get("close"):
+            rec["verdict"] = "closed"
+            why = " ".join(str(report["close"]).split())[:500]
+            try:
+                gh.comment(o.task, f"Fletchery escalation ({rec.get('agent')}): closing, the work is already done: {why}\n\n{summary}")
+                if o.pr_number:
+                    gh.comment(o.pr_number, f"Fletchery escalation: superseded ({why}); closing this PR.")
+                    close_pr = getattr(gh, "close_pr", None)
+                    if close_pr:
+                        close_pr(o.pr_number)
+                gh.close_issue(o.task)
+            except Exception as e:
+                self.ctx.log(f"#{o.task}: escalation close deferred: {e}")
+            return
+        rec["verdict"] = "failed"
+
     def _start(self, coro, task_no: int, pr_no: int | None, prior_seen, emergency: bool = False) -> None:
         self.active.add(task_no)
         if emergency:
@@ -1890,6 +1983,8 @@ class Engine:
             if o.result == "waiting_resource":
                 st.resource_waits[str(o.task)] = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(timespec="seconds")
             self.handoffs.settled(o)
+            if str(o.task) in st.escalations:
+                self._settle_escalation(o)
             outcomes.append(o)
             st.running.pop(str(o.task), None)
             st.spent[today()] = st.spent.get(today(), 0.0) + o.cost_usd

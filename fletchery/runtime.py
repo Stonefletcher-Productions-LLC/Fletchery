@@ -62,7 +62,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                               "unverified": {"type": "array", "items": {"type": "string"}},
                               "gave_up": {"type": "string"}}},
     "fixer": {"type": "object", "required": ["summary", "pushed"],
-              "properties": {"summary": {"type": "string"}, "pushed": {"type": "boolean"}, "gave_up": {"type": "string"}}},
+              "properties": {"summary": {"type": "string"}, "pushed": {"type": "boolean"}, "gave_up": {"type": "string"},
+                             # escalation sessions only (escalation.py)
+                             "needs_alex": {"type": "string"}, "needs_alex_kind": {"type": "string"},
+                             "close": {"type": "string"}, "base_broken": {"type": "string"}}},
     "reviewer": {"type": "object", "required": ["verdict", "findings"],
                  "properties": {"verdict": {"type": "string", "enum": ["approve", "needs_work", "escalate"]},
                                 "findings": {"type": "array", "items": {"type": "object",
