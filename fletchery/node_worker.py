@@ -798,7 +798,8 @@ def compact_checkout(cfg: dict, log=print, now: float | None = None, alive=_pid_
     fetch leaves tmp_pack_* files, and a `fetch-pack <pid>` .keep marker makes `git gc` skip its pack for ever: on
     2026-11-16 a CI checkout held 103 GB in 62 packs (1.8 GB after) and this worker's held 81 GB plus 15.9 GB of
     tmp_pack_*. Called only while the worker is idle (it runs one job at a time, so no git of its own is running).
-    Does nothing while a lock exists. Never touches LFS storage and never prunes worktrees."""
+    Does nothing while a lock exists or while any other worktree is attached to the checkout. Never touches LFS
+    storage and never prunes worktrees."""
     out = {"before_bytes": 0, "after_bytes": 0, "keeps": 0, "tmp": 0, "ran": False, "why": ""}
     ws = _workspace(cfg)
     packs = ws / ".git" / "objects" / "pack"
@@ -822,6 +823,18 @@ def compact_checkout(cfg: dict, log=print, now: float | None = None, alive=_pid_
     git = ws / ".git"
     if any((git / n).exists() for n in ("gc.pid", "index.lock", "shallow.lock", "HEAD.lock", "packed-refs.lock")):
         out["why"] = "a git lock exists"
+        return out
+    # Sessions hang their own worktrees off this checkout (five on SF-NODE-01, 2026-11-16). `gc --prune=now` could
+    # drop an object one of them is writing at that moment, so a shared store is never compacted from here.
+    try:
+        listed = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=str(ws), capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=120, env=_git_env(cfg),
+                                creationflags=CREATE_NO_WINDOW if WINDOWS else 0)
+        shared = listed.returncode != 0 or sum(1 for row in listed.stdout.splitlines() if row.startswith("worktree ")) != 1
+    except (OSError, subprocess.SubprocessError):
+        shared = True
+    if shared:
+        out["why"] = "other worktrees share this git store (or they could not be listed)"
         return out
     for f in list(packs.iterdir()):
         try:

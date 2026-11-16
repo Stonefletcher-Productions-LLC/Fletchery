@@ -268,6 +268,10 @@ class ScratchTest(unittest.TestCase):
         self.assertEqual(node_worker.compact_checkout(cfg, lambda _: None)["why"], "a git lock exists")
         self.assertTrue(stale.exists())
         (ws / ".git" / "index.lock").unlink()
+        git(ws, "worktree", "add", "-q", "-b", "session", str(self.tmp / "session-wt"), "HEAD")
+        self.assertIn("other worktrees", node_worker.compact_checkout(cfg, lambda _: None)["why"])
+        self.assertTrue(stale.exists())
+        git(ws, "worktree", "remove", str(self.tmp / "session-wt"))
         said = []
         out = node_worker.compact_checkout(cfg, said.append, alive=lambda pid: pid == 222)
         self.assertTrue(out["ran"], out)
