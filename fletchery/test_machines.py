@@ -336,6 +336,50 @@ class RoundMarkerTests(unittest.TestCase):
             self.assertFalse(marker.exists(), "an empty roundMarkerFile switches the marker off")
 
 
+class RoundLeaseTests(unittest.TestCase):
+    """2026-11-16, rounds 213-216: SF-NODE-01 has no heavyLeaseFile, so each step of a round job took the lease on its
+    own and local RunSpecs runs got in between (ImportAudio, BuildContent: NO RESULT). A round job now holds it whole."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.lease = Path(self.tmp.name) / "heavy.json"
+        self.cfg = {"machine": "SF-NODE-01", "workRoot": self.tmp.name, "roundLeaseFile": str(self.lease),
+                    "roundMarkerFile": ""}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_round_job_holds_the_lease_and_its_steps_run_under_it(self):
+        job = node_worker.Job(None, self.cfg, {"id": 7, "recipe": "node-checks", "sha": SHA, "round": True})
+        token = job.hold_for_round()
+        self.assertTrue(token)
+        self.assertEqual(json.loads(self.lease.read_text(encoding="utf-8"))["token"], token)
+        env = node_worker._git_env(self.cfg)
+        self.assertEqual((env["LS_LANE_HOLD"], env["LS_HEAVY_LEASE"]), (token, str(self.lease)))
+        node_worker.drop_lease(self.cfg, token)
+        self.assertFalse(self.lease.exists())
+        self.assertNotIn("LS_LANE_HOLD", node_worker._git_env(self.cfg))
+
+    def test_other_jobs_and_a_switched_off_lease_take_nothing(self):
+        pr = node_worker.Job(None, self.cfg, {"id": 8, "recipe": "node-checks", "sha": SHA})
+        self.assertEqual(pr.hold_for_round(), "")
+        off = dict(self.cfg, roundLeaseFile="")
+        self.assertEqual(node_worker.Job(None, off, {"id": 9, "recipe": "node-checks", "sha": SHA, "round": True})
+                         .hold_for_round(), "")
+        self.assertFalse(self.lease.exists())
+
+    def test_a_round_job_waits_for_a_local_holder_and_names_it(self):
+        self.lease.write_text(json.dumps({"owner": "local", "token": "x", "purpose": "Tools\\RunSpecs.ps1"}), encoding="utf-8")
+        said = []
+        got = node_worker.take_lease(self.cfg, {"id": 10}, Path(self.tmp.name), wait=0, path=str(self.lease),
+                                     waiting=said.append, sleep=lambda _: None)
+        self.assertEqual(got, "")
+        stops = iter([False, True])
+        node_worker.take_lease(self.cfg, {"id": 10}, Path(self.tmp.name), wait=60, path=str(self.lease),
+                               waiting=said.append, stop=lambda: next(stops), sleep=lambda _: None)
+        self.assertIn("Tools\\RunSpecs.ps1", said)
+        self.assertEqual(json.loads(self.lease.read_text(encoding="utf-8"))["token"], "x", "the local hold is untouched")
+
+
 class DashboardTests(Base):
     def test_dashboard_adds_a_machine_queues_and_cancels_a_job(self):
         from server import Dashboard

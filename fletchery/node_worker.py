@@ -50,9 +50,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "5"   # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
+VERSION = "6"   # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
                 # 4: keeps checking in while an idle mirror copies, so the node never looks offline;
-                # 5: keeps a "round waiting" marker beside the heavy lease so local runs let merge rounds go first
+                # 5: keeps a "round waiting" marker beside the heavy lease so local runs let merge rounds go first;
+                # 6: a merge round's job holds the heavy lease for its whole length (imports included)
 ASSET_SYNC_LABEL = "cap:asset-sync"
 ASSET_IDLE_SECONDS = 15 * 60
 ASSET_INDEX = ".fletchery-assets.json"
@@ -243,10 +244,12 @@ def lease_holder(cfg: dict) -> str:
     return str(rec.get("purpose") or rec.get("runId") or "another run")[:120]
 
 
-def take_lease(cfg: dict, job: dict, ws: Path, wait: float = 120, sleep=time.sleep) -> str:
+def take_lease(cfg: dict, job: dict, ws: Path, wait: float = 120, sleep=time.sleep, path: str = "",
+               waiting=None, stop=None) -> str:
     """Create the lease for this job (atomic, like HeavyLease.ps1's CreateNew); wait briefly if another run took it
-    between the claim and now. Returns the token, or "" when the job runs without it."""
-    path = cfg.get("heavyLeaseFile")
+    between the claim and now. Returns the token, or "" when the job runs without it. `path` overrides the configured
+    lease file; `waiting(holder)` is told who holds it while this waits; `stop()` true ends the wait early."""
+    path = path or cfg.get("heavyLeaseFile")
     if not path:
         return ""
     import uuid
@@ -262,17 +265,40 @@ def take_lease(cfg: dict, job: dict, ws: Path, wait: float = 120, sleep=time.sle
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "x", encoding="utf-8") as f:
                 f.write(json.dumps(rec))
-            cfg["_lease_token"] = token
+            cfg["_lease_token"], cfg["_lease_path"] = token, str(path)
             return token
         except FileExistsError:
-            if time.monotonic() > end:
+            if time.monotonic() > end or (stop and stop()):
                 return ""
+            if waiting:
+                waiting(_holder_at(path))
             sleep(5)
+
+
+def _holder_at(path) -> str:
+    try:
+        rec = json.loads(Path(path).read_text(encoding="utf-8-sig") or "{}")
+    except (OSError, ValueError):
+        return "an unreadable lease"
+    return str(rec.get("purpose") or rec.get("runId") or "another run")[:120]
+
+
+ROUND_LEASE_WAIT_MINUTES = 30   # a round job waits this long for a local run to finish before running without the hold
+
+
+def round_lease_path(cfg: dict) -> str:
+    """Where a merge round's job takes the machine's heavy lease for its whole length: `roundLeaseFile` ("" = never),
+    else `heavyLeaseFile`, else LaneGuard's default lease on Windows. 2026-11-16: SF-NODE-01 has no heavyLeaseFile, so
+    each step of a round job took the lease on its own and local runs (RunSpecs, RunHomeShots, BuildTown) got in
+    between: ImportAudio and BuildContent refused with NO RESULT in rounds 213-216."""
+    if "roundLeaseFile" in cfg:
+        return str(cfg["roundLeaseFile"] or "")
+    return str(cfg.get("heavyLeaseFile") or (ROUND_MARKER_DEFAULT_LEASE if WINDOWS else ""))
 
 
 def drop_lease(cfg: dict, token: str) -> None:
     """Remove the lease only if it is still this job's."""
-    path = cfg.get("heavyLeaseFile")
+    path = cfg.get("_lease_path") or cfg.get("heavyLeaseFile")
     if not path or not token:
         return
     try:
@@ -281,6 +307,7 @@ def drop_lease(cfg: dict, token: str) -> None:
     except (OSError, ValueError):
         pass
     cfg.pop("_lease_token", None)
+    cfg.pop("_lease_path", None)
 
 
 # ---- a merge round waiting for this machine ----
@@ -606,8 +633,8 @@ def _git_env(cfg: dict) -> dict:
     # in use by Fletchery node job N" (exit 2 on every job).
     if cfg.get("_lease_token"):
         env["LS_LANE_HOLD"] = cfg["_lease_token"]
-        if cfg.get("heavyLeaseFile"):
-            env["LS_HEAVY_LEASE"] = str(cfg["heavyLeaseFile"])
+        if cfg.get("_lease_path") or cfg.get("heavyLeaseFile"):
+            env["LS_HEAVY_LEASE"] = str(cfg.get("_lease_path") or cfg["heavyLeaseFile"])
     return env
 
 
@@ -721,6 +748,29 @@ class Job:
         self.out(f"##[step] {name}: exit {code}")
         return code
 
+    def hold_for_round(self) -> str:
+        """A merge round's job holds the machine's heavy lease for its whole length (imports, build, BuildContent,
+        tests), so no local run gets in between its steps; every LaneGuard step runs under it (LS_LANE_HOLD). It waits
+        up to ROUND_LEASE_WAIT_MINUTES for a local run that holds it now; the round marker keeps new ones from starting
+        meanwhile. Returns the token to drop, or "" (not a round job, the worker already holds it, or the wait ran out:
+        then each step takes the lease itself, as before)."""
+        if not self.job.get("round") or self.cfg.get("_lease_token"):
+            return ""
+        path = round_lease_path(self.cfg)
+        if not path:
+            return ""
+        said = [""]
+
+        def waiting(holder: str) -> None:
+            if holder != said[0]:
+                said[0] = holder
+                self.out(f"Waiting up to {ROUND_LEASE_WAIT_MINUTES} min for the machine: it is in use by {holder}.")
+        token = take_lease(self.cfg, self.job, _workspace(self.cfg), wait=ROUND_LEASE_WAIT_MINUTES * 60, path=path,
+                           waiting=waiting, stop=lambda: self.cancelled)
+        self.out(f"Holding the machine's heavy lease ({path}) for this merge round job." if token else
+                 "The heavy lease stayed taken; each step takes it on its own.")
+        return token
+
     def _timeout(self) -> None:
         self.out("##[error] the job ran past its time limit; stopping it")
         self.kill()
@@ -765,6 +815,7 @@ class Job:
             mark_round(cfg, True, f"merge round job {job.get('id')} is running here")
         beat = threading.Thread(target=self._beat, daemon=True)
         beat.start()
+        round_token = self.hold_for_round()
         tmp = Path(tempfile.mkdtemp(prefix=f"fletchery-job-{job['id']}-"))
         result_json = tmp / "node-result.json"
         deadline = time.monotonic() + float(job.get("timeout_minutes") or 120) * 60
@@ -802,7 +853,8 @@ class Job:
                     argv = step() if callable(step) else step
                     rc = self.run_step(name, argv, ws, job_env, deadline if not always else 0)
                     if rc and not code and not always:
-                        code, summary = rc, f"{name} failed (exit {rc})"
+                        code, summary = rc, (f"{name} gave no result (exit 2): nothing was tested" if rc == 2
+                                             else f"{name} failed (exit {rc})")
                 if self.cancelled:
                     code, summary = code or 130, "Cancelled from Fletchery"
                 elif out_dir and code == 0 and cfg.get("uploadBuilds", True):
@@ -815,6 +867,8 @@ class Job:
             code, summary = 1, f"Worker error: {type(e).__name__}: {e}"
             self.out(summary)
         finally:
+            if round_token:
+                drop_lease(cfg, round_token)
             self.done.set()
             beat.join(timeout=5)
             self.flush()
