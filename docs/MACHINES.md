@@ -159,6 +159,25 @@ and unpacks it beside it, and the Builds card points at that folder. If the copy
 the job still passes. `"uploadBuilds": false` in a node's config turns it off. For a build packaged before this existed:
 `python node_worker.py upload --config <file> --job <package job id> --folder <build folder>`.
 
+## Keeping a node's disk free
+
+A node has no Fletchery backend, so nothing cleaned the worktrees that sessions left on it (2026-11-16: SF-NODE-01's
+work drive reached 0 GB). Worker version 8 runs the same scratch retention as the PC (`scratch.py`, README "Session
+folders"). Copy `fletchery\scratch.py` beside `node_worker.py` and add to the worker's config:
+
+    "scratchRoots": ["C:\\StoneNode", "E:\\lifeshare-scratch"],
+    "scratchMode": "remove",                      # off, report, trim (default) or remove
+    "scratchKeep": ["LifeShareArt", "*rescue*"],  # folder names never touched
+    "scratchDisposable": ["*-builds"],            # plain folders removed once idle scratchRemoveDays
+    "scratchTrimHours": 24, "scratchRemoveDays": 7, "scratchMinFreeGB": 30
+
+The idle worker runs a pass when it starts and every hour, never during a job and never while a person's pause file
+exists. Under `scratchMinFreeGB` free on a root's drive, build output is trimmed after 2 idle hours instead of
+`scratchTrimHours`; nothing is ever removed sooner. The worker's own `workRoot`, `buildsDir` and mirrored asset folders
+are never entered. Receipts are in `<workRoot>\fletchery\scratch-retention.json`, and its `attention` list names the
+idle folders that still hold uncommitted or unpushed work. `python node_worker.py scratch --config <file>` runs one
+pass now. Without `scratch.py` beside it, or without `scratchRoots`, the worker cleans nothing.
+
 ## Pausing one machine from one kind of work
 
 Building → Machines shows a "Takes:" row of switches under each machine. Click one to stop that machine from that kind

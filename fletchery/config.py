@@ -35,6 +35,9 @@ WORKER_KEYS = {
     "autoCleanup": "auto_cleanup", "cleanupRetentionHours": "cleanup_retention_hours", "thinTextWorkers": "thin_text_workers",
     "mergeBackupDir": "merge_backup_dir", "keepMergeCheckouts": "keep_merge_checkouts",
     "workMinimumFreeGB": "work_min_free_gb", "attemptRetentionHours": "attempt_retention_hours",
+    "scratchRoots": "scratch_roots", "scratchMode": "scratch_mode", "scratchKeep": "scratch_keep",
+    "scratchTrimHours": "scratch_trim_hours", "scratchRemoveDays": "scratch_remove_days",
+    "scratchDisposable": "scratch_disposable", "scratchBackupDir": "scratch_backup_dir",
     "taskBackupDir": "task_backup_dir", "taskBackupDays": "task_backup_days", "diskReportRoot": "disk_report_root",
     "emergencyWorkers": "emergency_workers", "workerRankLimits": "worker_rank_limits", "yieldTo": "yield_to",
     "assetTasks": "asset_tasks", "workerAllowedTools": "worker_allowed_tools", "workerDirs": "worker_dirs",
@@ -91,6 +94,18 @@ class Config:
     attempt_retention_hours: float = 24      # old attempt/repair copies of an open task are removed after this idle time
     task_backup_dir: str = ""                # "" = <state_dir>/task-backups: changed files + logs of removed copies
     task_backup_days: float = 14
+    # Scratch retention (scratch.py; 2026-11-16: sessions' own worktrees filled both machines). Folders directly under
+    # `scratch_roots` that Fletchery did not make: build output is trimmed once idle `scratch_trim_hours` (2 h when the
+    # disk guard holds), and in "remove" mode a clean, pushed, unlocked worktree idle `scratch_remove_days` is removed
+    # with `git worktree remove`. `scratch_keep` are folder-name patterns never touched; `scratch_disposable` are
+    # plain-folder patterns (packaged builds) removed when idle. No roots = off. Modes: off, report, trim, remove.
+    scratch_roots: list = None
+    scratch_mode: str = "trim"
+    scratch_keep: list = None
+    scratch_trim_hours: float = 24
+    scratch_remove_days: float = 7
+    scratch_disposable: list = None
+    scratch_backup_dir: str = ""             # "" = <state_dir>/scratch-backups: newest Saved/Logs of removed worktrees
     disk_report_root: str = ""               # "" = the folder holding state_dir; its 10 largest folders are shown
     thin_text_workers: bool = True            # omit binary Art/Content only in newly created text task checkouts
     asset_tasks: dict = None                 # explicit per-task paths/mode; default remains text-only

@@ -227,6 +227,7 @@ class Engine:
         self._storage_job = None
         self.disk_why, self.disk_free_gb, self._disk_cleanup_at = "", None, 0.0
         self.task_retire_last: dict = {}
+        self.scratch_last: dict = {}
         self.disk_report: dict = {}
         try:
             self.disk_report = json.loads((Path(state_dir) / "disk-report.json").read_text(encoding="utf-8"))
@@ -758,7 +759,8 @@ class Engine:
                 "running": bool(self._storage_job and not self._storage_job.done()),
                 "requested": self.state.storage_requested, "last": dict(self.state.storage_last),
                 "free_gb": self.disk_free_gb, "min_free_gb": self.cfg.work_min_free_gb, "disk_why": self.disk_why,
-                "tasks": dict(self.task_retire_last), "report": dict(self.disk_report)}
+                "tasks": dict(self.task_retire_last), "report": dict(self.disk_report),
+                "scratch": dict(self.scratch_last)}
 
     def _disk_guard(self) -> str:
         """Below `work_min_free_gb` on the worktree drive: hold new work and clean finished task copies now
@@ -861,6 +863,26 @@ class Engine:
                 await asyncio.to_thread(storage.prune_backups, backup, self.cfg.task_backup_days)
             except Exception as exc:
                 self.task_retire_last = {"checked_at": now(), "error": f"{type(exc).__name__}: {exc}"[:500]}
+            try:   # worktrees, clones and builds that sessions made beside Fletchery's own (scratch.py)
+                if self.cfg.scratch_roots and self.cfg.scratch_mode != "off":
+                    import scratch
+                    found = await asyncio.to_thread(
+                        scratch.retain, list(self.cfg.scratch_roots), keep=list(self.cfg.scratch_keep or []),
+                        mode=self.cfg.scratch_mode, trim_hours=self.cfg.scratch_trim_hours,
+                        remove_days=self.cfg.scratch_remove_days, disposable=list(self.cfg.scratch_disposable or []),
+                        protected=[*protected, self.cfg.worktree_root, str(self.state_dir)],
+                        backup_dir=self.cfg.scratch_backup_dir or str(self.state_dir / "scratch-backups"), urgent=urgent)
+                    __import__("rounds").write_file(str(self.state_dir / "scratch-retention.json"), found)
+                    self.scratch_last = {"checked_at": found["checked_at"], "mode": found["mode"], "error": found["error"],
+                                         "freed_bytes": found["freed_bytes"], "trimmed_count": len(found["trimmed"]),
+                                         "removed_count": len(found["removed"]), "attention": found["attention"][:20]}
+                    if found["freed_bytes"]:
+                        self.ctx.log(f"Storage: scratch retention trimmed {len(found['trimmed'])} build-output folders and "
+                                     f"removed {len(found['removed'])} idle folders ({found['freed_bytes'] / 1024**3:.1f} GiB)")
+                    if found["error"]:
+                        self.ctx.log(f"Storage: scratch retention stopped: {found['error']}")
+            except Exception as exc:
+                self.scratch_last = {"checked_at": now(), "error": f"{type(exc).__name__}: {exc}"[:500]}
             try:   # dashboard: free space and the largest folders, refreshed at most every 6 hours (or when low)
                 due = urgent or not self.disk_report or _report_age(self.disk_report) > 6 * 3600
                 if due:
