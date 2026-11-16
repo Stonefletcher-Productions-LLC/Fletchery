@@ -95,6 +95,40 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(bb.listening(kept["port"]))
         self.assertEqual([b["port"] for b in bb.bridges()], [kept["port"]])
 
+    def test_at_most_max_bridges_run_and_the_owner_still_reuses_its_own(self):
+        # 2026-11-16: 19 idle bridges (26 GB) on the gaming PC. A third folder is refused while two run.
+        os.environ["FLETCHERY_MAX_BRIDGES"] = "2"
+        self.addCleanup(os.environ.pop, "FLETCHERY_MAX_BRIDGES", None)
+        first = self._start()
+        dirs = [Path(self.tmp.name) / n for n in ("1617-task", "1790-task")]
+        for d in dirs:
+            d.mkdir()
+        second = self._start(owner=dirs[0])
+        self.assertTrue(second["ok"], second)
+        port = next(p for p in bb.PORTS if bb._bindable(p))
+        third = bb.start(port=port, owner=str(dirs[1]), command=[sys.executable, str(self.script), str(port)],
+                         timeout=30, cap=True)
+        self.assertFalse(third["ok"])
+        self.assertIn("limit 2", third["error"])
+        self.assertIn("not a permission refusal", third["error"])
+        again = bb.start(owner=str(self.owner), command=["never-run"], cap=True)
+        self.assertEqual((again["ok"], again["port"]), (True, first["port"]))
+
+    def test_reap_stops_bridges_idle_too_long_with_no_client(self):
+        quiet = self._start()
+        busy_dir = Path(self.tmp.name) / "1614-task"
+        busy_dir.mkdir()
+        busy = self._start(owner=busy_dir)
+        data = bb._load()
+        old = time.time() - 5 * 3600
+        os.utime(data[str(quiet["port"])]["log"], (old, old))
+        data[str(quiet["port"])]["time"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(old))
+        bb._save(data)
+        result = bb.reap()
+        self.assertEqual((result["stopped"], result["idle"]), ([quiet["port"]], [quiet["port"]]))
+        self.assertTrue(bb.listening(busy["port"]))
+        self.assertEqual([b["port"] for b in bb.bridges()], [busy["port"]])
+
     def test_failed_start_is_a_runtime_failure_with_the_log(self):
         result = bb.start(owner=str(self.owner),
                           command=[sys.executable, "-c", "import sys; print('addon mcp missing'); sys.exit(3)"], timeout=20)

@@ -499,13 +499,14 @@ class Engine:
             if (self._builds_job is None or self._builds_job.done()) and time.monotonic() >= self._builds_at:
                 self._builds_at = time.monotonic() + 30
                 self._builds_job = asyncio.ensure_future(asyncio.to_thread(self.builds.tick))
-        hold_new = draining or bool(self.disk_why)  # a running round finishes; no new round, build or check starts
+        gaming = self._yield_now()  # a program from workers.yieldTo (a game) runs: start nothing new on this PC
+        hold_new = draining or bool(self.disk_why) or bool(gaming)  # a running round finishes; no new round, build or check starts
         self._merge_round(hold_new)
         self._maybe_node_pr_checks(hold_new)
         if self.plans.active_merge and self.plans.active_merge["state"] == "draining" and not self.merge_priority:
             self.plans.update(self.plans.active_merge, state="queued", reason=self.merge_why)
         plan_draining = bool(self.merge_priority and self.plans.active_merge and self.plans.active_merge["state"] == "draining")
-        coding_off = "coding" in st.pc_paused  # Building -> Machines: coding paused on this PC; running sessions finish
+        coding_off = "coding" in st.pc_paused or bool(gaming)  # Building -> Machines (or a game): running sessions finish
         paused = paused or plan_draining or coding_off or bool(self.disk_why)
         # A running round reserves its own account, not the whole PC: other accounts keep writing and fixing, and the
         # round's account starts at most `round_shared_sessions` new ones. Without an agent pool (one Claude for
@@ -517,6 +518,7 @@ class Engine:
         emergency_numbers = self.repair_numbers(tasks)
         self.emergency_why = ("Emergency workers are set to 0; running repairs finish." if not cfg.emergency_workers else
                               self.disk_why if self.disk_why else
+                              f"{gaming} is running; this PC starts nothing new." if gaming else
                               "Coding is paused on this PC." if coding_off else
                               "Fletchery is paused or restarting." if paused else
                               "Daily budget spent." if not budget_left else "No build or merge repairs waiting.")
@@ -1462,7 +1464,7 @@ class Engine:
         st = self.state
         if self.dry_run or draining or st.held or st.merge_resume or (self._storage_job and not self._storage_job.done()):
             return False
-        if "builds" in st.pc_paused:
+        if "builds" in st.pc_paused or self._yield_now():
             return False
         row = self.builds.next_pc()
         if row is None:
@@ -1481,7 +1483,7 @@ class Engine:
         import nodecheck
         import prcheck
         cfg, gh = self.cfg, self.ctx.gh
-        if "checks" in self.state.pc_paused:
+        if "checks" in self.state.pc_paused or self._yield_now():
             return False
         try:
             if nodecheck.node_takes_checks(getattr(self, "machines", None)):
@@ -1691,6 +1693,28 @@ class Engine:
         self.wake()
 
     PC_KINDS = ("coding", "merging", "checks", "builds")
+
+    def _yield_now(self) -> str:
+        """The program from workers.yieldTo running now (a game), else "". Looked up at most once a minute; logged
+        when it starts and stops so the dashboard log says why nothing new started."""
+        names = self.cfg.yield_to or []
+        if not names or self.dry_run:
+            return ""
+        at = time.monotonic()
+        cached = getattr(self, "_yield_cache", None)
+        if cached and at - cached[0] < 60:
+            return cached[1]
+        import nowindow
+        try:
+            found = nowindow.busy_with(names)
+        except Exception as e:
+            self.ctx.log(f"yieldTo: process check failed: {type(e).__name__}: {e}")
+            found = ""
+        if found != (cached[1] if cached else ""):
+            self.ctx.log(f"{found} is running: this PC starts nothing new until it closes" if found else
+                         "yieldTo: no game running; this PC takes work again")
+        self._yield_cache = (at, found)
+        return found
 
     def pause_pc(self, kind: str, on: bool) -> list:
         """Pause or resume one kind of work on this PC. Merging is the Merge section's Pause; the others start nothing

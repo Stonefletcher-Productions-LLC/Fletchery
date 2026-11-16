@@ -70,7 +70,8 @@ $Quote = { param($s) "'" + ($s -replace "'", "''") + "'" }
     '    Start-Sleep -Seconds 20'
     '}'
 ) -join "`r`n" | Set-Content -LiteralPath $Launcher -Encoding ASCII
-$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Launcher`"" -WorkingDirectory $Destination
+# conhost --headless: Windows Terminal ignores -WindowStyle Hidden and showed this runner as a terminal window.
+$Action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\conhost.exe') -Argument "--headless powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Launcher`"" -WorkingDirectory $Destination
 $Trigger = @(
     New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     # Backstop: every 5 minutes the task is started if it is not running (MultipleInstances IgnoreNew skips it otherwise).

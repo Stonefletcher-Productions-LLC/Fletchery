@@ -36,7 +36,7 @@ WORKER_KEYS = {
     "mergeBackupDir": "merge_backup_dir", "keepMergeCheckouts": "keep_merge_checkouts",
     "workMinimumFreeGB": "work_min_free_gb", "attemptRetentionHours": "attempt_retention_hours",
     "taskBackupDir": "task_backup_dir", "taskBackupDays": "task_backup_days", "diskReportRoot": "disk_report_root",
-    "emergencyWorkers": "emergency_workers", "workerRankLimits": "worker_rank_limits",
+    "emergencyWorkers": "emergency_workers", "workerRankLimits": "worker_rank_limits", "yieldTo": "yield_to",
     "assetTasks": "asset_tasks", "workerAllowedTools": "worker_allowed_tools", "workerDirs": "worker_dirs",
     "autoPrerequisites": "auto_prerequisites", "stackDepth": "stack_depth",
     "enabled": "workers_enabled", "projectRoot": "project_root", "baseBranch": "base_branch", "assignee": "assignee",
@@ -73,6 +73,9 @@ class Config:
     max_parallel: int = 2                    # on a Claude plan the limits are shared with your own sessions
     worker_rank_limits: dict = None          # None = allocate All workers by task demand; manual per-rank 0..10
     emergency_workers: int = 1              # dedicated build/merge repair slot, independently 0 or 1
+    # Programs (image names, e.g. "Wow.exe") that mean "the PC is someone's right now": while one runs, nothing new
+    # starts on this PC (coding sessions, rounds, PC checks, builds); running work finishes (2026-11-16, Alex gaming).
+    yield_to: list = None
     auto_cleanup: bool = True                # retire verified closed/published task copies when idle
     cleanup_retention_hours: float = 24
     # Each round whose checkout ends dirty gets quarantined and replaced by a fresh 11-13 GB checkout; nothing removed

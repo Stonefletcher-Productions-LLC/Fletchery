@@ -21,6 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import nowindow  # noqa: E402
+
+nowindow.install()  # before anything spawns: no child of Fletchery opens a console window (nowindow.py)
+
 import graph  # noqa: E402
 from config import Config, PRODUCT_ROOT  # noqa: E402
 from github import FakeGitHub, GitHub  # noqa: E402

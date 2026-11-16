@@ -10,7 +10,7 @@ roles already allow `python`.
     python blender_bridge.py start [--port N] [--owner DIR]   start a bridge (or reuse the owner's), print its port
     python blender_bridge.py list                             the bridges this file started that still run
     python blender_bridge.py stop --port N                    stop one this file started
-    python blender_bridge.py reap                             stop those whose owner folder is gone
+    python blender_bridge.py reap                             stop those whose owner folder is gone or that sit idle
 
 Every command prints one JSON line. Standard library only; it is run by file path from any folder.
 
@@ -35,6 +35,26 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORTS = range(10100, 10900)          # private bridges; 9876 is the shared default and is never handed out
 START_TIMEOUT = 120.0                # a cold Blender with add-ons takes 10-40 s to listen
+# 2026-11-16: bridges were only stopped once their task checkout was deleted, and checkouts are kept for days, so 19
+# idle Blenders (about 26 GB) sat on Alex's gaming PC and crashed his game. Now at most MAX_BRIDGES run at once, and a
+# bridge whose log has not moved for IDLE_HOURS with no client connected is stopped by `reap` (and before each start).
+MAX_BRIDGES = 2
+IDLE_HOURS = 2.0
+IDLE_PRIORITY = 0x00000040           # IDLE_PRIORITY_CLASS: the player's game and builds always come first
+
+
+def max_bridges() -> int:
+    try:
+        return max(1, int(os.environ.get("FLETCHERY_MAX_BRIDGES") or MAX_BRIDGES))
+    except ValueError:
+        return MAX_BRIDGES
+
+
+def idle_hours() -> float:
+    try:
+        return max(0.1, float(os.environ.get("FLETCHERY_BRIDGE_IDLE_HOURS") or IDLE_HOURS))
+    except ValueError:
+        return IDLE_HOURS
 
 
 def registry_dir() -> Path:
@@ -134,7 +154,7 @@ def _prune(data: dict) -> dict:
 
 
 def start(port: int = 0, owner: str = "", blender: str = "", user_scripts: str = "", command: list | None = None,
-          timeout: float = START_TIMEOUT) -> dict:
+          timeout: float = START_TIMEOUT, cap: bool | None = None) -> dict:
     """Start a bridge for `owner` (a folder, normally the task checkout). With no port, the owner's running bridge is
     reused, else a free port is picked. `command` replaces the Blender command line (tests)."""
     owner = os.path.abspath(owner or os.getcwd())
@@ -144,6 +164,16 @@ def start(port: int = 0, owner: str = "", blender: str = "", user_scripts: str =
             if _same(e.get("owner", ""), owner) and listening(int(p)):
                 return {"ok": True, "port": int(p), "pid": e["pid"], "started": False, "owner": owner,
                         "note": "this folder's bridge is already running"}
+    if (command is None) if cap is None else cap:   # tests pass their own command; cap=True checks the limit there too
+        reap()
+        data = _prune(_load())
+        mine = any(_same(e.get("owner", ""), owner) for e in data.values())
+        if len(data) >= max_bridges() and not mine:
+            busy = ", ".join(f"{p} ({os.path.basename(e.get('owner', ''))})" for p, e in sorted(data.items()))
+            return {"ok": False, "error": f"{len(data)} Blender bridges already run on this PC (limit {max_bridges()}): "
+                                          f"{busy}. Wait and retry, or stop yours with `stop --port` when done. This is "
+                                          "a capacity limit, not a permission refusal."}
+    if not port:
         port = next((p for p in PORTS if str(p) not in data and _bindable(p)), 0)
         if not port:
             return {"ok": False, "error": f"no free port in {PORTS.start}-{PORTS.stop - 1}"}
@@ -174,10 +204,10 @@ def start(port: int = 0, owner: str = "", blender: str = "", user_scripts: str =
     kwargs: dict = {"stdin": subprocess.DEVNULL, "env": env, "close_fds": True}
     flags = []
     if os.name == "nt":
-        # Detached and in its own group so it outlives this command and the session's console; below normal priority
-        # because builds and the player's other work come first. Leaving the caller's job object is refused on some
-        # setups, so try with it and then without.
-        base = 0x00000008 | 0x00000200 | 0x00004000   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | BELOW_NORMAL
+        # Detached and in its own group so it outlives this command and the session's console; idle priority because
+        # the player's game and builds come first. Leaving the caller's job object is refused on some setups, so try
+        # with it and then without.
+        base = 0x00000008 | 0x00000200 | IDLE_PRIORITY   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | IDLE
         flags = [base | 0x01000000, base]              # CREATE_BREAKAWAY_FROM_JOB
     else:
         kwargs["start_new_session"] = True
@@ -248,16 +278,54 @@ def bridges() -> list[dict]:
     return [{"port": int(p), **e, "listening": listening(int(p))} for p, e in sorted(_prune(_load()).items())]
 
 
-def reap() -> dict:
-    """Stop the bridges whose owner folder no longer exists (its task checkout was retired). Others are left alone."""
+def has_client(port: int) -> bool:
+    """Some program holds an open connection to this bridge now (netstat). Unknown counts as connected."""
+    try:
+        kwargs = {"creationflags": 0x08000000} if os.name == "nt" else {}   # CREATE_NO_WINDOW
+        out = subprocess.run(["netstat", "-an"], capture_output=True, text=True, timeout=20, **kwargs).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    target = f"{HOST}:{int(port)}"
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 4 and cols[1] == target and cols[3].upper() in ("ESTABLISHED", "ESTAB"):
+            return True
+    return False
+
+
+def idle_for(entry: dict, at: float | None = None) -> float:
+    """Seconds since the bridge last wrote its log (each MCP call logs), or since it started."""
+    at = time.time() if at is None else at
+    stamps = []
+    try:
+        stamps.append(os.path.getmtime(entry.get("log", "")))
+    except OSError:
+        pass
+    try:
+        stamps.append(time.mktime(time.strptime(entry.get("time", "")[:19], "%Y-%m-%dT%H:%M:%S")))
+    except (ValueError, OverflowError):
+        pass
+    return at - max(stamps) if stamps else 0.0
+
+
+def reap(idle_seconds: float | None = None) -> dict:
+    """Stop the bridges whose owner folder no longer exists (its task checkout was retired), and those idle longer than
+    `idle_seconds` (default FLETCHERY_BRIDGE_IDLE_HOURS, 2 h) with no client connected. Only bridges this file started
+    are touched; a task that needs Blender again just runs `start`."""
+    limit = idle_hours() * 3600 if idle_seconds is None else idle_seconds
     data = _load()
-    stopped = []
+    stopped, idle = [], []
     for port, entry in list(data.items()):
-        if isinstance(entry, dict) and alive(entry) and entry.get("owner") and not os.path.isdir(entry["owner"]):
-            if _terminate(entry):
-                stopped.append(int(port))
+        if not (isinstance(entry, dict) and alive(entry)):
+            continue
+        gone = bool(entry.get("owner")) and not os.path.isdir(entry["owner"])
+        quiet = not gone and idle_for(entry) > limit and not has_client(int(port))
+        if (gone or quiet) and _terminate(entry):
+            stopped.append(int(port))
+            if quiet:
+                idle.append(int(port))
     _save(_prune(data))
-    return {"ok": True, "stopped": stopped}
+    return {"ok": True, "stopped": stopped, "idle": idle}
 
 
 def worker_note() -> str:

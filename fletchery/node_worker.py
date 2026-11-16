@@ -17,6 +17,7 @@ Config (JSON, e.g. C:\\FletcheryNode\\fletchery-worker.json):
                                                                          # content here and push it to fletchery/round-N only
      "engine": "E:\\\\UE_5.8",
      "pauseFile": "E:\\\\GitHubRunner\\\\PAUSED-NODE",                    # while it exists, take no new job
+     "yieldTo": ["Wow.exe"],                                             # optional: while one of these runs, take no new job
      "buildsDir": "E:\\\\fletchery-builds",
      "heavyLeaseFile": "E:\\\\GitHubRunner\\\\ResourceLeases\\\\heavy.json",  # optional, for a node on a PC that also
                                                                          # runs Unreal itself: hold the PC's heavy lease per job                            # optional: where `package` writes (default <workRoot>\\builds)
@@ -50,7 +51,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "6"   # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
+VERSION = "7"   # 7: no console windows for children; "yieldTo" pauses the node while a listed game runs;
+                # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
                 # 4: keeps checking in while an idle mirror copies, so the node never looks offline;
                 # 5: keeps a "round waiting" marker beside the heavy lease so local runs let merge rounds go first;
                 # 6: a merge round's job holds the heavy lease for its whole length (imports included)
@@ -70,6 +72,51 @@ ROUND_BRANCH = re.compile(r"^fletchery/round-[0-9]{1,6}$")
 BUILD_VERSION = re.compile(r"^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$")
 WINDOWS = os.name == "nt"
 BELOW_NORMAL = 0x00004000
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _hide_console_windows() -> None:
+    """Every child gets CREATE_NO_WINDOW unless it asked for a console or detached itself. The worker runs under
+    pythonw, so each git/powershell child otherwise opened its own console, which Windows 11 shows as a Windows
+    Terminal window that takes focus (2026-11-16: a node on the gaming PC opened one per git call during a game).
+    Same rule as Fletchery's nowindow.py; inline because this file is copied to nodes on its own."""
+    if not WINDOWS or getattr(subprocess.Popen, "_fletchery_no_window", False):
+        return
+    original = subprocess.Popen.__init__
+
+    def __init__(self, *args, **kwargs):
+        flags = int(kwargs.get("creationflags") or 0)
+        if not flags & (0x00000008 | 0x00000010):   # DETACHED_PROCESS | CREATE_NEW_CONSOLE: chosen on purpose
+            kwargs["creationflags"] = flags | CREATE_NO_WINDOW
+        original(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = __init__
+    subprocess.Popen._fletchery_no_window = True
+
+
+_hide_console_windows()
+
+
+def yield_holder(cfg: dict) -> str:
+    """The first program from the config's "yieldTo" list (a game, e.g. "Wow.exe") running here, else "". While one
+    runs the node checks in as paused and takes no job, like a person's pause file."""
+    wanted = [str(n).strip().lower() for n in (cfg.get("yieldTo") or []) if str(n).strip()]
+    if not wanted:
+        return ""
+    if WINDOWS:
+        try:
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=20).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        running = {line[1:].split('"', 1)[0].lower() for line in out.splitlines() if line.startswith('"')}
+    else:
+        running = set()
+        for pid in (p for p in os.listdir("/proc") if p.isdigit()) if os.path.isdir("/proc") else ():
+            try:
+                running.add(Path(f"/proc/{pid}/comm").read_text().strip().lower())
+            except OSError:
+                pass
+    return next((n for n in wanted if n in running), "")
 
 
 # ---- recipes: the only things a job can run ----
@@ -358,6 +405,9 @@ def stats(cfg: dict) -> dict:
     holder = lease_holder(cfg)
     if holder:  # the PC is busy with other Unreal work: show as paused and take no job until it is free
         out["paused"], out["lease"] = True, holder
+    game = yield_holder(cfg)
+    if game:  # someone is playing on this machine: paused like a person's pause file, so nothing counts on it
+        out["paused"], out["pause_file"], out["yield"] = True, True, game
     try:
         out["disk_free_gb"] = shutil.disk_usage(cfg.get("workRoot") or ".").free / 2**30
     except OSError:

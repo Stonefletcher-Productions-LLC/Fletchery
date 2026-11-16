@@ -43,7 +43,9 @@ if ($status) {
 if (-not $status -and $procs.Count -eq 0) {
     if ($sup.Count -gt 0) { Note "no backend process but the supervisor runs (pid $($sup[0].ProcessId)); it restarts it"; exit 0 }
     Note 'backend down and no supervisor: starting the supervisor'
-    Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Supervisor
+    # A headless console: Windows Terminal ignores -WindowStyle Hidden and would show the supervisor as a window.
+    Start-Process (Join-Path $env:WINDIR 'System32\conhost.exe') -WindowStyle Hidden `
+        -ArgumentList '--headless', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Supervisor`""
     exit 0
 }
 
