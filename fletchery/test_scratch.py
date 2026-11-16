@@ -168,11 +168,24 @@ class ScratchTest(unittest.TestCase):
         self.assertTrue(scratch.named_by(Path("E:/s/round"), ['tail -f "e:/s/round/saved/logs/x.log"']))
         self.assertTrue(scratch.named_by(Path("E:/s/round"), ["bash /e/s/round/run.sh"]))
         self.assertFalse(scratch.named_by(Path("E:/s/round"), ["editor e:/s/round-2/game.uproject"]))
+        self.assertTrue(scratch.named_by(Path("E:/s/town"), ["powershell drive.ps1 -log e:/s/town-logs/run.txt"]))
+        self.assertFalse(scratch.named_by(Path("E:/s/town"), ["powershell drive.ps1 -log e:/s/town-logsx/run.txt"]))
+
+    def test_deep_log_write_and_future_times_count_as_recent(self):
+        wt = self.worktree("logging")
+        log = wt / "Saved" / "Logs" / "big.bin"
+        os.utime(log, (self.later - 600, self.later - 600))
+        summary = self.run_pass(mode="remove")
+        self.assertTrue((wt / "Intermediate").exists())
+        self.assertIn("Used 0.2 h ago", self.reason(summary, wt))
+        os.utime(log, (self.later + 9000, self.later + 9000))
+        self.assertIn("Used 0.0 h ago", self.reason(self.run_pass(mode="remove"), wt))
 
     def test_urgent_trims_sooner_but_never_removes_sooner(self):
         wt = self.worktree("yesterday")
         at = time.time() + 5 * 3600
         self.assertEqual(self.run_pass(mode="remove", now=at)["trimmed"], [])
+        self.assertEqual(scratch.TRIM_DIRS[-1], "Saved/ShaderDebugInfo")
         summary = self.run_pass(mode="remove", now=at, urgent=True)
         self.assertEqual(len(summary["trimmed"]), 3)
         self.assertTrue((wt / "Work.cpp").exists())
