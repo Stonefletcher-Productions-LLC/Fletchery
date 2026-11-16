@@ -10,7 +10,7 @@ names one of the node's own recipes (node_worker.RECIPES) plus checked parameter
                heartbeats, result, and the GitHub commit status context it reports under
 
 Profile (workers.machines):
-    {"listen": "100.83.43.111:8771",            # the worker API: the coordinator's Tailscale address, never 0.0.0.0
+    {"listen": "100.64.0.10:8771",            # the worker API: the coordinator's Tailscale address, never 0.0.0.0
      "shadow": true,                            # commit statuses go out as "shadow/<context>" until cutover
      "nightly": {"at": "07:00", "branch": "main", "recipe": "nightly-full"},   # optional; UTC
      "assetRoots": ["E:\\lifeshare-scratch\\meshy_export"]}   # PC folders every node mirrors (same path) before imports
@@ -560,7 +560,7 @@ class Machines:
     @staticmethod
     def _held_off(db, m, stats: dict) -> bool:
         """Paused for new work. A node that shows paused only because the heavy lease is taken while it runs one of
-        Fletchery's own jobs is busy, not paused: its next job waits for it (2026-11-13: a busy SF-NODE-01 looked
+        Fletchery's own jobs is busy, not paused: its next job waits for it (2026-11-13: a busy NODE-01 looked
         paused, so `run` found no node and rounds fell back to the PC)."""
         if not stats.get("paused"):
             return False
@@ -1120,7 +1120,7 @@ def run_job(m: "Machines", recipe: str, sha: str, params: dict | None = None, re
     need = list(RECIPES[recipe]["labels"]) + [x for x in labels if x not in RECIPES[recipe]["labels"]]
     names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe)
     if not names:
-        # A node that dropped off a minute ago is usually its worker restarting (2026-11-13, round 165: SF-NODE-01
+        # A node that dropped off a minute ago is usually its worker restarting (2026-11-13, round 165: NODE-01
         # restarted after a package job, both `run` attempts fell inside the gap and the round imported on the PC).
         back = m.returning(need, RECIPES[recipe]["min_ram_gb"], recipe)
         if back:

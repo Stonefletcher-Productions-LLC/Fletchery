@@ -20,8 +20,8 @@ Nothing is opened to the internet and no router port is forwarded. Serve adds `T
 
 Profile, under `workers`:
 
-    "portal": {"port": 8772, "hosts": ["alex-pc.tail1234.ts.net"], "users": ["alex@example.com"],
-               "push": {"contact": "mailto:alex@example.com"}}
+    "portal": {"port": 8772, "hosts": ["your-pc.your-tailnet.ts.net"], "users": ["you@example.com"],
+               "push": {"contact": "mailto:you@example.com"}}
 
 `push` is optional (push.py): notifications on the phone for what needs you, finished rounds and finished builds.
 See docs/PORTAL.md."""

@@ -755,11 +755,11 @@ BASE_RED = re.compile(r"\bbase (?:is|was|branch is) red\b|\bbaseline\b(?! run)|\
                       r"(?:on|in) (?:the )?(?:base|test-staging|origin/[\w./-]+)\b|\bpre-?existing (?:failure|crash)|"
                       r"\bon (?:the )?base (?:branch )?(?:alone|too|itself)\b|\balready (?:fails|failing|red) on\b", re.I)
 
-# A deferral because the round got no result at all (2026-11-16, rounds 213-215: local runs held SF-NODE-01's heavy
+# A deferral because the round got no result at all (2026-11-16, rounds 213-215: local runs held NODE-01's heavy
 # lease, BuildContent refused with "RESULT: NO RESULT" and exit 2, and the innocent PRs were parked for 72 h). Nothing
 # was tested, so it is not evidence against the PR.
 NO_RESULT = re.compile(r"\bno result\b|\bexit(?:ed)?(?: code)?:? 2\b|\(exit 2\)|\bheavy[- ]lease\b|\blane ?guard\b|"
-                       r"\b(?:pc|node|machine|sf-node-01|gaming-pc) (?:is|was) (?:in use|busy|held)\b|\bin use by\b|"
+                       r"\b(?:pc|node|machine|node-01|pc-node) (?:is|was) (?:in use|busy|held)\b|\bin use by\b|"
                        r"\blease (?:is |was )?(?:held|taken|busy|contention)\b|\bno (?:online )?node (?:free|took|takes)\b", re.I)
 
 

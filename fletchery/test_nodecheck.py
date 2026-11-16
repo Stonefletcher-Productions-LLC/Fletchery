@@ -58,17 +58,17 @@ class Harness(unittest.TestCase):
         self.tmp.cleanup()
 
     def online(self, labels=NODE, paused=False):
-        self.m.add_machine("SF-NODE-01")
-        self.m.seen("SF-NODE-01", "100.1.1.1", labels, 24, "1", {"paused": paused})
+        self.m.add_machine("NODE-01")
+        self.m.seen("NODE-01", "100.1.1.1", labels, 24, "1", {"paused": paused})
 
     def step(self):
         Engine._node_pr_check_step(self.eng, self.coord, False)
 
     def finish(self, code, summary, log=""):
-        job = self.m.claim("SF-NODE-01")
+        job = self.m.claim("NODE-01")
         if log:
-            self.m.append_log("SF-NODE-01", job["id"], log)
-        self.m.finish("SF-NODE-01", job["id"], code, summary)
+            self.m.append_log("NODE-01", job["id"], log)
+        self.m.finish("NODE-01", job["id"], code, summary)
         return job
 
 
@@ -104,27 +104,27 @@ class PauseTests(Harness):
         self.online()
         self.step()
         self.assertEqual(len(self.m.active("pr-check")), 1)
-        self.assertEqual(self.m.set_paused("SF-NODE-01", "checks", True), ["checks"])
-        self.assertIsNone(self.m.claim("SF-NODE-01"))           # the node does not take it
+        self.assertEqual(self.m.set_paused("NODE-01", "checks", True), ["checks"])
+        self.assertIsNone(self.m.claim("NODE-01"))           # the node does not take it
         self.assertFalse(nodecheck.node_takes_checks(self.coord))  # so the PC checks PRs again
         self.step()
         self.assertEqual(self.m.active("pr-check"), [])          # and the queued one is given back
         self.m.unhandled("pr-check") and Engine._node_pr_check_result(self.eng, self.coord, self.m.unhandled("pr-check")[0])
         self.assertEqual((self.gh.labels, self.gh.comments), ([], []))
-        self.m.set_paused("SF-NODE-01", "checks", False)
+        self.m.set_paused("NODE-01", "checks", False)
         self.assertTrue(nodecheck.node_takes_checks(self.coord))
 
     def test_one_kind_paused_leaves_the_others(self):
         self.online()
-        self.m.set_paused("SF-NODE-01", "tests", True)
+        self.m.set_paused("NODE-01", "tests", True)
         tests = self.m.enqueue("node-checks", BASE)
         check = self.m.enqueue("pr-check", BASE, {"pr": 7, "head": HEAD})
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], check)  # skips the paused tests job
+        self.assertEqual(self.m.claim("NODE-01")["id"], check)  # skips the paused tests job
         view = {x["name"]: x for x in self.m.view()["machines"]}
-        self.assertEqual(view["SF-NODE-01"]["paused_work"], ["tests"])
+        self.assertEqual(view["NODE-01"]["paused_work"], ["tests"])
         self.assertEqual([j["id"] for j in self.m.active("node-checks")], [tests])
         with self.assertRaises(ValueError):
-            self.m.set_paused("SF-NODE-01", "coding", True)
+            self.m.set_paused("NODE-01", "coding", True)
         with self.assertRaises(ValueError):
             self.m.set_paused("NOPE", "tests", True)
 
@@ -143,10 +143,10 @@ class RunJobTests(Harness):
                 return
             running = [j for j in self.m.active("node-checks") if j["state"] == "running"]
             if not running:
-                self.m.claim("SF-NODE-01")
+                self.m.claim("NODE-01")
             elif t[0] >= 180:
-                self.m.append_log("SF-NODE-01", running[0]["id"], "== RunFlowTest\nFAIL RunFlowTest\n")
-                self.m.finish("SF-NODE-01", running[0]["id"], *finish)
+                self.m.append_log("NODE-01", running[0]["id"], "== RunFlowTest\nFAIL RunFlowTest\n")
+                self.m.finish("NODE-01", running[0]["id"], *finish)
         code = machines.run_job(self.m, "node-checks", BASE, {"only": "RunFlowTest"}, "round 9", ["unreal:5.8.3"],
                                 out=out.append, clock=lambda: t[0], sleep=sleep)
         return code, "\n".join(out)
@@ -163,13 +163,13 @@ class RunJobTests(Harness):
         self.assertEqual(code, 2)
         self.assertEqual(self.m.active("node-checks"), [])
         self.online()
-        self.m.set_paused("SF-NODE-01", "tests", True)
+        self.m.set_paused("NODE-01", "tests", True)
         self.assertEqual(self.run_with(online=False)[0], 2)
 
     def _seen_ago(self, seconds):
         from datetime import datetime, timedelta, timezone
         with self.m._db() as db:
-            db.execute("UPDATE machines SET last_seen=? WHERE name='SF-NODE-01'",
+            db.execute("UPDATE machines SET last_seen=? WHERE name='NODE-01'",
                        ((datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(),))
 
     def test_waits_for_a_node_whose_worker_is_restarting(self):
@@ -178,7 +178,7 @@ class RunJobTests(Harness):
         self.online()
         self._seen_ago(130)
         self.assertEqual(self.m.eligible(["unreal:5.8.3"], 0, "node-checks"), [])
-        self.assertEqual(self.m.returning(["unreal:5.8.3"], 0, "node-checks"), ["SF-NODE-01"])
+        self.assertEqual(self.m.returning(["unreal:5.8.3"], 0, "node-checks"), ["NODE-01"])
         out, t = [], [0.0]
 
         def sleep(_):
@@ -188,9 +188,9 @@ class RunJobTests(Harness):
             elif t[0] > 120:
                 running = [j for j in self.m.active("node-checks") if j["state"] == "running"]
                 if not running:
-                    self.m.claim("SF-NODE-01")
+                    self.m.claim("NODE-01")
                 else:
-                    self.m.finish("SF-NODE-01", running[0]["id"], 0, "Passed")
+                    self.m.finish("NODE-01", running[0]["id"], 0, "Passed")
         code = machines.run_job(self.m, "node-checks", BASE, {"only": "RunFlowTest"}, "round 9", ["unreal:5.8.3"],
                                 out=out.append, clock=lambda: t[0], sleep=sleep)
         self.assertEqual(code, 0, "\n".join(out))
@@ -234,17 +234,17 @@ class SplitRunTests(Harness):
     def test_two_nodes_split_the_checks(self):
         import machines
         self.online()
-        self.m.add_machine("GAMING-PC")
-        self.m.seen("GAMING-PC", "100.1.1.2", NODE, 32, "1", {})
+        self.m.add_machine("PC-NODE")
+        self.m.seen("PC-NODE", "100.1.1.2", NODE, 32, "1", {})
         out, t = [], [0.0]
 
         def sleep(_):
             t[0] += 60
-            for name in ("SF-NODE-01", "GAMING-PC"):
+            for name in ("NODE-01", "PC-NODE"):
                 job = self.m.claim(name)
                 if job:
                     prm = job["params"] if isinstance(job["params"], dict) else __import__("json").loads(job["params"])
-                    code = 1 if "RunFlowTest" in prm["only"] and name == "GAMING-PC" else 0
+                    code = 1 if "RunFlowTest" in prm["only"] and name == "PC-NODE" else 0
                     self.m.finish(name, job["id"], code, "done")
         code = machines.run_job(self.m, "node-checks", BASE, {"only": "RunSpecs,RunFlowTest,RunSmokeTest"}, "round 9",
                                 [], out=out.append, clock=lambda: t[0], sleep=sleep)
@@ -257,8 +257,8 @@ class SplitRunTests(Harness):
     def test_imports_never_split(self):
         import machines
         self.online()
-        self.m.add_machine("GAMING-PC")
-        self.m.seen("GAMING-PC", "100.1.1.2", NODE, 32, "1", {})
+        self.m.add_machine("PC-NODE")
+        self.m.seen("PC-NODE", "100.1.1.2", NODE, 32, "1", {})
         out, t = [], [0.0]
         machines.run_job(self.m, "node-checks", BASE, {"only": "A,B", "imports": "ImportFurniture",
                                                        "push_branch": "fletchery/round-9"}, "round 9", [],
@@ -275,14 +275,14 @@ class BuildCopyTests(Harness):
         import node_worker
         self.online(NODE + ["role:cook"])
         job_id = self.m.enqueue("package", BASE, {"version": "0.4.0"}, requested_by="build 0.4.0")
-        self.m.claim("SF-NODE-01")
+        self.m.claim("NODE-01")
         src = Path(self.tmp.name) / "node" / "LifeShare-0.4.0"
         (src / "Windows").mkdir(parents=True)
         (src / "Windows" / "LifeShare.exe").write_bytes(b"MZ" + bytes(range(256)) * 300)
 
         class Coord:
             def call(c, path, body, timeout=30):
-                return self.m.upload("SF-NODE-01", body["job_id"], body["name"], body["offset"],
+                return self.m.upload("NODE-01", body["job_id"], body["name"], body["offset"],
                                      base64.b64decode(body["data"]), body["done"], body["sha256"])
         where = node_worker.upload_build(Coord(), job_id, src, log=lambda *_: None, chunk=10000)
         self.assertTrue(where.endswith("LifeShare-0.4.0"))
@@ -292,13 +292,13 @@ class BuildCopyTests(Harness):
         with self.assertRaises(PermissionError):
             self.m.upload("OTHER", job_id, "x.zip", 0, b"", True)
         with self.assertRaises(ValueError):
-            self.m.upload("SF-NODE-01", job_id, "../x.zip", 0, b"", True)
+            self.m.upload("NODE-01", job_id, "../x.zip", 0, b"", True)
 
     def test_summary_points_at_the_pc_copy(self):
         import builds
-        s = "Packaged to E:\\n\\LifeShare-0.4.0 on SF-NODE-01; copied to E:\\pc\\LifeShare-0.4.0 on the PC"
+        s = "Packaged to E:\\n\\LifeShare-0.4.0 on NODE-01; copied to E:\\pc\\LifeShare-0.4.0 on the PC"
         self.assertEqual(builds._out_from(s), "E:\\pc\\LifeShare-0.4.0")
-        self.assertEqual(builds._out_from("Packaged to E:\\n\\B on SF-NODE-01"), "E:\\n\\B")
+        self.assertEqual(builds._out_from("Packaged to E:\\n\\B on NODE-01"), "E:\\n\\B")
 
 
 class PcLeaseTests(unittest.TestCase):
@@ -367,7 +367,7 @@ class ResultTests(Harness):
         self.finish(0, "Passed")
         self.step()
         self.assertEqual(self.gh.labels, [(7, ["ready"])])
-        self.assertIn("SF-NODE-01", self.gh.comments[0][1])
+        self.assertIn("NODE-01", self.gh.comments[0][1])
         self.assertTrue(self.eng.state.pr_checks["7"]["passed"])
         self.assertEqual(self.m.unhandled("pr-check"), [])
 
@@ -496,7 +496,7 @@ class NodeRoundTests(unittest.TestCase):
         import rounds
         cfg = SimpleNamespace(machines={"roundTests": {"labels": ["unreal:5.8.4"], "whole": True}}, state_dir="E:/s")
         prs = [SimpleNamespace(number=1, body="Closes #5"), SimpleNamespace(number=2, body="")]
-        self.assertIn("SF-NODE-01", rounds.node_round(cfg, prs, self._coord(["SF-NODE-01"])))
+        self.assertIn("NODE-01", rounds.node_round(cfg, prs, self._coord(["NODE-01"])))
         self.assertEqual(rounds.node_round(cfg, prs, self._coord([])), "")                       # no node free
         self.assertEqual(rounds.node_round(cfg, prs, self._coord(["N"], shadow=True)), "")      # shadow mode
         imp = prs + [SimpleNamespace(number=3, body="Lane-Imports: furniture")]
@@ -518,7 +518,7 @@ class NodeRoundTests(unittest.TestCase):
 
 
 class NodeImportTests(unittest.TestCase):
-    """Alex, 2026-11-12: let SF-NODE-01 push imported content so import rounds leave the PC."""
+    """Alex, 2026-11-12: let NODE-01 push imported content so import rounds leave the PC."""
 
     def _coord(self, names, seen):
         def eligible(labels, ram, recipe):

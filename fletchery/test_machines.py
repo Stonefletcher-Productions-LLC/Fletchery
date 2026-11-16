@@ -25,17 +25,17 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def node(self, name="SF-NODE-01", labels=NODE, ram=24):
+    def node(self, name="NODE-01", labels=NODE, ram=24):
         key = self.m.add_machine(name)
-        self.m.seen(name, "100.77.158.113", labels, ram, "1", {})
+        self.m.seen(name, "100.64.0.20", labels, ram, "1", {})
         return key
 
 
 class RegistryTests(Base):
     def test_key_is_shown_once_and_only_its_hash_is_kept(self):
         key = self.node()
-        self.assertTrue(self.m.authenticate("SF-NODE-01", key))
-        self.assertFalse(self.m.authenticate("SF-NODE-01", key + "x"))
+        self.assertTrue(self.m.authenticate("NODE-01", key))
+        self.assertFalse(self.m.authenticate("NODE-01", key + "x"))
         self.assertFalse(self.m.authenticate("other", key))
         self.assertNotIn(key.encode(), Path(self.m.path).read_bytes())
 
@@ -46,51 +46,51 @@ class RegistryTests(Base):
         round_job = self.m.enqueue("node-checks", SHA, requested_by="round 133")
         order = []
         for _ in range(3):
-            job = self.m.claim("SF-NODE-01")
+            job = self.m.claim("NODE-01")
             order.append(job["id"])
-            self.m.finish("SF-NODE-01", job["id"], 0, "")
+            self.m.finish("NODE-01", job["id"], 0, "")
         self.assertEqual(order, [round_job, build, check])
 
     def test_waiting_round_job_stops_the_running_pr_check(self):
         self.node()
         check = self.m.enqueue("checkout-only", SHA, requested_by="PR check")
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], check)
+        self.assertEqual(self.m.claim("NODE-01")["id"], check)
         self.assertEqual(self.m.preempt_for_rounds(), [], "nothing waits for the node yet")
         round_job = self.m.enqueue("node-checks", SHA, requested_by="round 141")
-        self.assertEqual(self.m.preempt_for_rounds(), [(check, "SF-NODE-01", round_job)])
-        self.assertTrue(self.m.heartbeat("SF-NODE-01", check)["cancel"])
+        self.assertEqual(self.m.preempt_for_rounds(), [(check, "NODE-01", round_job)])
+        self.assertTrue(self.m.heartbeat("NODE-01", check)["cancel"])
         self.assertEqual(self.m.preempt_for_rounds(), [], "one stop per round job; the node is already stopping")
 
     def test_preempt_leaves_builds_idle_nodes_and_other_round_jobs_alone(self):
         self.node()
-        self.node("GAMING-PC")
+        self.node("PC-NODE")
         build = self.m.enqueue("checkout-only", SHA, requested_by="build 0.4.0")
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], build)
+        self.assertEqual(self.m.claim("NODE-01")["id"], build)
         self.m.enqueue("node-checks", SHA, requested_by="round 141")
-        self.assertEqual(self.m.preempt_for_rounds(), [], "GAMING-PC is idle and takes it")
-        first = self.m.claim("GAMING-PC")["id"]
+        self.assertEqual(self.m.preempt_for_rounds(), [], "PC-NODE is idle and takes it")
+        first = self.m.claim("PC-NODE")["id"]
         self.m.enqueue("node-checks", SHA, requested_by="round 141 split")
         self.assertEqual(self.m.preempt_for_rounds(), [], "a build or another round job is never stopped")
-        self.assertFalse(self.m.heartbeat("SF-NODE-01", build)["cancel"])
-        self.assertFalse(self.m.heartbeat("GAMING-PC", first)["cancel"])
+        self.assertFalse(self.m.heartbeat("NODE-01", build)["cancel"])
+        self.assertFalse(self.m.heartbeat("PC-NODE", first)["cancel"])
 
     def test_preempt_only_where_the_round_job_could_run(self):
         self.node(labels=["os:windows", "role:checks"])
         check = self.m.enqueue("checkout-only", SHA, requested_by="PR check", labels=[])
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], check)
+        self.assertEqual(self.m.claim("NODE-01")["id"], check)
         self.m.enqueue("node-checks", SHA, requested_by="round 141")
         self.assertEqual(self.m.preempt_for_rounds(), [], "this node lacks the round job's labels")
 
     def test_revoke_stops_the_key_and_requeues_its_job(self):
         key = self.node()
         job = self.m.enqueue("node-checks", SHA)
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], job)
-        self.assertTrue(self.m.revoke("SF-NODE-01"))
-        self.assertFalse(self.m.authenticate("SF-NODE-01", key))
+        self.assertEqual(self.m.claim("NODE-01")["id"], job)
+        self.assertTrue(self.m.revoke("NODE-01"))
+        self.assertFalse(self.m.authenticate("NODE-01", key))
         self.assertEqual(self.m.view()["jobs"][0]["state"], "queued")
-        new = self.m.add_machine("SF-NODE-01")  # re-adding gives a new key; the old one stays dead
-        self.assertTrue(self.m.authenticate("SF-NODE-01", new))
-        self.assertFalse(self.m.authenticate("SF-NODE-01", key))
+        new = self.m.add_machine("NODE-01")  # re-adding gives a new key; the old one stays dead
+        self.assertTrue(self.m.authenticate("NODE-01", new))
+        self.assertFalse(self.m.authenticate("NODE-01", key))
 
     def test_bad_names_are_refused(self):
         for name in ("", "../x", "a b", "x" * 80):
@@ -98,9 +98,9 @@ class RegistryTests(Base):
                 self.m.add_machine(name)
 
     def test_listen_must_be_one_private_address(self):
-        self.assertEqual(check_listen("100.83.43.111:8771"), ("100.83.43.111", 8771))
+        self.assertEqual(check_listen("100.64.0.10:8771"), ("100.64.0.10", 8771))
         self.assertEqual(check_listen("127.0.0.1:8771"), ("127.0.0.1", 8771))
-        for bad in ("0.0.0.0:8771", "[::]:8771", ":8771", "8.8.8.8:8771", "example.com:8771", "100.83.43.111"):
+        for bad in ("0.0.0.0:8771", "[::]:8771", ":8771", "8.8.8.8:8771", "example.com:8771", "100.64.0.10"):
             with self.assertRaises(ValueError, msg=bad):
                 check_listen(bad)
 
@@ -109,28 +109,28 @@ class QueueTests(Base):
     def test_jobs_go_to_a_node_with_the_labels_and_ram(self):
         self.node("small", ["os:windows", "role:tests"], 8)
         self.node("cook", ["os:windows"], 64)
-        self.node("SF-NODE-01")
+        self.node("NODE-01")
         job = self.m.enqueue("node-checks", SHA, {"only": "RunFlowTest, RunM5aTest", "strict_slots": True}, pr=1666)
         self.assertEqual(self.m.view()["jobs"][0]["pr"], 1666)
         self.assertIsNone(self.m.claim("small"))   # too little RAM
         self.assertIsNone(self.m.claim("cook"))    # no role:tests
-        got = self.m.claim("SF-NODE-01")
+        got = self.m.claim("NODE-01")
         self.assertEqual((got["id"], got["params"]), (job, {"only": "RunFlowTest,RunM5aTest", "strict_slots": True}))
 
     def test_extra_labels_narrow_the_choice(self):
         self.node()
         self.m.enqueue("node-checks", SHA, labels=["unreal:5.8.3"])
-        self.assertIsNone(self.m.claim("SF-NODE-01"))
+        self.assertIsNone(self.m.claim("NODE-01"))
         self.m.enqueue("node-checks", SHA, labels=["unreal:5.8.4"])
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], 2)
+        self.assertEqual(self.m.claim("NODE-01")["id"], 2)
 
     def test_a_node_runs_one_job_at_a_time_oldest_first(self):
         self.node()
         a, b = self.m.enqueue("node-checks", SHA), self.m.enqueue("nightly-full", SHA)
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], a)
-        self.assertIsNone(self.m.claim("SF-NODE-01"))
-        self.m.finish("SF-NODE-01", a, 0, "ok")
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], b)
+        self.assertEqual(self.m.claim("NODE-01")["id"], a)
+        self.assertIsNone(self.m.claim("NODE-01"))
+        self.m.finish("NODE-01", a, 0, "ok")
+        self.assertEqual(self.m.claim("NODE-01")["id"], b)
 
     def test_parameters_can_choose_tests_never_a_command(self):
         for only in ("RunFlowTest; Remove-Item", "a b", "$(x)", "x,,y", "../x"):
@@ -147,7 +147,7 @@ class QueueTests(Base):
     def test_only_the_node_running_a_job_can_report_on_it(self):
         self.node(); self.node("other")
         job = self.m.enqueue("node-checks", SHA)
-        self.m.claim("SF-NODE-01")
+        self.m.claim("NODE-01")
         for call in (lambda: self.m.heartbeat("other", job), lambda: self.m.append_log("other", job, "x"),
                      lambda: self.m.finish("other", job, 0)):
             with self.assertRaises(PermissionError):
@@ -158,21 +158,21 @@ class QueueTests(Base):
         queued = self.m.enqueue("node-checks", SHA)
         running = self.m.enqueue("node-checks", SHA)
         self.assertEqual(self.m.cancel(queued), "cancelled")
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], running)
-        self.assertFalse(self.m.heartbeat("SF-NODE-01", running)["cancel"])
+        self.assertEqual(self.m.claim("NODE-01")["id"], running)
+        self.assertFalse(self.m.heartbeat("NODE-01", running)["cancel"])
         self.assertEqual(self.m.cancel(running), "stopping")
-        self.assertTrue(self.m.heartbeat("SF-NODE-01", running)["cancel"])
-        self.m.finish("SF-NODE-01", running, 130, "Cancelled from Fletchery")
+        self.assertTrue(self.m.heartbeat("NODE-01", running)["cancel"])
+        self.m.finish("NODE-01", running, 130, "Cancelled from Fletchery")
         self.assertEqual(self.m.view()["jobs"][0]["state"], "cancelled")
 
     def test_a_silent_node_loses_its_job_once_then_it_fails(self):
         self.node()
         job = self.m.enqueue("node-checks", SHA)
-        self.m.claim("SF-NODE-01")
+        self.m.claim("NODE-01")
         later = datetime.now(timezone.utc) + timedelta(minutes=10)
         self.assertEqual(self.m.reap(later), [job])
         self.assertEqual(self.m.view()["jobs"][0]["state"], "queued")
-        self.m.claim("SF-NODE-01")
+        self.m.claim("NODE-01")
         self.m.reap(later)
         row = self.m.view()["jobs"][0]
         self.assertEqual((row["state"], row["attempts"]), ("lost", 2))
@@ -180,15 +180,15 @@ class QueueTests(Base):
     def test_logs_append_and_are_capped(self):
         self.node()
         job = self.m.enqueue("node-checks", SHA)
-        self.m.claim("SF-NODE-01")
-        self.m.append_log("SF-NODE-01", job, "line 1\n")
-        self.m.append_log("SF-NODE-01", job, "line 2\n")
+        self.m.claim("NODE-01")
+        self.m.append_log("NODE-01", job, "line 1\n")
+        self.m.append_log("NODE-01", job, "line 2\n")
         self.assertEqual(self.m.log_text(job), "line 1\nline 2\n")
         old = machines.LOG_MAX_BYTES
         machines.LOG_MAX_BYTES = 20
         try:
-            self.m.append_log("SF-NODE-01", job, "x" * 100)
-            self.m.append_log("SF-NODE-01", job, "more")
+            self.m.append_log("NODE-01", job, "x" * 100)
+            self.m.append_log("NODE-01", job, "more")
         finally:
             machines.LOG_MAX_BYTES = old
         self.assertIn("[log cut at 50 MB]", self.m.log_text(job))
@@ -204,11 +204,11 @@ class StatusTests(Base):
         self.m.post_statuses(post)
         self.m.post_statuses(post)
         self.assertEqual(sent, [("pending", "shadow/Nightly full tests (node)", "Queued in Fletchery")])
-        self.m.claim("SF-NODE-01")
-        self.m.finish("SF-NODE-01", job, 1, "2 of 40 failed on SF-NODE-01: RunFlowTest, RunM5aTest")
+        self.m.claim("NODE-01")
+        self.m.finish("NODE-01", job, 1, "2 of 40 failed on NODE-01: RunFlowTest, RunM5aTest")
         self.m.post_statuses(post)
         self.assertEqual(sent[-1], ("failure", "shadow/Nightly full tests (node)",
-                                    "2 of 40 failed on SF-NODE-01: RunFlowTest, RunM5aTest"))
+                                    "2 of 40 failed on NODE-01: RunFlowTest, RunM5aTest"))
         live = Machines(self.tmp.name, "owner/repo", shadow=False)
         live.enqueue("node-checks", SHA)
         live.post_statuses(post)
@@ -283,17 +283,17 @@ class ApiTests(Base):
     def test_unknown_keys_are_refused_and_throttled(self):
         api = WorkerApi(self.m, "127.0.0.1:0")
         key = self.node()
-        self.assertEqual(api.handle("/v1/claim", "SF-NODE-01", "nope", "1.2.3.4", {})[0], 401)
+        self.assertEqual(api.handle("/v1/claim", "NODE-01", "nope", "1.2.3.4", {})[0], 401)
         for _ in range(10):
-            api.handle("/v1/claim", "SF-NODE-01", "nope", "1.2.3.4", {})
-        self.assertEqual(api.handle("/v1/claim", "SF-NODE-01", key, "1.2.3.4", {})[0], 429)
-        self.assertEqual(api.handle("/v1/claim", "SF-NODE-01", key, "5.6.7.8", {})[0], 200)
+            api.handle("/v1/claim", "NODE-01", "nope", "1.2.3.4", {})
+        self.assertEqual(api.handle("/v1/claim", "NODE-01", key, "1.2.3.4", {})[0], 429)
+        self.assertEqual(api.handle("/v1/claim", "NODE-01", key, "5.6.7.8", {})[0], 200)
 
     def test_a_paused_node_checks_in_but_takes_nothing(self):
         api = WorkerApi(self.m, "127.0.0.1:0")
         key = self.node()
         self.m.enqueue("node-checks", SHA)
-        code, body = api.handle("/v1/claim", "SF-NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})
+        code, body = api.handle("/v1/claim", "NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})
         self.assertEqual((code, body["job"]), (200, None))
         self.assertTrue(self.m.view()["machines"][0]["stats"]["paused"])
 
@@ -305,15 +305,15 @@ class ApiTests(Base):
         key = self.node()
         held = {"paused": True, "stats": {"paused": True, "lease": "local run Tools\\RunHomeShots.ps1"}}
         self.m.enqueue("node-checks", SHA, requested_by="pr 2120")
-        self.assertFalse(api.handle("/v1/claim", "SF-NODE-01", key, "ip", held)[1]["round_waiting"],
+        self.assertFalse(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["round_waiting"],
                          "a PR check is not a round")
         self.m.enqueue("node-checks", SHA, requested_by="round 216")
-        self.assertTrue(api.handle("/v1/claim", "SF-NODE-01", key, "ip", held)[1]["round_waiting"])
+        self.assertTrue(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["round_waiting"])
         self.assertFalse(self.m.round_waiting("other"), "an unknown node waits for nothing")
-        self.m.set_paused("SF-NODE-01", "tests", True)
-        self.assertFalse(self.m.round_waiting("SF-NODE-01"), "a node paused from tests by a person is not waited for")
-        self.m.set_paused("SF-NODE-01", "tests", False)
-        job = api.handle("/v1/claim", "SF-NODE-01", key, "ip", {})[1]["job"]
+        self.m.set_paused("NODE-01", "tests", True)
+        self.assertFalse(self.m.round_waiting("NODE-01"), "a node paused from tests by a person is not waited for")
+        self.m.set_paused("NODE-01", "tests", False)
+        job = api.handle("/v1/claim", "NODE-01", key, "ip", {})[1]["job"]
         self.assertTrue(job["round"], "the round's job is marked as a round job")
 
 
@@ -321,11 +321,11 @@ class RoundMarkerTests(unittest.TestCase):
     def test_marker_is_written_refreshed_and_removed(self):
         with tempfile.TemporaryDirectory() as d:
             lease = Path(d) / "heavy.json"
-            cfg = {"machine": "SF-NODE-01", "heavyLeaseFile": str(lease)}
+            cfg = {"machine": "NODE-01", "heavyLeaseFile": str(lease)}
             marker = node_worker.round_marker_path(cfg)
             self.assertEqual(marker, Path(d) / "heavy.round-waiting.json")
             node_worker.mark_round(cfg, True, "a merge round job is queued for this machine")
-            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["machine"], "SF-NODE-01")
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["machine"], "NODE-01")
             self.assertFalse(lease.exists(), "the marker never touches the lease itself")
             node_worker.mark_round(cfg, False)
             self.assertFalse(marker.exists())
@@ -337,12 +337,12 @@ class RoundMarkerTests(unittest.TestCase):
 
 
 class RoundLeaseTests(unittest.TestCase):
-    """2026-11-16, rounds 213-216: SF-NODE-01 has no heavyLeaseFile, so each step of a round job took the lease on its
+    """2026-11-16, rounds 213-216: NODE-01 has no heavyLeaseFile, so each step of a round job took the lease on its
     own and local RunSpecs runs got in between (ImportAudio, BuildContent: NO RESULT). A round job now holds it whole."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.lease = Path(self.tmp.name) / "heavy.json"
-        self.cfg = {"machine": "SF-NODE-01", "workRoot": self.tmp.name, "roundLeaseFile": str(self.lease),
+        self.cfg = {"machine": "NODE-01", "workRoot": self.tmp.name, "roundLeaseFile": str(self.lease),
                     "roundMarkerFile": ""}
 
     def tearDown(self):
@@ -390,16 +390,16 @@ class DashboardTests(Base):
         fm.machines = machines.Coordinator(cfg, fm.ctx.gh, log=logs.append)
         dash = Dashboard.__new__(Dashboard)
         dash.fm = fm
-        added = dash.machine_add({"name": "SF-NODE-01"})
-        self.assertTrue(fm.machines.machines.authenticate("SF-NODE-01", added["key"]))
+        added = dash.machine_add({"name": "NODE-01"})
+        self.assertTrue(fm.machines.machines.authenticate("NODE-01", added["key"]))
         job = dash.job_add({"recipe": "node-checks", "ref": "main", "only": "RunFlowTest", "pr": "1666"})
         self.assertEqual(job["sha"], "b" * 40)
         row = fm.machines.machines.view()["jobs"][0]
         self.assertEqual((row["ref"], row["pr"], row["params"]["only"], row["requested_by"]), ("main", 1666, "RunFlowTest", "dashboard"))
         self.assertEqual(dash.job_cancel({"id": job["id"]}), {"state": "cancelled"})
-        self.assertEqual(dash.machine_revoke({"name": "SF-NODE-01"}), {"revoked": "SF-NODE-01"})
+        self.assertEqual(dash.machine_revoke({"name": "NODE-01"}), {"revoked": "NODE-01"})
         with self.assertRaises(ValueError):
-            dash.machine_revoke({"name": "SF-NODE-01"})
+            dash.machine_revoke({"name": "NODE-01"})
         fm.machines = None
         with self.assertRaises(ValueError):
             dash.job_add({"recipe": "node-checks", "ref": "main"})
@@ -475,8 +475,8 @@ class RecipeTests(unittest.TestCase):
         self.assertIn("-ProbePath @(", argv[-1])
 
     def test_summary_from_the_result_json(self):
-        r = {"machine": "SF-NODE-01", "results": [{"name": "A", "pass": True}, {"name": "B", "pass": False}]}
-        self.assertEqual(node_worker._summary(r), "1 of 2 failed on SF-NODE-01: B")
+        r = {"machine": "NODE-01", "results": [{"name": "A", "pass": True}, {"name": "B", "pass": False}]}
+        self.assertEqual(node_worker._summary(r), "1 of 2 failed on NODE-01: B")
         self.assertEqual(node_worker._summary({"results": [{"name": "A", "pass": True}]}), "1 checks passed")
 
 

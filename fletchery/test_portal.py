@@ -13,8 +13,8 @@ import portal  # noqa: E402
 import push  # noqa: E402
 from config import Config  # noqa: E402
 
-HOSTNAME = "alex-pc.tail1234.ts.net"
-USER = "alex@example.com"
+HOSTNAME = "your-pc.your-tailnet.ts.net"
+USER = "you@example.com"
 STATUS = {
     "project": "Harbor", "repo": "example/harbor", "repo_url": "https://github.com/example/harbor",
     "last_pass": "2026-11-16T04:00:00+00:00", "next_pass_at": "2026-11-16T04:10:00+00:00", "passing": False,
@@ -43,10 +43,10 @@ STATUS = {
          "download": "https://github.com/example/harbor/releases/tag/build-0.4.5",
          "drive": "https://drive.google.com/file/d/one https://drive.google.com/file/d/two", "reason": r"Packaged to E:\builds\LifeShare-0.4.5"},
         {"id": "b2", "version": "0.4.6", "state": "scheduled", "at": "2026-11-17T02:00:00+00:00", "ref": "main"}]},
-    "machines": {"listen": "100.83.43.111:8771", "machines": [
-        {"name": "SF-NODE-01", "online": True, "last_seen": "2026-11-16T04:00:00+00:00", "job": {"recipe": "package", "ref": "main"}, "paused_work": []},
+    "machines": {"listen": "100.64.0.10:8771", "machines": [
+        {"name": "NODE-01", "online": True, "last_seen": "2026-11-16T04:00:00+00:00", "job": {"recipe": "package", "ref": "main"}, "paused_work": []},
         {"name": "old", "revoked": True}]},
-    "log": [{"at": "2026-11-16T04:00:00+00:00", "line": r"round 16 uses C:\Users\alexa\wt\round-16"}],
+    "log": [{"at": "2026-11-16T04:00:00+00:00", "line": r"round 16 uses C:\Users\you\wt\round-16"}],
 }
 
 
@@ -70,14 +70,14 @@ class Summary(unittest.TestCase):
         done = next(b for b in self.s["builds"] if b["version"] == "0.4.5")
         self.assertEqual([l["label"] for l in done["links"]], ["GitHub download", "Google Drive", "Google Drive part 2"])
         self.assertEqual(done["machine"], "this PC")
-        self.assertEqual([m["name"] for m in self.s["machines"]], ["SF-NODE-01"])
+        self.assertEqual([m["name"] for m in self.s["machines"]], ["NODE-01"])
 
     def test_pauses(self):
         self.assertEqual([p["kind"] for p in self.s["pauses"]], ["signed_out", "held", "sync"])
 
     def test_nothing_private_leaves_the_pc(self):
         text = json.dumps(self.s)
-        for secret in ("ANTHROPIC", "abcd", "secret-page", "lifeshare-scratch", "E:\\\\", "C:\\\\", "100.83.43.111",
+        for secret in ("ANTHROPIC", "abcd", "secret-page", "lifeshare-scratch", "E:\\\\", "C:\\\\", "100.64.0.10",
                        "javascript:", "/api/merge/log", "out_dir", "worker_ranks"):
             self.assertNotIn(secret, text)
         self.assertIn("[a folder on the PC]", text)
@@ -91,7 +91,7 @@ class Settings(unittest.TestCase):
     def test_off_and_defaults(self):
         self.assertIsNone(portal.settings(None))
         self.assertIsNone(portal.settings({"enabled": False, "port": 8772}))
-        self.assertEqual(portal.settings({"hosts": ["Alex-PC.Tail1234.ts.net."], "users": ["Alex@Example.com"]}),
+        self.assertEqual(portal.settings({"hosts": ["Your-PC.Your-Tailnet.ts.net."], "users": ["You@Example.com"]}),
                          {"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": None})
 
     def test_bad_blocks(self):
@@ -153,7 +153,7 @@ class Served(unittest.TestCase):
     def test_tailnet_member_on_the_list(self):
         self.assertEqual(self.ask("/api/summary", self.remote())[0], 200)
         self.assertEqual(self.ask("/api/summary", self.remote(Host=HOSTNAME + ":8443"))[0], 200)
-        self.assertEqual(self.ask("/api/summary", self.remote(**{"Tailscale-User-Login": "ALEX@example.com"}))[0], 200)
+        self.assertEqual(self.ask("/api/summary", self.remote(**{"Tailscale-User-Login": "YOU@example.com"}))[0], 200)
 
     def test_everyone_else_is_refused(self):
         cases = {"another account": self.remote(**{"Tailscale-User-Login": "eve@example.com"}),

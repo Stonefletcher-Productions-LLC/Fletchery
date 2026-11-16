@@ -27,3 +27,28 @@ shell/bin/
 shell/obj/
 shell/packages/
 ui/node_modules/
+
+# Live state and machine-local files: never commit these (the repo is public-safe).
+# A project's live profile lives outside the repo (%APPDATA%\Fletchery\Projects); only the examples are tracked.
+*.profile.json
+*.profile.json.*
+!examples/*.profile.json
+!app/BuildLane.profile.json
+*.bak
+*.bak-*
+*.db
+*.db-journal
+*.db-wal
+*.jsonl
+state.json
+fletchery.lock
+portal-push.json
+push-keys.json
+node.json
+fletchery-worker.json
+keys/
+*_key
+*_key.pub
+*.pem
+id_rsa*
+id_ed25519*

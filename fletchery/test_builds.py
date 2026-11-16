@@ -53,8 +53,8 @@ class Base(unittest.TestCase):
         self.tmp.cleanup()
 
     def node(self, labels=("os:windows", "role:tests", "role:cook"), at=None):
-        self.m.add_machine("SF-NODE-01")
-        self.m.seen("SF-NODE-01", "100.1.1.1", list(labels), 24, "1", {})
+        self.m.add_machine("NODE-01")
+        self.m.seen("NODE-01", "100.1.1.1", list(labels), 24, "1", {})
 
     def add(self, **kw):
         data = {"version": "0.3.9", "at": NOW.isoformat(), **kw}
@@ -115,7 +115,7 @@ class RoutingTests(Base):
         job = self.m.job(row["job"])
         self.assertEqual((job["recipe"], job["sha"], job["params"]), ("package", SHA, {"version": "0.3.9", "tests": "full"}))
         self.assertIn("role:cook", machines.RECIPES["package"]["labels"])
-        self.assertEqual(self.m.claim("SF-NODE-01")["id"], row["job"])
+        self.assertEqual(self.m.claim("NODE-01")["id"], row["job"])
 
     def test_auto_without_a_cook_node_uses_this_pc(self):
         self.node(labels=("os:windows", "role:tests"))
@@ -134,10 +134,10 @@ class RoutingTests(Base):
         self.add()
         self.b.tick(NOW)
         row = self.b.rows[0]
-        self.m.claim("SF-NODE-01")
+        self.m.claim("NODE-01")
         self.b.tick(NOW)
-        self.assertEqual((row["state"], row["machine"]), ("running", "SF-NODE-01"))
-        self.m.finish("SF-NODE-01", row["job"], 0, r"Packaged to E:\fletchery-builds\LifeShare-0.3.9 on SF-NODE-01")
+        self.assertEqual((row["state"], row["machine"]), ("running", "NODE-01"))
+        self.m.finish("NODE-01", row["job"], 0, r"Packaged to E:\fletchery-builds\LifeShare-0.3.9 on NODE-01")
         self.b.tick(NOW)
         self.assertEqual((row["state"], row["output"]), ("done", r"E:\fletchery-builds\LifeShare-0.3.9"))
 
@@ -146,8 +146,8 @@ class RoutingTests(Base):
         self.add()
         self.b.tick(NOW)
         row = self.b.rows[0]
-        self.m.claim("SF-NODE-01")
-        self.m.finish("SF-NODE-01", row["job"], 2, "This node does not run 'package'")
+        self.m.claim("NODE-01")
+        self.m.finish("NODE-01", row["job"], 2, "This node does not run 'package'")
         self.b.tick(NOW)
         self.assertEqual((row["state"], row["route"]), ("waiting", "pc"))
 
@@ -156,8 +156,8 @@ class RoutingTests(Base):
         self.add()
         self.b.tick(NOW)
         row = self.b.rows[0]
-        self.m.claim("SF-NODE-01")
-        self.m.finish("SF-NODE-01", row["job"], 1, "Package 0.3.9 failed (exit 1)")
+        self.m.claim("NODE-01")
+        self.m.finish("NODE-01", row["job"], 1, "Package 0.3.9 failed (exit 1)")
         self.b.tick(NOW)
         self.assertEqual((row["state"], row["reason"]), ("failed", "Package 0.3.9 failed (exit 1)"))
 
