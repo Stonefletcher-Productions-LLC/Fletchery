@@ -25,7 +25,7 @@ T0 = datetime(2026, 11, 15, 2, 0, tzinfo=timezone.utc)
 WAITING = {  # real reasons from LifeShare's status page, 2026-11-15
     1964: "waits for #1737 (queued), #1738 (queued)",
     1907: "waits for #1889 (queued)",
-    1934: "needs a person: PR #1962 fails its PR check on GAMING-PC at head aac61bdda0, and its repairs ended",
+    1934: "needs a person: PR #1962 fails its PR check on PC-NODE at head aac61bdda0, and its repairs ended",
     2000: "repairing PR #1990: waits for new feedback or a free repair slot",
     1500: "waits for a free agent: every suitable one is off, paused or busy",
     1501: "depends on missing issue #42",

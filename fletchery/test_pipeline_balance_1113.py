@@ -131,10 +131,10 @@ class BusyNodeIsNotPaused(unittest.TestCase):
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row
         db.execute("CREATE TABLE jobs (id INTEGER, machine TEXT, state TEXT)")
-        node = {"name": "SF-NODE-01"}
+        node = {"name": "NODE-01"}
         lease = {"paused": True, "lease": "LaneGuard RunSpecs"}
         self.assertTrue(machines.Machines._held_off(db, node, lease), "idle and the lease is someone else's: paused")
-        db.execute("INSERT INTO jobs VALUES (357, 'SF-NODE-01', 'running')")
+        db.execute("INSERT INTO jobs VALUES (357, 'NODE-01', 'running')")
         self.assertFalse(machines.Machines._held_off(db, node, lease), "its own job holds the lease: busy, not paused")
         self.assertTrue(machines.Machines._held_off(db, node, {**lease, "pause_file": True}))
         self.assertTrue(machines.Machines._held_off(db, node, {**lease, "checkout_failing": 3}))

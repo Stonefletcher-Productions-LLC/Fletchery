@@ -1,6 +1,6 @@
 # Machines: test nodes that take jobs from Fletchery
 
-Fletchery on the PC is the one job queue and history for every build machine. A test node (SF-NODE-01 first) runs
+Fletchery on the PC is the one job queue and history for every build machine. A test node (NODE-01 first) runs
 a small worker, `fletchery/node_worker.py`, that connects **out** to Fletchery over Tailscale, asks for work, runs it
 and reports back. Building → **Machines** shows the PC and each node: online or offline, the job it is running, its
 last result, CPU, free RAM and disk. **Jobs** below it lists the queue and history with each job's log.
@@ -8,7 +8,7 @@ last result, CPU, free RAM and disk. **Jobs** below it lists the queue and histo
 ## How it is kept safe
 
 - **Private network only.** The worker API listens on the coordinator's Tailscale address and port
-  (`workers.machines.listen`, e.g. `100.83.43.111:8771`). Fletchery refuses `0.0.0.0`, `::` and public addresses.
+  (`workers.machines.listen`, e.g. `100.64.0.10:8771`). Fletchery refuses `0.0.0.0`, `::` and public addresses.
   The tailnet ACL lets only `tag:node` reach `tag:coordinator:8771`. The dashboard stays on `127.0.0.1:8770`.
 - **One key per node, revocable.** Adding a node prints its key once; Fletchery keeps only its SHA-256 hash.
   Revoking (dashboard or `machines.py revoke`) stops the key at once and queues the node's running job again.
@@ -120,7 +120,7 @@ half passed. A run with `--imports` is never split, because the content is impor
 free it is one job, as before.
 
 The Gaming PC can be the second node: run `node_worker.py` on the PC with its own `workRoot` (not a Fletchery
-worktree), its own machine key, and the same labels as SF-NODE-01. Set `heavyLeaseFile` in its config to the PC's
+worktree), its own machine key, and the same labels as NODE-01. Set `heavyLeaseFile` in its config to the PC's
 heavy lease (`E:\\GitHubRunner\\ResourceLeases\\heavy.json`): the worker then holds that lease for each job and shows as
 paused (takes nothing) while a round, a build or a local editor run holds it, so a node job and other Unreal work on
 the PC never run at the same time. Pause it from Machines (Tests, PR checks, Builds) when the PC is needed.
@@ -178,22 +178,22 @@ The Overview's machine strip lists what is paused.
 1. **Profile** (live profile, `workers` block; needs Alex's OK):
 
    ```json
-   "machines": {"listen": "100.83.43.111:8771", "shadow": true}
+   "machines": {"listen": "100.64.0.10:8771", "shadow": true}
    ```
 
-   Fletchery restarts with it; the log says `machines: worker API on 100.83.43.111:8771`.
+   Fletchery restarts with it; the log says `machines: worker API on 100.64.0.10:8771`.
 2. **Add the node** in Building → Machines → *Add or revoke a machine*, or on the PC:
-   `python <install>\fletchery\machines.py --state-dir <state> add SF-NODE-01`. Copy the key it prints.
-3. **On the node**, put the key in a file only the worker's account can read (e.g. `C:\StoneNode\keys\fletchery_node_key`),
+   `python <install>\fletchery\machines.py --state-dir <state> add NODE-01`. Copy the key it prints.
+3. **On the node**, put the key in a file only the worker's account can read (e.g. `C:\FletcheryNode\keys\fletchery_node_key`),
    copy `fletchery\node_worker.py` anywhere, and write its config:
 
    ```json
-   {"coordinator": "http://100.83.43.111:8771", "machine": "SF-NODE-01",
-    "keyFile": "C:\\StoneNode\\keys\\fletchery_node_key",
+   {"coordinator": "http://100.64.0.10:8771", "machine": "NODE-01",
+    "keyFile": "C:\\FletcheryNode\\keys\\fletchery_node_key",
     "labels": ["os:windows", "ram:24", "unreal:5.8.4", "role:tests", "role:cook"],
     "workRoot": "E:\\buildlane-node\\_work",
     "repoUrl": "git@github.com:Stonefletcher-Productions-LLC/LifeShare.git",
-    "gitSshKey": "C:\\StoneNode\\keys\\lifeshare_deploy",
+    "gitSshKey": "C:\\FletcheryNode\\keys\\lifeshare_deploy",
     "engine": "E:\\UE_5.8",
     "pauseFile": "E:\\GitHubRunner\\PAUSED-NODE",
     "recipes": ["node-checks", "nightly-full", "checkout-only", "pr-check", "package"]}

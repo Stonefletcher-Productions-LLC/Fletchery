@@ -128,6 +128,69 @@
     "mergeRounds": true,
     "mergeLabel": "ready",
     "mergeRoundMax": 12,
-    "mergeNotes": "E:\\lifeshare-scratch\\foreman\\merger-notes.md"
+    "mergeNotes": "E:\\lifeshare-scratch\\foreman\\merger-notes.md",
+    "reviewerMaxTurns": 50,
+    "escalate": true,
+    "mergeAgent": "opus",
+    "roundAgent": "opus",
+    "roundSharedSessions": 4,
+    "mergePlaytest": true,
+    "mergeFlags": [
+      {
+        "paths": "^Content/Town/|^Content/HomeKit/|^Source/.*(Furniture|Venue|Slot)[^/]*\\.(cpp|h)$",
+        "flag": "strict NavCheck on the PC"
+      }
+    ],
+    "prCheckCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File Tools/CI/PrCheck.ps1",
+    "heavyLeaseFile": "E:\\GitHubRunner\\ResourceLeases\\heavy.json",
+    "keepMergeCheckouts": 2,
+    "mergeBackupDir": "D:\\Backups\\merge-checkouts",
+    "workMinimumFreeGB": 50,
+    "workerAllowedTools": [
+      "Bash(E:/BlenderTools/BlenderMCP/.venv/Scripts/python.exe E:/BlenderTools/BlenderMCP/call.py:*)"
+    ],
+    "workerDirs": [
+      "E:/BlenderTools/BlenderMCP"
+    ],
+    "machines": {
+      "listen": "100.64.0.10:8771",
+      "shadow": false,
+      "prCheck": {
+        "labels": [
+          "unreal:5.8.4"
+        ]
+      },
+      "roundTests": {
+        "labels": [
+          "unreal:5.8.4"
+        ],
+        "whole": true,
+        "imports": true
+      },
+      "assetRoots": [
+        "E:\\lifeshare-scratch\\meshy_export"
+      ]
+    },
+    "builds": {
+      "publish": {
+        "to": "github",
+        "keep": 3,
+        "driveDir": "G:\\My Drive\\Builds",
+        "driveRemote": "gdrive:Builds",
+        "driveKeep": 2
+      }
+    },
+    "portal": {
+      "port": 8772,
+      "hosts": [
+        "your-pc.your-tailnet.ts.net"
+      ],
+      "users": [
+        "you@example.com"
+      ],
+      "push": {
+        "contact": "mailto:you@example.com"
+      }
+    }
   }
 }

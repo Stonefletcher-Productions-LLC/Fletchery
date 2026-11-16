@@ -407,6 +407,9 @@ Fletchery can serve a read-only **phone portal**: add it to your iPhone's Home S
 follow what needs you, the workers, merge rounds and builds with their download links, with optional notifications. It
 is reached over Tailscale only, never the public internet. [Set it up](docs/PORTAL.md).
 
+<p><img src="docs/images/fletchery/portal.png" width="260" alt="The phone portal on an iPhone: counts for needs you, working, queued and to merge, then what is working now and the merge round">
+  <img src="docs/images/fletchery/portal-dark.png" width="260" alt="The same portal in dark mode"></p>
+
 ## Something looks wrong
 
 | You see | What to do |

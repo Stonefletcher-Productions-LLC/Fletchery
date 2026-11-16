@@ -1,4 +1,4 @@
-"""Fletchery's node worker: runs on a test node (SF-NODE-01), takes jobs from the Fletchery coordinator on the PC, runs
+"""Fletchery's node worker: runs on a test node (NODE-01), takes jobs from the Fletchery coordinator on the PC, runs
 them and reports back. Python standard library only; nothing else to install.
 
 The worker trusts its own code and config, not the coordinator: a job can only name one of the RECIPES below, with
@@ -6,14 +6,14 @@ parameters checked here, and a commit SHA. The worker fetches that commit read-o
 runs the recipe's repo scripts at below-normal priority. Logs stream back in chunks; a heartbeat goes every 30 s and
 carries the answer to "was this job cancelled?".
 
-Config (JSON, e.g. C:\\StoneNode\\fletchery-worker.json):
-    {"coordinator": "http://100.83.43.111:8771", "machine": "SF-NODE-01",
-     "keyFile": "C:\\\\StoneNode\\\\keys\\\\fletchery_node_key",          # the key Fletchery printed when the node was added
+Config (JSON, e.g. C:\\FletcheryNode\\fletchery-worker.json):
+    {"coordinator": "http://100.64.0.10:8771", "machine": "NODE-01",
+     "keyFile": "C:\\\\FletcheryNode\\\\keys\\\\fletchery_node_key",          # the key Fletchery printed when the node was added
      "labels": ["os:windows", "ram:24", "unreal:5.8.4", "role:tests", "role:cook"],
      "workRoot": "E:\\\\buildlane-node\\\\_work",                          # the checkout is <workRoot>\\fletchery\\LifeShare
      "repoUrl": "git@github.com:Stonefletcher-Productions-LLC/LifeShare.git",
-     "gitSshKey": "C:\\\\StoneNode\\\\keys\\\\lifeshare_deploy",           # read-only deploy key
-     "gitPushKey": "C:\\\\StoneNode\\\\keys\\\\lifeshare_push",            # optional write deploy key: lets merge rounds import
+     "gitSshKey": "C:\\\\FletcheryNode\\\\keys\\\\lifeshare_deploy",           # read-only deploy key
+     "gitPushKey": "C:\\\\FletcheryNode\\\\keys\\\\lifeshare_push",            # optional write deploy key: lets merge rounds import
                                                                          # content here and push it to fletchery/round-N only
      "engine": "E:\\\\UE_5.8",
      "pauseFile": "E:\\\\GitHubRunner\\\\PAUSED-NODE",                    # while it exists, take no new job
@@ -288,7 +288,7 @@ ROUND_LEASE_WAIT_MINUTES = 30   # a round job waits this long for a local run to
 
 def round_lease_path(cfg: dict) -> str:
     """Where a merge round's job takes the machine's heavy lease for its whole length: `roundLeaseFile` ("" = never),
-    else `heavyLeaseFile`, else LaneGuard's default lease on Windows. 2026-11-16: SF-NODE-01 has no heavyLeaseFile, so
+    else `heavyLeaseFile`, else LaneGuard's default lease on Windows. 2026-11-16: NODE-01 has no heavyLeaseFile, so
     each step of a round job took the lease on its own and local runs (RunSpecs, RunHomeShots, BuildTown) got in
     between: ImportAudio and BuildContent refused with NO RESULT in rounds 213-216."""
     if "roundLeaseFile" in cfg:
@@ -312,7 +312,7 @@ def drop_lease(cfg: dict, token: str) -> None:
 
 # ---- a merge round waiting for this machine ----
 # Alex, 2026-11-11 (Fletchery #162): on a node, merge rounds go before other work. On 2026-11-16 rounds 213-215 failed
-# because local runs on SF-NODE-01 (RunHomeShots, BuildTown, RunSpecs) kept taking the heavy lease, one after another,
+# because local runs on NODE-01 (RunHomeShots, BuildTown, RunSpecs) kept taking the heavy lease, one after another,
 # so the round's BuildContent found it taken and gave no result. While a round job is queued for this node (and the node
 # is held off by someone else's lease) or runs here, the worker keeps a marker file beside the lease fresh. LifeShare's
 # LaneGuard refuses a new local run while the marker is fresh (unless it is part of a Fletchery job), so the round gets
@@ -645,7 +645,7 @@ CHECKOUT_BACKOFF = (300, 900, 1800)   # after 2, 3, 4+ failed checkouts in a row
 def clear_stale_git_locks(ws: Path, min_age: float = STALE_LOCK_SECONDS, now: float | None = None) -> list[str]:
     """Remove git lock files a killed job left in this worker's own checkout. The worker runs one job at a time and
     calls this before its first git command, so no git of its own can hold them. On 2026-11-13 a cancelled job left
-    .git/index.lock behind and every job on GAMING-PC failed its checkout for 5.5 hours (37 failures, one PR 35 times).
+    .git/index.lock behind and every job on PC-NODE failed its checkout for 5.5 hours (37 failures, one PR 35 times).
     Locks younger than `min_age` are left alone in case someone else is working in the checkout by hand."""
     git = ws / ".git"
     if not git.is_dir():

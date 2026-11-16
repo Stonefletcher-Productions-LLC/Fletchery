@@ -7,6 +7,8 @@ merge round, builds with their download links, the machines and the activity log
 It is **read-only**. There is no pause, no settings, no keys and no "add task" in it, and the server behind it has no
 route that changes anything in Fletchery. Folder paths on the PC are removed from what it shows.
 
+<p><img src="images/fletchery/portal.png" width="260" alt="The phone portal: needs you, working, queued and to merge, then what is working now and the merge round (demo data)"></p>
+
 ## How it is kept safe
 
 - **Private network only.** The portal listens on `127.0.0.1` on the PC. [Tailscale Serve](https://tailscale.com/kb/1312/serve)

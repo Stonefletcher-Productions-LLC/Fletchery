@@ -1,5 +1,16 @@
 # Documentation screenshots
 
+## Fletchery (README)
+
+`fletchery/*.png` are the real dashboard and phone portal running the made-up "Harbor" demo project
+(`python -m fletchery demo --serve --fixture harbor`), refreshed 2026-11-16 from main `c34c2d1`. Nothing in them comes
+from a real project, PC, address or account. On Windows, `fletchery/Make-Screenshots.ps1` makes the dashboard shots;
+the 2026-11-16 set was captured with headless Chromium instead, and the demo's temporary folder paths were shown as
+`C:\Users\you\...` so the pictures read like the Windows app. `portal.png` and `portal-dark.png` are the phone portal
+at iPhone size. Marketing banners built from them are in [marketing/fletchery](../../marketing/fletchery/README.md).
+
+## BuildLane classic
+
 All screenshots in these guides show the real Windows Forms app with synthetic data. They are illustrations, not live build status or proof of a released package.
 
 ## Staging controls

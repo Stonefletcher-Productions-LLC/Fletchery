@@ -32,7 +32,7 @@ class PrCheckDeadEndTests(unittest.IsolatedAsyncioTestCase):
         pr = PullRequest(12, 'PR', task.branch, 'Test-Staging', 'a' * 40, [graph.PREFIX], 'Closes #1')
         gh.prs = [pr]
         engine.state.pr_checks['12'] = {'head': pr.head_sha, 'passed': passed, 'at': ago(check_hours),
-                                        'output': 'Merge the PR onto the base failed (exit 1)', 'machine': 'SF-NODE-01'}
+                                        'output': 'Merge the PR onto the base failed (exit 1)', 'machine': 'NODE-01'}
         if retried:
             engine.state.pr_checks['12']['retried'] = ago(1)
         engine.state.fix_attempts['12'] = 1

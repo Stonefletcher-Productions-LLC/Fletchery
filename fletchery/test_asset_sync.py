@@ -28,7 +28,7 @@ class FakeCoord:
         self.reads = 0
 
     def call(self, path, body, timeout=30):
-        code, obj = self.api.handle(path, "SF-NODE-01", self.key, "100.77.158.113", json.loads(json.dumps(body)))
+        code, obj = self.api.handle(path, "NODE-01", self.key, "100.64.0.20", json.loads(json.dumps(body)))
         if code != 200:
             raise RuntimeError(f"{path}: HTTP {code} {obj.get('error', '')}")
         if path == "/v1/assets/list" and self.host_override is not None:
@@ -43,8 +43,8 @@ class AssetSyncTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         base = Path(self.tmp.name)
         self.m = Machines(base / "state", "owner/repo")
-        self.key = self.m.add_machine("SF-NODE-01")
-        self.m.seen("SF-NODE-01", "100.77.158.113", NODE + ["cap:asset-sync"], 24, "2", {})
+        self.key = self.m.add_machine("NODE-01")
+        self.m.seen("NODE-01", "100.64.0.20", NODE + ["cap:asset-sync"], 24, "2", {})
         self.src = base / "pc" / "meshy_export"
         (self.src / "meshy_folk_v1_r9").mkdir(parents=True)
         (self.src / "meshy_folk_v1_r9" / "Manny.fbx").write_bytes(b"fbx" * 1000)
@@ -110,11 +110,11 @@ class AssetSyncTests(unittest.TestCase):
         (self.src.parent / "secret.txt").write_text("no")
         api = WorkerApi(self.m, "127.0.0.1:0", log=lambda *a: None)
         for rel in ("../secret.txt", str(self.src.parent / "secret.txt"), ""):
-            code, _ = api.handle("/v1/assets/read", "SF-NODE-01", self.key, "x", {"root": str(self.src), "path": rel})
+            code, _ = api.handle("/v1/assets/read", "NODE-01", self.key, "x", {"root": str(self.src), "path": rel})
             self.assertEqual(code, 400, rel)
-        code, _ = api.handle("/v1/assets/read", "SF-NODE-01", self.key, "x", {"root": str(self.src.parent), "path": "secret.txt"})
+        code, _ = api.handle("/v1/assets/read", "NODE-01", self.key, "x", {"root": str(self.src.parent), "path": "secret.txt"})
         self.assertEqual(code, 409)
-        code, _ = api.handle("/v1/assets/list", "SF-NODE-01", "wrong", "y", {})
+        code, _ = api.handle("/v1/assets/list", "NODE-01", "wrong", "y", {})
         self.assertEqual(code, 401)
 
     def test_unsafe_path_from_the_pc_is_refused(self):
@@ -159,8 +159,8 @@ class RoundGateTests(unittest.TestCase):
         self.assertEqual(self.m.view().get("jobs", []) if isinstance(self.m.view(), dict) else [], [])
 
     def test_an_old_worker_cannot_take_imports(self):
-        self.m.add_machine("SF-NODE-01")
-        self.m.seen("SF-NODE-01", "1.2.3.4", NODE, 24, "1", {})   # no cap:asset-sync
+        self.m.add_machine("NODE-01")
+        self.m.seen("NODE-01", "1.2.3.4", NODE, 24, "1", {})   # no cap:asset-sync
         code, text = self.run_quick()
         self.assertEqual(code, 2)
         self.assertIn("cap:asset-sync", text)

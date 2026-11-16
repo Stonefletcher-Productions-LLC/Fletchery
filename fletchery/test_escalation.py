@@ -32,7 +32,7 @@ class PureTests(unittest.TestCase):
 
     def test_only_owner_actions_count(self):
         self.assertTrue(escalation.accept_owner_action("Add `Bash(x:*)` to settings.json", "settings"))
-        self.assertFalse(escalation.accept_owner_action("Run ImportHomeKit on SF-NODE-01", "lane"))
+        self.assertFalse(escalation.accept_owner_action("Run ImportHomeKit on NODE-01", "lane"))
         self.assertFalse(escalation.accept_owner_action("", "github"))
 
     def test_wait_text_marks_only_owner_actions_and_spent_tiers_as_needs_you(self):

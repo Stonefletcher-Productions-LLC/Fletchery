@@ -76,3 +76,15 @@ The launcher embeds the icon at compile time, so `InstallLaneApp.ps1` recompiles
 Update the README and relevant guide when behavior changes. Do not add credentials, personal profiles, generated binaries, or game assets. Signing and production release validation are separate from regression tests.
 
 Preserve UTF-8 BOM encoding in Windows PowerShell 5.1 scripts containing non-ASCII labels. A PowerShell 7 parser can accept BOM-less UTF-8 that Windows PowerShell misreads as ANSI. Parse changed scripts with `powershell.exe`, and use the hosted Windows checks for UI behavior when the local PC is reserved for gameplay.
+
+## Keep the repository public-safe
+
+This repository is meant to be safe to publish. Before you commit:
+
+- No keys, tokens, passwords or machine keys. API keys live in Windows Credential Manager, node keys in a file only the
+  worker's account can read; neither belongs in a profile or in git.
+- No live profile. A project's real profile lives in `%APPDATA%\Fletchery\Projects` (`.gitignore` refuses
+  `*.profile.json` outside `examples/`). Examples use placeholders: `100.64.0.10` for a Tailscale address,
+  `your-pc.your-tailnet.ts.net`, `you@example.com`, `NODE-01`, `C:\Users\you`.
+- No real tailnet names, private IPs, email addresses or Windows user names in code, tests, docs or screenshots.
+  Screenshots come from the made-up "Harbor" demo (`docs/images/README.md`).

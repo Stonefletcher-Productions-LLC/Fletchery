@@ -692,18 +692,18 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => document.querySelector('#pcCard').hidden);
     // Machines: the PC and each node, what it runs now, its last result, and the job list.
     assert.equal(await visible('#machinesCard'), false, 'no Machines card while machines are off');
-    data.machines = {listen: '100.83.43.111:8771', shadow: true, error: '', queued: 1,
+    data.machines = {listen: '100.64.0.10:8771', shadow: true, error: '', queued: 1,
       recipes: {'node-checks': {context: 'Node checks'}, 'nightly-full': {context: 'Nightly full tests (node)'}, 'checkout-only': {context: ''}},
       machines: [
-        {name: 'SF-NODE-01', online: true, revoked: false, last_seen: now, labels: ['os:windows', 'role:tests', 'unreal:5.8.4'], ram_gb: 24, version: '1',
+        {name: 'NODE-01', online: true, revoked: false, last_seen: now, labels: ['os:windows', 'role:tests', 'unreal:5.8.4'], ram_gb: 24, version: '1',
          stats: {cpu_percent: 63, ram_free_gb: 9.5, ram_total_gb: 24, disk_free_gb: 412},
          job: {id: 7, recipe: 'node-checks', sha: 'c'.repeat(40), ref: 'claude/x', params: {only: 'RunFlowTest', strict_slots: false}, state: 'running', started: now, pr: 1666},
-         last: {id: 6, state: 'failed', finished: now, summary: '1 of 12 failed on SF-NODE-01: RunM5aTest'}},
-        {name: 'SF-NODE-02', online: false, revoked: false, last_seen: '', labels: [], ram_gb: 0, stats: {}, job: null, last: null}],
+         last: {id: 6, state: 'failed', finished: now, summary: '1 of 12 failed on NODE-01: RunM5aTest'}},
+        {name: 'NODE-02', online: false, revoked: false, last_seen: '', labels: [], ram_gb: 0, stats: {}, job: null, last: null}],
       jobs: [
         {id: 8, recipe: 'nightly-full', sha: 'd'.repeat(40), ref: 'main', params: {}, state: 'queued', machine: '', created: now, started: '', finished: '', summary: '', requested_by: 'nightly 2026-11-12', log_bytes: 0, pr: 0},
-        {id: 7, recipe: 'node-checks', sha: 'c'.repeat(40), ref: 'claude/x', params: {only: 'RunFlowTest'}, state: 'running', machine: 'SF-NODE-01', created: now, started: now, finished: '', summary: '', requested_by: 'dashboard', log_bytes: 2048, pr: 1666},
-        {id: 6, recipe: 'node-checks', sha: 'e'.repeat(40), ref: '', params: {}, state: 'failed', machine: 'SF-NODE-01', created: now, started: now, finished: now, summary: '1 of 12 failed on SF-NODE-01: RunM5aTest', requested_by: '', log_bytes: 9000, pr: 0}]};
+        {id: 7, recipe: 'node-checks', sha: 'c'.repeat(40), ref: 'claude/x', params: {only: 'RunFlowTest'}, state: 'running', machine: 'NODE-01', created: now, started: now, finished: '', summary: '', requested_by: 'dashboard', log_bytes: 2048, pr: 1666},
+        {id: 6, recipe: 'node-checks', sha: 'e'.repeat(40), ref: '', params: {}, state: 'failed', machine: 'NODE-01', created: now, started: now, finished: now, summary: '1 of 12 failed on NODE-01: RunM5aTest', requested_by: '', log_bytes: 9000, pr: 0}]};
     // Testing tab: the running job with each step and the ones still to come, what waits, and finished runs with their steps.
     const nodeJob = data.machines.machines[0].job;
     nodeJob.steps = [{name: 'Fetch the commit', state: 'passed', exit: 0, start: now, end: now, cleanup: false, sections: [], checks: []},
@@ -716,7 +716,7 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => /Mapped preflight checks/.test(document.querySelector('#testRunningRows').textContent));
     const runningTest = await page.locator('#testRunningRows').innerText();
     assert.match(runningTest, /Tests for|Tests: RunFlowTest/);
-    assert.match(runningTest, /SF-NODE-01/);
+    assert.match(runningTest, /NODE-01/);
     assert.match(runningTest, /Step 2 of 3: PR check/);
     assert.match(runningTest, /Build LifeShareEditor[\s\S]*ScanUIText[\s\S]*Stop what this job left running\s*not started/);
     assert.match(await page.locator('#testWaitingRows').innerText(), /Nightly full tests[\s\S]*queued/);
@@ -735,10 +735,10 @@ const server = http.createServer(async (req, res) => {
     await page.waitForFunction(() => !document.querySelector('#machinesCard').hidden);
     const machineText = await page.locator('#machineRows').innerText();
     assert.match(machineText, /This PC[\s\S]*Free right now/);
-    assert.match(machineText, /SF-NODE-01[\s\S]*Running job 7: node-checks RunFlowTest #1666 at claude\/x cccccccccc/);
+    assert.match(machineText, /NODE-01[\s\S]*Running job 7: node-checks RunFlowTest #1666 at claude\/x cccccccccc/);
     assert.match(machineText, /Last: job 6 ✗ Failed[\s\S]*RunM5aTest/);
     assert.match(machineText, /CPU 63% · RAM 9\.5 of 24 GB free · disk 412 GB free/);
-    assert.match(machineText, /SF-NODE-02[\s\S]*Offline, never connected/);
+    assert.match(machineText, /NODE-02[\s\S]*Offline, never connected/);
     // With the Machines card up, the PC holder shows in the This PC row and the separate PC card stays hidden.
     data.pc = {held: true, kind: 'outside', who: 'Release build', step: 'Packaging', script: 'Build.ps1', since: now, minutes: 5, pid: 777, workspace: 'E:\\x'};
     await page.evaluate(() => refresh());
@@ -751,7 +751,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await page.locator('#jobRows a[href="/api/jobs/log?id=7"]').count(), 1);
     await page.locator('#jobAdd summary').click();
     assert.equal(await page.locator('#jobRecipe option').count(), 3);
-    assert.match(await page.locator('#machinesNote').innerText(), /100\.83\.43\.111:8771[\s\S]*shadow/);
+    assert.match(await page.locator('#machinesNote').innerText(), /100\.64\.0\.10:8771[\s\S]*shadow/);
     await page.locator('#jobOnly').fill('RunFlowTest');
     await page.locator('#jobForm button[type="submit"]').click();
     await page.waitForFunction(() => /2 queued/.test(document.querySelector('#jobsNote').textContent));
@@ -760,17 +760,17 @@ const server = http.createServer(async (req, res) => {
     await page.locator('#machinesCard [data-job-cancel="7"]').click();
     await page.waitForFunction(() => true);
     await page.locator('.machine-add summary').click();
-    await page.locator('#machineName').fill('SF-NODE-03');
+    await page.locator('#machineName').fill('NODE-03');
     await page.locator('#machineForm button[type="submit"]').click();
     await page.waitForFunction(() => !document.querySelector('#machineKey').hidden);
-    assert.match(await page.locator('#machineKey').innerText(), /Key for SF-NODE-03 \(shown once\):\s*fnk_test-key/);
+    assert.match(await page.locator('#machineKey').innerText(), /Key for NODE-03 \(shown once\):\s*fnk_test-key/);
     await page.screenshot({path: path.join(out, 'machines-building.png'), fullPage: true});
     // Each machine can be stopped from one kind of work.
     assert.equal(await page.locator('#machineRows [data-pause-machine="PC"]').count(), 4);
-    assert.equal(await page.locator('#machineRows [data-pause-machine="SF-NODE-01"]').count(), 3);
-    await page.locator('#machineRows [data-pause-machine="SF-NODE-01"][data-pause-kind="checks"]').click();
+    assert.equal(await page.locator('#machineRows [data-pause-machine="NODE-01"]').count(), 3);
+    await page.locator('#machineRows [data-pause-machine="NODE-01"][data-pause-kind="checks"]').click();
     for (let i = 0; i < 100 && requests.filter(r => r.url === '/api/machines/pause').length < 1; i++) await page.waitForTimeout(50);
-    assert.deepEqual(requests.filter(r => r.url === '/api/machines/pause').at(-1).body, {machine: 'SF-NODE-01', kind: 'checks', paused: true});
+    assert.deepEqual(requests.filter(r => r.url === '/api/machines/pause').at(-1).body, {machine: 'NODE-01', kind: 'checks', paused: true});
     data.machines.machines[0].paused_work = ['checks'];
     data.pc_paused = ['coding'];
     await page.evaluate(() => refresh());
@@ -785,7 +785,7 @@ const server = http.createServer(async (req, res) => {
     const node = data.machines.machines[0], keepJob = node.job;
     node.job = {id: 9, recipe: 'pr-check', sha: 'b'.repeat(40), ref: 'Test-Staging', params: {pr: 1568, head: 'c'.repeat(40)}, state: 'running', started: now, pr: 1568, requested_by: 'pr-check'};
     await page.evaluate(() => refresh());
-    await page.waitForFunction(() => /SF-NODE-01 · PR check #1568/.test(document.querySelector('#laneTesting').textContent));
+    await page.waitForFunction(() => /NODE-01 · PR check #1568/.test(document.querySelector('#laneTesting').textContent));
     const mergeLane = await page.locator('#laneMerging').textContent();
     assert.match(mergeLane, /Gaming PC · Game tests \(step \d of \d\)/);   // the round's step and progress on the PC's own line
     assert.doesNotMatch(mergeLane, /PR check/);
@@ -814,8 +814,8 @@ const server = http.createServer(async (req, res) => {
     await page.evaluate(() => refresh());
     assert.equal(requests.filter(r => r.url === '/api/jobs/cancel').at(-1).body.id, 7);
     // Builds: schedule a version at a time, see where it runs, stop a daily one.
-    data.builds = {base: 'Test-Staging', nodes: ['SF-NODE-01'], machines: true, out_dir: 'E:\\builds', builds: [
-      {id: 'r1', version: '0.3.8', ref: 'Test-Staging', sha: 'c'.repeat(40), at: now, state: 'running', route: 'node', machine: 'SF-NODE-01', job: 9, tests: '', where: 'auto', repeat: '', reason: 'Building on SF-NODE-01.'},
+    data.builds = {base: 'Test-Staging', nodes: ['NODE-01'], machines: true, out_dir: 'E:\\builds', builds: [
+      {id: 'r1', version: '0.3.8', ref: 'Test-Staging', sha: 'c'.repeat(40), at: now, state: 'running', route: 'node', machine: 'NODE-01', job: 9, tests: '', where: 'auto', repeat: '', reason: 'Building on NODE-01.'},
       {id: 'd1', version: '0.3.7', ref: 'main', sha: 'd'.repeat(40), at: now, state: 'done', route: 'pc', machine: 'This PC', tests: 'full', where: 'pc', repeat: '', finished: now, output: 'E:\\builds\\LifeShare-0.3.7'},
     ]};
     const savedQueue = data.integration_queue;
@@ -825,12 +825,12 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await visible('#buildsCard'), true);
     assert.equal(await visible('#packagePlans'), false, 'with Builds, the old SHA-only package card stays out of the way');
     data.integration_queue = savedQueue;
-    assert.match(await page.locator('#buildsNote').innerText(), /can build on SF-NODE-01 or this PC/);
-    assert.match(await page.locator('#buildRows').innerText(), /0\.3\.8[\s\S]*Building[\s\S]*Test-Staging at cccccccccc · SF-NODE-01/);
+    assert.match(await page.locator('#buildsNote').innerText(), /can build on NODE-01 or this PC/);
+    assert.match(await page.locator('#buildRows').innerText(), /0\.3\.8[\s\S]*Building[\s\S]*Test-Staging at cccccccccc · NODE-01/);
     assert.equal(await page.locator('#buildRows a[href="/api/jobs/log?id=9"]').count(), 1);
     await page.locator('.build-history summary').click();
     assert.match(await page.locator('.build-history').innerText(), /Package: E:\\builds\\LifeShare-0\.3\.7/);
-    assert.match(await page.locator('#laneBuilding').innerText(), /Build 0\.3\.8 running on SF-NODE-01/);
+    assert.match(await page.locator('#laneBuilding').innerText(), /Build 0\.3\.8 running on NODE-01/);
     await page.locator('#buildVersion').fill('0.3.9');
     await page.selectOption('#buildWhenMode', 'daily');
     assert.equal(await page.locator('#buildAt').isVisible(), true);
