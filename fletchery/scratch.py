@@ -2,7 +2,8 @@
 SF-NODE-01's E: at 0 GB and the PC under its disk guard; storage.py only knows Fletchery's own task and merge copies).
 
 People and agent sessions make their own worktrees, clones and packaged builds beside Fletchery's. Each Unreal one holds
-6-15 GB of build output nobody comes back for. For every folder directly under a configured scratch root this module:
+6-15 GB of build output nobody comes back for. For every folder directly under a configured scratch root, and every checkout one level down inside a plain grouping
+folder, this module:
 
   * trims  regenerable Unreal output (Intermediate, Binaries, DerivedDataCache, Saved/Cooked, ...) once the folder has
            been idle `trim_hours` (2 h when the drive is short). Only folders git ignores and tracks nothing in.
@@ -113,9 +114,20 @@ def _shallow_newest(path: Path, depth: int = 2) -> float:
     return newest
 
 
+def _git_exe() -> str:
+    """git, also where it is installed but not on PATH (SF-NODE-01's PowerShell, 2026-11-16)."""
+    found = os.environ.get("FLETCHERY_GIT") or shutil.which("git")
+    if not found and os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+            for tail in (r"Git\cmd\git.exe", r"Programs\Git\cmd\git.exe"):
+                if base and Path(base, tail).is_file():
+                    return str(Path(base, tail))
+    return found or "git"
+
+
 def _git(cwd: Path, *args: str) -> str:
     try:
-        done = subprocess.run(["git", "-c", "core.longpaths=true", *args], cwd=str(cwd), capture_output=True, text=True,
+        done = subprocess.run([_git_exe(), "-c", "core.longpaths=true", *args], cwd=str(cwd), capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=GIT_TIMEOUT,
                               creationflags=0x08000000 if os.name == "nt" else 0)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -281,6 +293,28 @@ def _backup_logs(path: Path, dest: Path) -> int:
     return copied
 
 
+def _matches(name: str, patterns) -> bool:
+    return any(fnmatch.fnmatch(name.lower(), str(pattern).lower()) for pattern in patterns)
+
+
+def _candidates(root: Path, keep, disposable, guard) -> list[Path]:
+    """Folders directly under the root, and the checkouts one level down inside a plain grouping folder
+    (C:\\StoneNode\\wt\\<name>, traffic-mix-1116\\before): the first node pass missed those (2026-11-16)."""
+    found = []
+    for path in sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name.lower()):
+        try:
+            resolved = path.resolve()
+            grouping = (not _reparse(path) and _kind(path) == "plain" and not _matches(path.name, keep)
+                        and not _matches(path.name, disposable)
+                        and not any(g == resolved or resolved in g.parents for g in guard))
+            inner = sorted((c for c in path.iterdir() if c.is_dir() and not _reparse(c) and _kind(c) != "plain"),
+                           key=lambda p: p.name.lower()) if grouping else []
+        except OSError:
+            inner = []
+        found += inner or [path]
+    return found
+
+
 def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_days: float = 7.0, disposable=(),
            protected=(), backup_dir: str = "", urgent: bool = False, dry_run: bool = False, sizes: bool = False,
            trim_dirs=TRIM_DIRS, lines=None, now: float | None = None) -> dict:
@@ -312,22 +346,19 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
                 summary["kept"].append({"path": str(root), "reason": "Scratch root is a link"})
                 continue
             root = root.resolve()
-            for path in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+            for path in _candidates(root, keep, disposable, guard):
                 try:
-                    if not path.is_dir():
-                        continue
                     entry = {"path": str(path)}
                     if _reparse(path):
                         raise RuntimeError("Link; never entered")
-                    if any(fnmatch.fnmatch(path.name.lower(), str(pattern).lower()) for pattern in keep):
+                    if _matches(path.name, keep):
                         raise RuntimeError("On the keep list")
                     resolved = path.resolve()
                     if any(g == resolved or resolved in g.parents for g in guard):
                         raise RuntimeError("Fletchery's own or a protected folder")
                     kind = _kind(path)
                     entry["kind"] = kind
-                    is_disposable = kind == "plain" and any(
-                        fnmatch.fnmatch(path.name.lower(), str(pattern).lower()) for pattern in disposable)
+                    is_disposable = kind == "plain" and _matches(path.name, disposable)
                     if kind == "plain" and not is_disposable:
                         raise RuntimeError("Not a git checkout and not a disposable pattern; left alone")
                     idle_hours = (now - max(_shallow_newest(path), _git_activity(path) if kind == "worktree" else 0)) / 3600

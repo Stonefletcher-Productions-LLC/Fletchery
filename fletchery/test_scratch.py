@@ -40,12 +40,12 @@ class ScratchTest(unittest.TestCase):
 
     def worktree(self, name, pushed=True):
         path = self.root / name
-        git(self.host, "worktree", "add", "-q", "-b", "claude/" + name, str(path), "origin/main")
+        git(self.host, "worktree", "add", "-q", "-b", "claude/" + name.replace("/", "-"), str(path), "origin/main")
         (path / "Work.cpp").write_text(f"int y; // {name}\n", encoding="utf-8")
         git(path, "add", "-A")
         git(path, "commit", "-q", "-m", "work")
         if pushed:
-            git(path, "push", "-q", "origin", "HEAD:claude/" + name)
+            git(path, "push", "-q", "origin", "HEAD:claude/" + name.replace("/", "-"))
             git(path, "fetch", "-q", "origin")
         for folder in ("Intermediate/Build", "Binaries/Win64", "Saved/Logs", "Saved/Cooked"):
             (path / folder).mkdir(parents=True)
@@ -149,6 +149,20 @@ class ScratchTest(unittest.TestCase):
         recent = self.run_pass(mode="remove", now=time.time() + 3600)
         self.assertEqual((recent["removed"], recent["trimmed"]), ([], []))
         self.assertIn("Used", self.reason(recent, busy))
+
+    def test_checkouts_inside_a_grouping_folder_are_found_but_not_deeper(self):
+        (self.root / "wt").mkdir()
+        nested = self.worktree("wt/petcorner")
+        (self.root / "deep" / "er").mkdir(parents=True)
+        deeper = self.worktree("deep/er/lost")
+        (self.root / "LifeShareArt").mkdir()
+        kept = self.worktree("LifeShareArt/owned")
+        summary = self.run_pass(mode="trim", keep=["LifeShareArt"])
+        self.assertFalse((nested / "Intermediate").exists())
+        self.assertTrue((nested / "Work.cpp").exists())
+        self.assertTrue((deeper / "Intermediate").exists())
+        self.assertTrue((kept / "Intermediate").exists())
+        self.assertIn("left alone", self.reason(summary, self.root / "deep"))
 
     def test_busy_match_needs_a_folder_boundary(self):
         self.assertTrue(scratch.named_by(Path("E:/s/round"), ['tail -f "e:/s/round/saved/logs/x.log"']))
