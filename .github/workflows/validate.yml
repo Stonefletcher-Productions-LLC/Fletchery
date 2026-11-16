@@ -171,6 +171,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_blender_bridge.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python fletchery/test_nowindow.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_worker_permissions.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_portal.py
