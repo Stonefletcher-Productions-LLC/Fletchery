@@ -2,7 +2,7 @@
   "name": "fletchery-ui-checks",
   "private": true,
   "scripts": {
-    "test": "node test-control-room.cjs"
+    "test": "node test-control-room.cjs && node test-portal.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"

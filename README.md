@@ -401,6 +401,12 @@ output during data validation and native specs when available. The round checkpo
 - **No hidden credentials:** Fletchery uses your `gh` and agent sign-ins. API keys are kept in Windows Credential
   Manager, never in a profile, the repository or the log, and the app shows only their last four characters.
 
+## On your phone
+
+Fletchery can serve a read-only **phone portal**: add it to your iPhone's Home Screen from Safari (no App Store) and
+follow what needs you, the workers, merge rounds and builds with their download links, with optional notifications. It
+is reached over Tailscale only, never the public internet. [Set it up](docs/PORTAL.md).
+
 ## Something looks wrong
 
 | You see | What to do |

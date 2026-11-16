@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fletchery</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#17212B">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fletchery">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-row">
+    <h1 id="project">Fletchery</h1>
+    <button type="button" class="icon-btn" id="bell" aria-label="Notifications" aria-haspopup="dialog">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6v3.4L4.3 16a1 1 0 0 0 .9 1.5h13.6a1 1 0 0 0 .9-1.5L18 12.4V9a6 6 0 0 0-6-6Zm-2.2 16a2.3 2.3 0 0 0 4.4 0Z" fill="currentColor"/></svg>
+    </button>
+  </div>
+  <p class="fresh" id="fresh" role="status" aria-live="polite"><span class="dot" id="dot" aria-hidden="true"></span><span id="freshText">Connecting…</span></p>
+</header>
+
+<main id="main">
+  <div id="alerts"></div>
+
+  <section class="view" id="view-now" aria-labelledby="tab-now">
+    <div class="stats" id="stats"></div>
+    <section class="card" aria-labelledby="h-needs"><h2 id="h-needs">Needs you</h2><ul class="rows" id="needs"></ul></section>
+    <section class="card" aria-labelledby="h-workers"><h2 id="h-workers">Working now</h2><ul class="rows" id="workers"></ul></section>
+    <section class="card" aria-labelledby="h-merge-mini"><h2 id="h-merge-mini">Merging</h2><div id="mergeMini"></div></section>
+    <section class="card" id="machinesCard" aria-labelledby="h-machines" hidden><h2 id="h-machines">Machines</h2><ul class="rows" id="machines"></ul></section>
+    <details class="card log-card"><summary><h2>Activity</h2></summary><ol class="log" id="log"></ol></details>
+  </section>
+
+  <section class="view" id="view-tasks" aria-labelledby="tab-tasks" hidden>
+    <section class="card"><h2>Needs you <span class="count" id="n-needs"></span></h2><ul class="rows" id="t-needs"></ul></section>
+    <section class="card"><h2>Working <span class="count" id="n-running"></span></h2><ul class="rows" id="t-running"></ul></section>
+    <section class="card"><h2>Queued <span class="count" id="n-queued"></span></h2><ul class="rows" id="t-queued"></ul></section>
+    <section class="card"><h2>Has a pull request <span class="count" id="n-pr"></span></h2><ul class="rows" id="t-pr"></ul></section>
+  </section>
+
+  <section class="view" id="view-merges" aria-labelledby="tab-merges" hidden>
+    <section class="card"><h2>Merge round</h2><div id="mergeFull"></div></section>
+    <section class="card"><h2>Waiting to merge <span class="count" id="n-waiting"></span></h2><ul class="rows" id="waiting"></ul></section>
+  </section>
+
+  <section class="view" id="view-builds" aria-labelledby="tab-builds" hidden>
+    <section class="card"><h2>Builds</h2><ul class="rows" id="builds"></ul></section>
+  </section>
+</main>
+
+<nav class="tabs" aria-label="Sections">
+  <button type="button" id="tab-now" data-tab="now" aria-current="page"><span class="glyph" aria-hidden="true">●</span>Now<span class="badge" id="b-now" hidden></span></button>
+  <button type="button" id="tab-tasks" data-tab="tasks"><span class="glyph" aria-hidden="true">☰</span>Tasks</button>
+  <button type="button" id="tab-merges" data-tab="merges"><span class="glyph" aria-hidden="true">⇄</span>Merges</button>
+  <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds</button>
+</nav>
+
+<dialog id="notify" aria-labelledby="h-notify">
+  <h2 id="h-notify">Notifications</h2>
+  <p id="notifyText">Checking…</p>
+  <ol id="installSteps" hidden>
+    <li>Tap the Share button in Safari.</li>
+    <li>Choose <strong>Add to Home Screen</strong>.</li>
+    <li>Open Fletchery from the Home Screen, then come back here.</li>
+  </ol>
+  <p class="msg" id="notifyMsg" role="status" aria-live="polite"></p>
+  <div class="actions">
+    <button type="button" class="primary" id="notifyOn" hidden>Turn on notifications</button>
+    <button type="button" id="notifyTest" hidden>Send a test</button>
+    <button type="button" id="notifyOff" hidden>Turn off on this phone</button>
+    <button type="button" id="notifyClose">Close</button>
+  </div>
+  <p class="fine">Read-only: this page cannot change anything in Fletchery.</p>
+</dialog>
+
+<script src="portal.js"></script>
+</body>
+</html>

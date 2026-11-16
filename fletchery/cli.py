@@ -175,6 +175,27 @@ def start_machines(fm, cfg):
     return coord
 
 
+def start_portal(fm, cfg, dash=None):
+    """The read-only phone portal (portal.py): only when the profile has workers.portal."""
+    if not getattr(cfg, "portal", None):
+        return None
+    try:
+        import portal
+        conf = portal.settings(cfg.portal)
+        if conf is None:
+            return None
+        if dash is None:  # the screens are off or their port is taken: the portal still reads the same status
+            from server import Dashboard
+            dash = Dashboard(fm, 0)
+        p = portal.Portal(dash.status, conf, fm.state_dir, fm.ctx.log, cfg.repo)
+        p.start()
+    except Exception as e:  # a bad portal block or a taken port must not stop Fletchery
+        fm.ctx.log(f"portal: not started: {type(e).__name__}: {e}")
+        return None
+    print(f"Portal: http://127.0.0.1:{conf['port']} (read-only; share it with `tailscale serve`, see docs/PORTAL.md)", flush=True)
+    return p
+
+
 async def _serve_only(changed) -> None:
     """Workers off: the screens and the Build Lane panel only. Returns when Fletchery's code changes or a restart is
     asked for (a project switch)."""
@@ -361,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
                 for k in range(n):
                     f.write(_j.dumps({"at": day.isoformat(), "task": 600 + k, "result": "pr", "cost_usd": cost / max(n, 1),
                                       "sessions": ["worker:x", "reviewer:y"]}) + "\n")
-        start_dashboard(fm, cfg.dashboard_port)
+        start_portal(fm, cfg, start_dashboard(fm, cfg.dashboard_port))
         try:
             asyncio.run(fm.run_forever())
         except KeyboardInterrupt:
@@ -401,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Fletchery running for {cfg.name}: pid {os.getpid()}, Build Lane only (workers off).", flush=True)
         dash = start_dashboard(fm, cfg.dashboard_port)
         machines = start_machines(fm, cfg)
+        phone = start_portal(fm, cfg, dash)
         start_code = code_fingerprint()
         changed = lambda: bool(fm.restart_reason) or code_fingerprint() != start_code  # noqa: E731
         restart = False
@@ -415,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             if machines:
                 machines.stop()
+            if phone:
+                phone.stop()
             if dash:
                 dash.stop()
             try:
