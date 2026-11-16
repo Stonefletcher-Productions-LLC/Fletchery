@@ -30,11 +30,18 @@ imports read by absolute path). The worker mirrors them to the same path here be
 starts and every ASSET_IDLE_SECONDS while idle, so a new node fills itself. Only new or changed files are copied (size +
 SHA-256), each one checked before it replaces the old copy; nothing here is ever deleted.
 
+Scratch retention (optional): "scratchRoots": ["C:\\\\StoneNode", "E:\\\\lifeshare-scratch"] makes the idle worker run
+scratch.py (kept beside this file) every SCRATCH_IDLE_SECONDS: idle worktrees lose their Unreal build output, and with
+"scratchMode": "remove" a clean, pushed, unlocked worktree idle "scratchRemoveDays" (7) is removed. "scratchKeep" lists
+folder-name patterns never touched, "scratchDisposable" plain-folder patterns (packaged builds) removed when idle. Under
+"scratchMinFreeGB" (30) free on a root's drive the idle time before a trim drops to 2 h. See docs/MACHINES.md.
+
     python node_worker.py check   --config <file>     sign in to the coordinator once and print what it sees
     python node_worker.py run     --config <file>     the worker loop (what the logon task runs)
     python node_worker.py install --config <file>     a Windows logon task that starts `run` (current user, limited)
     python node_worker.py uninstall
     python node_worker.py sync    --config <file>     mirror the PC's shared asset folders now
+    python node_worker.py scratch --config <file>     run one scratch retention pass now and print what it did
 """
 from __future__ import annotations
 
@@ -51,7 +58,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "7"   # 7: no console windows for children; "yieldTo" pauses the node while a listed game runs;
+VERSION = "8"   # 8: scratch retention while idle (scratch.py beside this file; "scratchRoots");
+                # 7: no console windows for children; "yieldTo" pauses the node while a listed game runs;
                 # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
                 # 4: keeps checking in while an idle mirror copies, so the node never looks offline;
                 # 5: keeps a "round waiting" marker beside the heavy lease so local runs let merge rounds go first;
@@ -61,6 +69,8 @@ ASSET_IDLE_SECONDS = 15 * 60
 ASSET_INDEX = ".fletchery-assets.json"
 ASSET_PART = ".fletchery-part"
 ASSET_MIN_FREE_GB = 10
+SCRATCH_IDLE_SECONDS = 60 * 60
+SCRATCH_MIN_FREE_GB = 30
 TASK_NAME = "Fletchery node worker"
 HEARTBEAT_SECONDS = 30
 LOG_FLUSH_SECONDS = 5
@@ -395,6 +405,44 @@ def mark_round(cfg: dict, on: bool, why: str = "") -> None:
             path.unlink()
     except OSError:
         pass
+
+
+# ---- scratch retention (scratch.py beside this file) ----
+def scratch_pass(cfg: dict, log=print) -> dict:
+    """Trim and retire idle worktrees that sessions left on this machine. This worker's own checkout, builds and
+    mirrored asset folders are never entered. Returns scratch.retain's summary ({} when not configured)."""
+    roots = cfg.get("scratchRoots") or []
+    if not roots or str(cfg.get("scratchMode") or "trim") == "off":
+        return {}
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import scratch
+    except ImportError:
+        log("scratch: scratch.py is not beside node_worker.py; nothing cleaned")
+        return {}
+    finally:
+        sys.path.pop(0)
+    low = float(cfg.get("scratchMinFreeGB") or SCRATCH_MIN_FREE_GB)
+    urgent = False
+    for root in roots:
+        try:
+            urgent = urgent or shutil.disk_usage(root).free / 2**30 < low
+        except OSError:
+            pass
+    protected = [cfg.get("workRoot"), cfg.get("buildsDir"), cfg.get("keyFile"), *(cfg.get("assetMap") or {}).values()]
+    found = scratch.from_config(cfg.get, protected=[p for p in protected if p], urgent=urgent)
+    try:
+        out = Path(cfg["workRoot"]) / "fletchery" / "scratch-retention.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(found, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    if found.get("freed_bytes"):
+        log(f"scratch: trimmed {len(found['trimmed'])} build-output folders, removed {len(found['removed'])} idle "
+            f"folders, {found['freed_bytes'] / 2**30:.1f} GB")
+    if found.get("error"):
+        log(f"scratch: stopped: {found['error']}")
+    return found
 
 
 # ---- machine stats ----
@@ -993,6 +1041,7 @@ def run(cfg: dict, once: bool = False) -> int:
     poll, said = 15, ""
     bad_checkouts, rest_until = 0, 0.0   # failed checkouts in a row; take no job until rest_until (monotonic)
     next_sync = 0.0   # mirror the asset folders as soon as the worker starts: a new node fills itself
+    next_scratch = 0.0
     while True:
         try:
             poll = int(hello(coord, cfg).get("poll_seconds") or 15)
@@ -1048,6 +1097,13 @@ def run(cfg: dict, once: bool = False) -> int:
                     except Exception as e:   # an import job will try again and fail clearly if it still can't
                         log(f"assets: {e}")
                     continue
+                if not st.get("pause_file") and time.monotonic() >= next_scratch:
+                    next_scratch = time.monotonic() + SCRATCH_IDLE_SECONDS
+                    try:
+                        scratch_pass(cfg, log)
+                    except Exception as e:
+                        log(f"scratch: {e}")
+                    continue
                 time.sleep(poll)
         except Exception as e:
             msg = f"coordinator unreachable: {e}"
@@ -1083,7 +1139,7 @@ def uninstall() -> int:
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="Fletchery node worker")
-    ap.add_argument("command", choices=["check", "run", "once", "install", "uninstall", "upload", "sync"])
+    ap.add_argument("command", choices=["check", "run", "once", "install", "uninstall", "upload", "sync", "scratch"])
     ap.add_argument("--config", default="")
     ap.add_argument("--job", type=int, default=0, help="upload: the package job that made the build")
     ap.add_argument("--folder", default="", help="upload: the packaged build folder on this node")
@@ -1107,6 +1163,10 @@ def main(argv=None) -> int:
             return 1
         print(f"{got['roots']} shared folder(s) up to date; copied {got['copied']} file(s), {got['bytes'] / 2**20:.0f} MB")
         return 0
+    if a.command == "scratch":
+        found = scratch_pass(cfg)
+        print(json.dumps(found, indent=2) if found else "no scratchRoots in the config; nothing done")
+        return 1 if found.get("error") else 0
     if a.command == "check":
         print(json.dumps({"hello": hello(Coordinator(cfg), cfg), "stats": stats(cfg)}, indent=2))
         return 0
