@@ -40,12 +40,14 @@ const data = {
 };
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
 let down = false;
+let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
 const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const posts = [];
 const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
   const send = (code, body, type) => { res.writeHead(code, {'Content-Type': type, 'Content-Security-Policy': csp, 'Cache-Control': 'no-store'}); res.end(body); };
+  if (off) return req.socket.destroy();
   if (req.method !== 'GET') { posts.push(url); return send(404, '{}', 'application/json'); }
   if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify(data), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
@@ -138,6 +140,20 @@ const server = http.createServer((req, res) => {
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
     assert.match(await page.textContent('#needs'), /#900/);
+
+    // Opening with the PC out of reach (Tailscale still connecting): the page comes from the copy saved on the phone
+    // at once, with what it last showed, and says it cannot reach the PC.
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.ready;
+      for (let i = 0; i < 50 && !(await caches.match('/portal.js')); i++) await new Promise(r => setTimeout(r, 100));
+    });
+    assert.ok(await page.evaluate(() => caches.match('/').then(Boolean)), 'the page is saved on the phone');
+    off = true;
+    await page.reload();
+    assert.match(await page.textContent('#freshText'), /Showing what it said/);
+    assert.match(await page.textContent('#needs'), /#900/);
+    await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
+    off = false;
     down = false;
 
     // An iPhone in Safari (not yet on the Home Screen) is told how to add it.

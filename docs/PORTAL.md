@@ -96,6 +96,7 @@ phone and make a new key.
 | "This address is not one of the portal's hosts" | Add the name in the address bar (no `https://`, no port) to `workers.portal.hosts` |
 | "No Tailscale sign-in came with this request" | The device is tagged or the request came through Funnel; use a device signed in as you |
 | The bell says to add it to the Home Screen | Notifications on iPhone only work from the Home Screen app, not from a Safari tab |
+| "Connecting… Showing what it said …" | Normal for a few seconds after opening: the page opens from the copy saved on the phone, with the last status it had, while Tailscale connects |
 | Fletchery's log says `portal: not started` | The line says why: a bad `portal` block, or port 8772 is in use (choose another `port`) |
 
 ## For developers

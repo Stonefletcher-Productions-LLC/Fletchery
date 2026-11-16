@@ -2,6 +2,10 @@
 (function () {
   'use strict';
   const POLL_MS = 10000;
+  const RETRY_MS = 3000;     // ask again sooner while the PC cannot be reached (Tailscale may still be connecting)
+  const WAIT_MS = 12000;     // give up on one read after this long
+  const KEEP = 'fletchery-portal-last';
+  const KEEP_MS = 24 * 3600 * 1000;
   const TABS = ['now', 'tasks', 'merges', 'builds'];
   const $ = id => document.getElementById(id);
   let last = null;        // the newest summary
@@ -173,26 +177,48 @@
       text.textContent = failed + (lastOk ? ' Showing what it said ' + ago(new Date(lastOk).toISOString()) + '.' : '');
       return;
     }
-    if (!last) { dot.className = 'dot'; text.textContent = 'Connecting…'; return; }
+    if (!last) {
+      dot.className = 'dot';
+      text.textContent = 'Connecting…' + (lastOk ? ' Showing what it said ' + ago(new Date(lastOk).toISOString()) + '.' : '');
+      return;
+    }
     dot.className = 'dot ok';
     const pass = last.passing ? 'checking GitHub now' : last.last_pass ? 'last check ' + ago(last.last_pass) : '';
     text.textContent = 'Live' + (pass ? ' · ' + pass : '') + (last.daily_budget ? ' · $' + Number(last.spent_today).toFixed(0) + ' today' : '');
   }
 
+  // The last answer is kept on this phone only so the page has something to show the moment it opens.
+  function remember(body) {
+    try { localStorage.setItem(KEEP, JSON.stringify({at: Date.now(), body})); } catch (e) { /* private mode, or full */ }
+  }
+  function recall() {
+    try {
+      const kept = JSON.parse(localStorage.getItem(KEEP) || 'null');
+      if (!kept || !kept.body || !(Date.now() - kept.at < KEEP_MS)) return;
+      draw(kept.body);
+      lastOk = kept.at;
+      freshness();
+    } catch (e) { /* nothing usable was kept */ }
+  }
+
   async function refresh() {
     clearTimeout(timer);
+    const stop = new AbortController();
+    const giveUp = setTimeout(() => stop.abort(), WAIT_MS);
     try {
-      const r = await fetch('/api/summary', {cache: 'no-store', headers: {Accept: 'application/json'}});
+      const r = await fetch('/api/summary', {cache: 'no-store', headers: {Accept: 'application/json'}, signal: stop.signal});
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error || 'Fletchery answered ' + r.status + '.');
       last = body; lastOk = Date.now(); failed = '';
       draw(body);
+      remember(body);
       $('dot').classList.add('pulse');
     } catch (e) {
-      failed = e instanceof TypeError ? 'Can’t reach the PC. Is Tailscale on, and is the PC awake?' : String(e.message || e);
+      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? 'Can’t reach the PC. Is Tailscale on, and is the PC awake?' : String(e.message || e);
     }
+    clearTimeout(giveUp);
     freshness();
-    if (!document.hidden) timer = setTimeout(refresh, POLL_MS);
+    if (!document.hidden) timer = setTimeout(refresh, failed ? RETRY_MS : POLL_MS);
   }
 
   // ---- tabs ----
@@ -211,6 +237,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); else clearTimeout(timer); });
   window.addEventListener('online', refresh);
   setInterval(freshness, 15000);
+  recall();
   refresh();
 
   // ---- notifications (optional) ----
