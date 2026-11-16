@@ -1279,7 +1279,7 @@ class Engine:
                 self.ctx.log(f"merge round {n}: could not update the playtest checklist: {type(e).__name__}: {e}")
         base_red = rounds.base_is_red(res)
         parked = rounds.record_deferrals(self.state.merge_parked, batch, res.get("deferred", []), n, res["at"],
-                                         base_red=base_red)
+                                         base_red=base_red, no_result=rounds.no_result(res))
         if base_red:
             self.state.merge_base_red = {"round": n, "why": str(res.get("stop_reason") or "")[:2000], "at": res["at"]}
             self.ctx.log(f"merge round {n}: {self.cfg.base_branch} itself fails; rounds now take only PRs labelled "

@@ -50,8 +50,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "4"   # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
-                # 4: keeps checking in while an idle mirror copies, so the node never looks offline
+VERSION = "5"   # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
+                # 4: keeps checking in while an idle mirror copies, so the node never looks offline;
+                # 5: keeps a "round waiting" marker beside the heavy lease so local runs let merge rounds go first
 ASSET_SYNC_LABEL = "cap:asset-sync"
 ASSET_IDLE_SECONDS = 15 * 60
 ASSET_INDEX = ".fletchery-assets.json"
@@ -280,6 +281,46 @@ def drop_lease(cfg: dict, token: str) -> None:
     except (OSError, ValueError):
         pass
     cfg.pop("_lease_token", None)
+
+
+# ---- a merge round waiting for this machine ----
+# Alex, 2026-11-11 (Fletchery #162): on a node, merge rounds go before other work. On 2026-11-16 rounds 213-215 failed
+# because local runs on SF-NODE-01 (RunHomeShots, BuildTown, RunSpecs) kept taking the heavy lease, one after another,
+# so the round's BuildContent found it taken and gave no result. While a round job is queued for this node (and the node
+# is held off by someone else's lease) or runs here, the worker keeps a marker file beside the lease fresh. LifeShare's
+# LaneGuard refuses a new local run while the marker is fresh (unless it is part of a Fletchery job), so the round gets
+# the machine next. The marker is only trusted while fresh, so a stopped worker never blocks local work for long.
+
+ROUND_MARKER_NAME = "heavy.round-waiting.json"
+ROUND_MARKER_DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"   # LaneGuard's default lease path
+
+
+def round_marker_path(cfg: dict) -> Path | None:
+    """`roundMarkerFile` in the config ("" switches the marker off), else beside the heavy lease (LaneGuard's default
+    lease folder when the node has no `heavyLeaseFile`, on Windows only)."""
+    if "roundMarkerFile" in cfg:
+        return Path(cfg["roundMarkerFile"]) if cfg["roundMarkerFile"] else None
+    lease = cfg.get("heavyLeaseFile") or (ROUND_MARKER_DEFAULT_LEASE if WINDOWS else "")
+    return Path(lease).with_name(ROUND_MARKER_NAME) if lease else None
+
+
+def mark_round(cfg: dict, on: bool, why: str = "") -> None:
+    """Write (refresh) or remove the round marker. Never raises: the marker is a courtesy to the round, not a lock."""
+    path = round_marker_path(cfg)
+    if not path:
+        return
+    try:
+        if on:
+            from datetime import datetime, timezone
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps({"machine": cfg.get("machine", ""), "pid": os.getpid(), "why": why[:200],
+                                       "utc": datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
+            os.replace(tmp, path)
+        elif path.exists():
+            path.unlink()
+    except OSError:
+        pass
 
 
 # ---- machine stats ----
@@ -638,6 +679,8 @@ class Job:
         last_log = time.monotonic()
         while not self.done.wait(LOG_FLUSH_SECONDS):
             self.flush()
+            if self.job.get("round"):   # keep local runs off this machine between the round's steps
+                mark_round(self.cfg, True, f"merge round job {self.job.get('id')} is running here")
             if time.monotonic() - last_log >= HEARTBEAT_SECONDS - LOG_FLUSH_SECONDS:
                 last_log = time.monotonic()
                 try:
@@ -718,6 +761,8 @@ class Job:
             return 2, f"This node does not run {job.get('recipe')!r}", None
         if not SHA.match(str(job.get("sha") or "")):
             return 2, "The job has no valid commit SHA", None
+        if job.get("round"):
+            mark_round(cfg, True, f"merge round job {job.get('id')} is running here")
         beat = threading.Thread(target=self._beat, daemon=True)
         beat.start()
         tmp = Path(tempfile.mkdtemp(prefix=f"fletchery-job-{job['id']}-"))
@@ -855,7 +900,12 @@ def run(cfg: dict, once: bool = False) -> int:
                 if time.monotonic() < rest_until:  # checkouts keep failing here: check in as paused, take no job
                     st["paused"], st["checkout_failing"] = True, bad_checkouts
                 # While the pause file exists the node still checks in (it shows as paused) but takes no job.
-                job = coord.call("/v1/claim", {"stats": st, "paused": bool(st.get("paused"))}).get("job")
+                answer = coord.call("/v1/claim", {"stats": st, "paused": bool(st.get("paused"))})
+                job = answer.get("job")
+                # A round waits for this node while someone else's run holds it: ask local runs to wait their turn.
+                # Not while a person paused the node or checkouts keep failing here: then the round can't come.
+                mark_round(cfg, bool(answer.get("round_waiting")) and not st.get("pause_file")
+                           and not st.get("checkout_failing"), "a merge round job is queued for this machine")
                 if job:
                     log(f"job {job['id']}: {job['recipe']} at {job['sha'][:10]}")
                     token = take_lease(cfg, job, _workspace(cfg))
@@ -865,6 +915,7 @@ def run(cfg: dict, once: bool = False) -> int:
                         code, summary, result = Job(coord, cfg, job, log).run()
                     finally:
                         drop_lease(cfg, token)
+                        mark_round(cfg, False)   # the next claim says again if another round job waits
                     log(f"job {job['id']}: exit {code}: {summary}")
                     bad_checkouts = bad_checkouts + 1 if summary == "Checkout failed" else 0
                     rest = checkout_backoff(bad_checkouts)

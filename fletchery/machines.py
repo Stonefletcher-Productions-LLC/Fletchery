@@ -422,12 +422,30 @@ class Machines:
                         db.execute("COMMIT")
                         return {"id": row["id"], "recipe": row["recipe"], "repo": row["repo"], "sha": row["sha"],
                                 "ref": row["ref"], "params": json.loads(row["params"]),
-                                "timeout_minutes": row["timeout_minutes"]}
+                                "timeout_minutes": row["timeout_minutes"],
+                                "round": claim_rank(row["requested_by"]) == 0}
                 db.execute("COMMIT")
                 return None
             except Exception:
                 db.execute("ROLLBACK")
                 raise
+
+    def round_waiting(self, machine: str) -> bool:
+        """A merge round's job is queued that this node could take (labels, RAM, not paused by a person for that
+        kind). The node is told so while it is held off (its heavy lease taken by a local run), and it writes a
+        marker beside the lease that makes the next local LaneGuard run wait its turn: the round goes first
+        (Alex, 2026-11-11, Fletchery #162; 2026-11-16, rounds 213-215 starved by back-to-back local runs)."""
+        with self._db() as db:
+            m = db.execute("SELECT labels, ram_gb FROM machines WHERE name=? AND revoked IS NULL", (machine,)).fetchone()
+            if not m:
+                return False
+            have, off = set(json.loads(m["labels"] or "[]")), set(self._paused(db, machine))
+            for row in db.execute("SELECT * FROM jobs WHERE state='queued'").fetchall():
+                if claim_rank(row["requested_by"]) != 0 or KIND.get(row["recipe"]) in off:
+                    continue
+                if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
+                    return True
+            return False
 
     def preempt_for_rounds(self, at: datetime | None = None) -> list[tuple[int, str, int]]:
         """Stop a PR check (or other low-priority job) so a waiting merge-round job gets a node now. Claim order alone
@@ -912,7 +930,9 @@ class WorkerApi:
                 job = None if data.get("paused") else m.claim(machine)
                 if job:
                     self.log(f"machines: {machine} took job {job['id']} ({job['recipe']} at {job['sha'][:10]})")
-                return 200, {"job": job}
+                    return 200, {"job": job}
+                # No job for it now: say whether a round waits for it, so the node keeps local runs off its lease.
+                return 200, {"job": None, "round_waiting": m.round_waiting(machine)}
             job_id = int(data.get("job_id") or 0)
             if path == "/v1/heartbeat":
                 m.seen(machine, ip, stats=stats)
