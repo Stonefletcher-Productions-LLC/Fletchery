@@ -143,6 +143,17 @@ class Served(unittest.TestCase):
         code, body, _ = self.ask("/api/summary")
         self.assertEqual((code, json.loads(body)["project"]), (200, "Harbor"))
 
+    def test_text_is_sent_compressed_when_asked(self):
+        import gzip
+        for path in ("/", "/portal.js"):
+            plain = self.ask(path)[1]
+            code, body, headers = self.ask(path, self.remote(**{"Accept-Encoding": "gzip, br"}))
+            self.assertEqual((code, headers.get("Content-Encoding")), (200, "gzip"), path)
+            self.assertLess(len(body), len(plain))
+            self.assertEqual(gzip.decompress(body), plain)
+        self.assertIsNone(self.ask("/icon-192.png", {"Accept-Encoding": "gzip"})[2].get("Content-Encoding"))
+        self.assertIsNone(self.ask("/")[2].get("Content-Encoding"))
+
     def test_page_has_no_inline_code(self):
         html = (portal.UI / "index.html").read_text(encoding="utf-8")
         self.assertNotIn("<style", html)

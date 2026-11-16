@@ -27,6 +27,7 @@ Profile, under `workers`:
 See docs/PORTAL.md."""
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import threading
@@ -270,8 +271,16 @@ class Portal:
                 pass
 
             def _send(self, code: int, body: bytes, ctype: str = "application/json", cache: str = "no-store") -> None:
+                # Phones often reach the PC through a slow Tailscale relay, so text is sent compressed when the phone takes it.
+                squeeze = (len(body) > 1024 and not ctype.startswith("image/")
+                           and "gzip" in (self.headers.get("Accept-Encoding") or "").lower())
+                if squeeze:
+                    body = gzip.compress(body, 5)
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
+                if squeeze:
+                    self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
                 self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")

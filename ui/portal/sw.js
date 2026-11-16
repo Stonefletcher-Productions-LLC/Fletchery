@@ -1,6 +1,7 @@
-// Fletchery portal service worker: keeps the page itself available when the PC cannot be reached (so it can say so),
-// and shows notifications. Status is never cached: what you see is always what the PC just said.
-const CACHE = 'fletchery-portal-v1';
+// Fletchery portal service worker: opens the page from the copy saved on the phone, so it appears at once even while
+// Tailscale is still connecting or the PC cannot be reached, and shows notifications. Status is never saved here:
+// the page asks the PC for it after it has opened.
+const CACHE = 'fletchery-portal-v2';
 const SHELL = ['/', '/portal.css', '/portal.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', event => {
@@ -18,14 +19,22 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   const key = url.pathname === '/index.html' ? '/' : url.pathname;
   if (!SHELL.includes(key)) return;
-  // Newest first; the saved copy only when the PC cannot be reached. A refusal (403) is shown, never papered over.
-  event.respondWith(fetch(event.request).then(response => {
+  // Saved copy first, so opening never waits for the network; a newer copy is fetched behind it for next time.
+  // With nothing saved yet (first open) the network answer is used, and a refusal (403) is shown as it is.
+  const fresh = fetch(event.request, {cache: 'no-cache'}).then(response => {
     if (response.ok) {
       const copy = response.clone();
-      caches.open(CACHE).then(cache => cache.put(key, copy));
+      return caches.open(CACHE).then(cache => cache.put(key, copy)).then(() => response, () => response);
     }
     return response;
-  }).catch(() => caches.match(key).then(hit => hit || Response.error())));
+  });
+  event.respondWith(caches.match(key).then(hit => {
+    if (hit) {
+      event.waitUntil(fresh.catch(() => {}));
+      return hit;
+    }
+    return fresh.catch(() => Response.error());
+  }));
 });
 
 self.addEventListener('push', event => {
