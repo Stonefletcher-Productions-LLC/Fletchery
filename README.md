@@ -383,7 +383,7 @@ a code reload, a running round or the failed-round wait is not a stall. Cross-re
 (`workers.hangMinutes`, 30), it writes every thread's stack to `hang.txt` in the state folder and exits with code 76;
 `Start-Fletchery.ps1` starts it again, and after four quick crashes waits ten minutes and tries again rather than
 staying down. A code reload waits for running sessions for at most **Longest wait to reload new code**
-(`workers.drainMaxMinutes`, 60); after that rounds and workers carry on and the reload happens as soon as nothing is
+(`workers.drainMaxMinutes`, 15; node builds and node PR checks never wait for it); after that rounds and workers carry on and the reload happens as soon as nothing is
 running. No session is cancelled for a reload.
 
 During Game specs, the dashboard reads fresh check events from the workspace holding the test reservation on each

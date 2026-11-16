@@ -115,7 +115,7 @@ class Config:
     worker_max_turns: int = 80
     stall_minutes: int = 60                  # a worker/fixer session with no tool call for this long is stopped and requeued (0 = never)
     hang_minutes: float = 30                 # the backend's own pass loop stuck this long: it exits for a restart (watchdog.py; 0 = never)
-    drain_max_minutes: float = 60            # a code reload waits this long for sessions to finish, then rounds and workers go on
+    drain_max_minutes: float = 15            # a code reload waits this long for sessions to finish, then rounds and workers go on
     reviewer_max_turns: int = 25
     fixer_max_turns: int = 50
     planner_max_turns: int = 40

@@ -489,7 +489,9 @@ class Engine:
             ready_resume = resume.get("authorized") and (not wait_for or ready_signal(self.state_dir, wait_for))
             if not ready_resume:
                 self._maybe_storage(tasks, draining)
-        if not self.dry_run and not draining:
+        if not self.dry_run:
+            # Node builds and package polls run on other machines and survive a reload, so a pending reload doesn't
+            # hold them (2026-11-15: a reload behind long workers held the 0.4.4 build 40 min; it was packaged by hand).
             import time
             if (self._package_poll_job is None or self._package_poll_job.done()) and time.monotonic() >= self._package_poll_at:
                 self._package_poll_at = time.monotonic() + 30
@@ -1558,7 +1560,9 @@ class Engine:
                     if j["state"] == "queued":
                         m.cancel(j["id"])
                 return
-            if draining or m.active(nodecheck.RECIPE):
+            # A node check is a job on another machine; its result is read back after a reload, so a pending
+            # reload doesn't hold it (the node sat idle 40 min behind one on 2026-11-15).
+            if m.active(nodecheck.RECIPE):
                 return
             # Shadow: check the same PRs the PC does, to compare. Live: skip heads the PC already checked.
             checked = {} if m.shadow else self.state.pr_checks
