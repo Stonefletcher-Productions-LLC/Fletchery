@@ -5,8 +5,10 @@ param(
     [string]$Script = (Join-Path $PSScriptRoot 'Watch-Fletchery.ps1'),
     [string]$WatchArgs = ''
 )
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`" $WatchArgs"
+# conhost --headless: with Windows Terminal as the default terminal, -WindowStyle Hidden still opened a visible terminal
+# window every 10 minutes that took focus (2026-11-16, over Alex's game). A headless console shows nothing.
+$action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\conhost.exe') `
+    -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`" $WatchArgs"
 $logon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 10)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
