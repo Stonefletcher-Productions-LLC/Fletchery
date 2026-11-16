@@ -178,6 +178,13 @@ are never entered. Receipts are in `<workRoot>\fletchery\scratch-retention.json`
 idle folders that still hold uncommitted or unpushed work. `python node_worker.py scratch --config <file>` runs one
 pass now. Without `scratch.py` beside it, or without `scratchRoots`, the worker cleans nothing.
 
+The worker (version 9) also compacts its own checkout's git store. Every shallow fetch adds a pack, a killed fetch
+leaves `tmp_pack_*` files, and a leftover `fetch-pack <pid>` `.keep` marker makes `git gc` skip its pack for good, so
+the store only grew (81 GB here, 103 GB in a CI checkout, 2026-11-16). Every six idle hours, when the packs are over
+`compactMinGB` (default 20; 0 turns it off) and no git lock exists, the worker removes `tmp_pack_*` files older than a
+day and the `.keep` markers of fetches that are no longer running, then runs `git gc --prune=now` at below-normal
+priority. Other `.keep` files, LFS storage and worktrees are never touched.
+
 ## Pausing one machine from one kind of work
 
 Building → Machines shows a "Takes:" row of switches under each machine. Click one to stop that machine from that kind

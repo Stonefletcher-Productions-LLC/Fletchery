@@ -58,7 +58,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "8"   # 8: scratch retention while idle (scratch.py beside this file; "scratchRoots");
+VERSION = "9"   # 9: compacts its own checkout's git store while idle ("compactMinGB");
+                # 8: scratch retention while idle (scratch.py beside this file; "scratchRoots");
                 # 7: no console windows for children; "yieldTo" pauses the node while a listed game runs;
                 # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
                 # 4: keeps checking in while an idle mirror copies, so the node never looks offline;
@@ -765,6 +766,91 @@ def clear_stale_git_locks(ws: Path, min_age: float = STALE_LOCK_SECONDS, now: fl
     return gone
 
 
+COMPACT_IDLE_SECONDS = 6 * 60 * 60
+COMPACT_MIN_GB = 20          # packs smaller than this are left alone ("compactMinGB" in the config; 0 = never compact)
+STALE_TMP_PACK_SECONDS = 24 * 60 * 60
+FETCH_KEEP = re.compile(r"^fetch-pack (\d+) on ")
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if WINDOWS:
+        import ctypes
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.windll.kernel32.GetLastError() == 5             # access denied: it exists
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(ok) and code.value == 259                             # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def compact_checkout(cfg: dict, log=print, now: float | None = None, alive=_pid_alive) -> dict:
+    """Keep this worker's own checkout's .git from growing without end. Every shallow fetch adds a pack, a killed
+    fetch leaves tmp_pack_* files, and a `fetch-pack <pid>` .keep marker makes `git gc` skip its pack for ever: on
+    2026-11-16 a CI checkout held 103 GB in 62 packs (1.8 GB after) and this worker's held 81 GB plus 15.9 GB of
+    tmp_pack_*. Called only while the worker is idle (it runs one job at a time, so no git of its own is running).
+    Does nothing while a lock exists. Never touches LFS storage and never prunes worktrees."""
+    out = {"before_bytes": 0, "after_bytes": 0, "keeps": 0, "tmp": 0, "ran": False, "why": ""}
+    ws = _workspace(cfg)
+    packs = ws / ".git" / "objects" / "pack"
+    limit = float(cfg.get("compactMinGB", COMPACT_MIN_GB))
+    if limit <= 0 or not packs.is_dir():
+        return out
+    now = time.time() if now is None else now
+
+    def size() -> int:
+        total = 0
+        for f in packs.iterdir():
+            try:
+                total += f.stat().st_size if f.is_file() else 0
+            except OSError:
+                pass
+        return total
+
+    out["before_bytes"] = out["after_bytes"] = size()
+    if out["before_bytes"] < limit * 2**30:
+        return out
+    git = ws / ".git"
+    if any((git / n).exists() for n in ("gc.pid", "index.lock", "shallow.lock", "HEAD.lock", "packed-refs.lock")):
+        out["why"] = "a git lock exists"
+        return out
+    for f in list(packs.iterdir()):
+        try:
+            if f.name.startswith("tmp_pack_") and f.is_file() and now - f.stat().st_mtime >= STALE_TMP_PACK_SECONDS:
+                f.unlink()
+                out["tmp"] += 1
+            elif f.suffix == ".keep" and f.is_file() and f.stat().st_size < 4096:
+                match = FETCH_KEEP.match(f.read_text(encoding="utf-8", errors="replace"))
+                if match and not alive(int(match[1])):   # only a finished fetch's marker; any other .keep stays
+                    f.unlink()
+                    out["keeps"] += 1
+        except OSError:
+            pass
+    try:
+        done = subprocess.run(["git", "-c", "gc.auto=0", "gc", "--prune=now"], cwd=str(ws), capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=3 * 60 * 60, env=_git_env(cfg),
+                              creationflags=(BELOW_NORMAL | CREATE_NO_WINDOW) if WINDOWS else 0)
+        out["ran"] = done.returncode == 0
+        if done.returncode:
+            out["why"] = (done.stderr or done.stdout).strip()[-300:]
+    except (OSError, subprocess.SubprocessError) as e:
+        out["why"] = str(e)[:300]
+    out["after_bytes"] = size()
+    log(f"checkout: git store {out['before_bytes'] / 2**30:.1f} -> {out['after_bytes'] / 2**30:.1f} GB "
+        f"({out['keeps']} stale fetch markers, {out['tmp']} stale temp packs removed)"
+        + (f"; gc did not finish: {out['why']}" if out["why"] else ""))
+    return out
+
+
 def checkout_backoff(failures: int) -> int:
     """Seconds to take no job after `failures` failed checkouts in a row (0 for none or one)."""
     if failures < 2:
@@ -1042,6 +1128,7 @@ def run(cfg: dict, once: bool = False) -> int:
     bad_checkouts, rest_until = 0, 0.0   # failed checkouts in a row; take no job until rest_until (monotonic)
     next_sync = 0.0   # mirror the asset folders as soon as the worker starts: a new node fills itself
     next_scratch = 0.0
+    next_compact = time.monotonic() + 600   # not in the first minutes: let a waiting job go first
     while True:
         try:
             poll = int(hello(coord, cfg).get("poll_seconds") or 15)
@@ -1103,6 +1190,13 @@ def run(cfg: dict, once: bool = False) -> int:
                         scratch_pass(cfg, log)
                     except Exception as e:
                         log(f"scratch: {e}")
+                    continue
+                if not st.get("pause_file") and time.monotonic() >= next_compact:
+                    next_compact = time.monotonic() + COMPACT_IDLE_SECONDS
+                    try:
+                        compact_checkout(cfg, log)
+                    except Exception as e:
+                        log(f"checkout: {e}")
                     continue
                 time.sleep(poll)
         except Exception as e:

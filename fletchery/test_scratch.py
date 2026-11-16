@@ -239,6 +239,47 @@ class ScratchTest(unittest.TestCase):
         self.assertTrue((work / "fletchery" / "scratch-retention.json").exists())
         self.assertTrue(any("trimmed 3" in line for line in said))
 
+    def test_node_worker_compacts_its_checkout_and_keeps_live_and_hand_made_markers(self):
+        import node_worker
+        work = self.tmp / "nodework"
+        ws = work / "fletchery" / "LifeShare"
+        git(self.tmp, "clone", "-q", str(self.remote), str(ws))
+        for n in range(3):   # three more packs, as repeated fetches leave them
+            (ws / f"f{n}.txt").write_text(str(n), encoding="utf-8")
+            git(ws, "add", "-A")
+            git(ws, "commit", "-q", "-m", f"c{n}")
+            git(ws, "repack", "-q", "-d")
+        packs = ws / ".git" / "objects" / "pack"
+        names = sorted(p for p in packs.glob("*.pack"))
+        self.assertGreaterEqual(len(names), 3)
+        stale, live, hand = (names[i].with_suffix(".keep") for i in range(3))
+        stale.write_text("fetch-pack 111 on HOST\n", encoding="utf-8")
+        live.write_text("fetch-pack 222 on HOST\n", encoding="utf-8")
+        hand.write_text("kept by hand\n", encoding="utf-8")
+        old_tmp, new_tmp = packs / "tmp_pack_old", packs / "tmp_pack_new"
+        old_tmp.write_bytes(b"x" * 10)
+        new_tmp.write_bytes(b"x" * 10)
+        os.utime(old_tmp, (time.time() - 3 * 86400,) * 2)
+        head = git(ws, "rev-parse", "HEAD")
+        cfg = {"workRoot": str(work), "compactMinGB": 50}
+        self.assertFalse(node_worker.compact_checkout(cfg, lambda _: None)["ran"])      # under the threshold
+        cfg["compactMinGB"] = 0.0000001
+        (ws / ".git" / "index.lock").write_text("", encoding="utf-8")
+        self.assertEqual(node_worker.compact_checkout(cfg, lambda _: None)["why"], "a git lock exists")
+        self.assertTrue(stale.exists())
+        (ws / ".git" / "index.lock").unlink()
+        said = []
+        out = node_worker.compact_checkout(cfg, said.append, alive=lambda pid: pid == 222)
+        self.assertTrue(out["ran"], out)
+        self.assertEqual((out["keeps"], out["tmp"]), (1, 1))
+        self.assertFalse(stale.exists() or old_tmp.exists())
+        self.assertTrue(live.exists() and hand.exists())   # gc --prune=now itself clears every tmp_pack_*
+        self.assertEqual(git(ws, "rev-parse", "HEAD"), head)
+        git(ws, "fsck", "--connectivity-only")
+        self.assertLessEqual(len(list(packs.glob("*.pack"))), 3)   # the two kept packs and the one gc wrote
+        self.assertIn("1 stale fetch markers", said[0])
+        self.assertEqual(node_worker.compact_checkout({"workRoot": str(work), "compactMinGB": 0})["before_bytes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
