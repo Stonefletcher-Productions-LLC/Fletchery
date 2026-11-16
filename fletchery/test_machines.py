@@ -298,6 +298,44 @@ class ApiTests(Base):
         self.assertTrue(self.m.view()["machines"][0]["stats"]["paused"])
 
 
+    def test_a_held_off_node_hears_that_a_round_waits_for_it(self):
+        # 2026-11-16, rounds 213-215: local runs kept the node's lease; the node must know a round waits so local runs
+        # let the round go next (node_worker writes the marker LifeShare's LaneGuard reads).
+        api = WorkerApi(self.m, "127.0.0.1:0", log=lambda *_: None)
+        key = self.node()
+        held = {"paused": True, "stats": {"paused": True, "lease": "local run Tools\\RunHomeShots.ps1"}}
+        self.m.enqueue("node-checks", SHA, requested_by="pr 2120")
+        self.assertFalse(api.handle("/v1/claim", "SF-NODE-01", key, "ip", held)[1]["round_waiting"],
+                         "a PR check is not a round")
+        self.m.enqueue("node-checks", SHA, requested_by="round 216")
+        self.assertTrue(api.handle("/v1/claim", "SF-NODE-01", key, "ip", held)[1]["round_waiting"])
+        self.assertFalse(self.m.round_waiting("other"), "an unknown node waits for nothing")
+        self.m.set_paused("SF-NODE-01", "tests", True)
+        self.assertFalse(self.m.round_waiting("SF-NODE-01"), "a node paused from tests by a person is not waited for")
+        self.m.set_paused("SF-NODE-01", "tests", False)
+        job = api.handle("/v1/claim", "SF-NODE-01", key, "ip", {})[1]["job"]
+        self.assertTrue(job["round"], "the round's job is marked as a round job")
+
+
+class RoundMarkerTests(unittest.TestCase):
+    def test_marker_is_written_refreshed_and_removed(self):
+        with tempfile.TemporaryDirectory() as d:
+            lease = Path(d) / "heavy.json"
+            cfg = {"machine": "SF-NODE-01", "heavyLeaseFile": str(lease)}
+            marker = node_worker.round_marker_path(cfg)
+            self.assertEqual(marker, Path(d) / "heavy.round-waiting.json")
+            node_worker.mark_round(cfg, True, "a merge round job is queued for this machine")
+            self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["machine"], "SF-NODE-01")
+            self.assertFalse(lease.exists(), "the marker never touches the lease itself")
+            node_worker.mark_round(cfg, False)
+            self.assertFalse(marker.exists())
+            node_worker.mark_round(cfg, False)   # already gone: no error
+            off = {"roundMarkerFile": "", "heavyLeaseFile": str(lease)}
+            self.assertIsNone(node_worker.round_marker_path(off))
+            node_worker.mark_round(off, True)
+            self.assertFalse(marker.exists(), "an empty roundMarkerFile switches the marker off")
+
+
 class DashboardTests(Base):
     def test_dashboard_adds_a_machine_queues_and_cancels_a_job(self):
         from server import Dashboard

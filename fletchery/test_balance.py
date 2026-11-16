@@ -175,6 +175,26 @@ class BalanceTests(unittest.IsolatedAsyncioTestCase):
             rounds.record_deferrals(parked, [pr], [{"pr": 34, "why": why, "disposition": "deferred"}], n, "2026-11-06T10:00:00+00:00")
         self.assertEqual(rounds.not_parked([pr], parked), [pr])
 
+    def test_no_result_deferrals_never_park(self):
+        # Rounds 213-215 (2026-11-16): local runs held the node's heavy lease, BuildContent gave exit 2 (NO RESULT),
+        # and innocent PRs were parked for 72 h. Nothing was tested, so none of that counts.
+        import rounds
+        parked = {}
+        pr = self.ready_pr(35)
+        for n, why in ((213, "No result: BuildContent exited 2 (NO RESULT), the PC is in use by local run RunHomeShots"),
+                       (214, "node-checks gave exit 2 twice; heavy lease held by BuildTown")):
+            rounds.record_deferrals(parked, [pr], [{"pr": 35, "why": why, "disposition": "deferred"}], n, "2026-11-16T03:00:00+00:00")
+        self.assertEqual(rounds.not_parked([pr], parked), [pr])
+        self.assertNotIn("35", parked)
+        real = [{"pr": 35, "why": "Spec LifeShare.Camera.CentreOn failed: 14.3 cm off", "disposition": "deferred"}]
+        rounds.record_deferrals(parked, [pr], real, 215, "2026-11-16T04:00:00+00:00", no_result=True)
+        self.assertNotIn("35", parked, "a round that got no result as a whole counts nothing")
+        rounds.record_deferrals(parked, [pr], real, 216, "2026-11-16T05:00:00+00:00")
+        self.assertEqual(parked["35"]["count"], 1, "a real failure still counts")
+        self.assertTrue(rounds.no_result({"result": "waiting"}))
+        self.assertTrue(rounds.no_result({"result": "failed", "stop_reason": "BuildContent: RESULT: NO RESULT. The PC is in use by ..."}))
+        self.assertFalse(rounds.no_result({"result": "failed", "stop_reason": "Build failed: LSDish.cpp(12): error C2065"}))
+
     async def test_parked_pr_stays_out_of_the_next_round(self):
         engine, gh, rt = self.engine({}, merge_rounds=True)
         gh.prs = [self.ready_pr(11), self.ready_pr(12)]

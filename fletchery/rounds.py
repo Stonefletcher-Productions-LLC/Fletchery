@@ -629,7 +629,8 @@ def node_tests_text(cfg, round_no, base: str, whole: bool = False) -> str:
                 "again and rerun step 3.\n"
                 "   - Exit 2: no result (no node free, node lost or out of memory): wait 3 minutes (a node's worker may be "
                 "restarting), then run step 3 once more. If it gives 2 again, stop and return `waiting` with the "
-                "reason; do not run the checks or the imports on this PC.\n"
+                "reason, and start each untested PR's `why` with \"No result:\" (nothing was tested, so it is not held "
+                "against the PR); do not run the checks or the imports on this PC.\n"
                 "   - Content imports: when a PR in the batch has a `Lane-Imports:` line, add `--imports <the steps, comma "
                 f"separated, in the PR's order> --push-branch {branch}` to step 3. The node builds the editor, runs those "
                 "imports, commits the content and pushes it to that branch, then tests that commit. On exit 0, "
@@ -754,6 +755,20 @@ BASE_RED = re.compile(r"\bbase (?:is|was|branch is) red\b|\bbaseline\b(?! run)|\
                       r"(?:on|in) (?:the )?(?:base|test-staging|origin/[\w./-]+)\b|\bpre-?existing (?:failure|crash)|"
                       r"\bon (?:the )?base (?:branch )?(?:alone|too|itself)\b|\balready (?:fails|failing|red) on\b", re.I)
 
+# A deferral because the round got no result at all (2026-11-16, rounds 213-215: local runs held SF-NODE-01's heavy
+# lease, BuildContent refused with "RESULT: NO RESULT" and exit 2, and the innocent PRs were parked for 72 h). Nothing
+# was tested, so it is not evidence against the PR.
+NO_RESULT = re.compile(r"\bno result\b|\bexit(?:ed)?(?: code)?:? 2\b|\(exit 2\)|\bheavy[- ]lease\b|\blane ?guard\b|"
+                       r"\b(?:pc|node|machine|sf-node-01|gaming-pc) (?:is|was) (?:in use|busy|held)\b|\bin use by\b|"
+                       r"\blease (?:is |was )?(?:held|taken|busy|contention)\b|\bno (?:online )?node (?:free|took|takes)\b", re.I)
+
+
+def no_result(res: dict) -> bool:
+    """The round as a whole got no result: it returned `waiting`, or its stop reason says nothing could run."""
+    if str(res.get("result") or "") == "waiting":
+        return True
+    return bool(NO_RESULT.search(str(res.get("stop_reason") or "") + " " + str(res.get("gave_up") or "")))
+
 
 PRIORITY_LABEL = "merge-next"   # a person (or a thread) wants this PR in the next round, ahead of the queue
 
@@ -772,11 +787,13 @@ def by_value(ready: list, tasks: dict) -> list:
     return sorted(ready, key=lambda p: (first(p), -value(p), p.number))
 
 
-def record_deferrals(parked: dict, batch: list, deferred: list, round_no, at: str, base_red: bool = False) -> list[int]:
+def record_deferrals(parked: dict, batch: list, deferred: list, round_no, at: str, base_red: bool = False,
+                     no_result: bool = False) -> list[int]:
     """Count deferrals per PR head; returns the PRs that just became parked. A deferral because the round never got
-    to the PR (not attempted, interrupted) or because the base branch itself fails (`base_red`, or a reason that says
-    so) is not evidence that this PC cannot accept it, so it does not count."""
-    if base_red:
+    to the PR (not attempted, interrupted), because the base branch itself fails (`base_red`, or a reason that says
+    so) or because the round got no result (`no_result`: the machine was busy, exit 2; or a reason that says so) is
+    not evidence that this PC cannot accept it, so it does not count."""
+    if base_red or no_result:
         return []
     heads = {p.number: p.head_sha for p in batch}
     newly = []
@@ -785,7 +802,7 @@ def record_deferrals(parked: dict, batch: list, deferred: list, round_no, at: st
             continue
         number = int(item["pr"])
         why = str(item.get("why", ""))
-        if number not in heads or _UNTRIED.search(why) or BASE_RED.search(why):
+        if number not in heads or _UNTRIED.search(why) or BASE_RED.search(why) or NO_RESULT.search(why):
             continue
         old = parked.get(str(number)) or {}
         count = old.get("count", 0) + 1 if old.get("head") == heads[number] else 1
