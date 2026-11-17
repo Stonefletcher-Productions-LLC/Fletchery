@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from pipeline import Limited  # noqa: E402
-from runtime import MAX_LIMIT_PAUSE_MINUTES, limit_pause_minutes  # noqa: E402
+from runtime import MAX_LIMIT_PAUSE_MINUTES, is_limit, limit_pause_minutes  # noqa: E402
 
 EST = timezone(timedelta(hours=-5))
 NOW = datetime(2026, 11, 6, 10, 0, tzinfo=EST)
@@ -34,6 +34,13 @@ class LimitPauseTests(unittest.TestCase):
         self.assertEqual(limit_pause_minutes("try again at Mar 1st, 2027 1:00 AM", 30, NOW), MAX_LIMIT_PAUSE_MINUTES)
         self.assertEqual(limit_pause_minutes("try again at the 3 PM slot", 30, NOW), 30)
         self.assertEqual(limit_pause_minutes("", 45, NOW), 45)
+
+    def test_claude_plan_limit_wordings_count_as_limits(self):
+        for text in ("You've hit your 5-hour limit", "You\u2019ve hit your weekly limit \u2219 resets Nov 20, 9am",
+                     "You have reached your session limit", "5-hour limit resets 9:10pm", "exceeded the daily limit"):
+            self.assertTrue(is_limit(text), text)
+        for text in ("the test hit a timeout", "limit the number of Folks to 60", "build failed: exit 2", ""):
+            self.assertFalse(is_limit(text), text)
 
     def test_limited_reads_as_its_message(self):
         e = Limited("codex failed: usage limit", 0.0, "limited", "codex-sol")
