@@ -1593,6 +1593,11 @@ class Engine:
             # Shadow: check the same PRs the PC does, to compare. Live: skip heads the PC already checked.
             checked = {} if m.shadow else self.state.pr_checks
             waiting = prcheck.candidates(gh.open_prs(), cfg, checked, label, graph.PREFIX)
+            # A check that just gave no result (the machine was busy) is not queued again for the same PR and head
+            # for NO_RESULT_RETRY_SECONDS: 14 bounced checks in 70 minutes on 2026-11-17 (#208).
+            import time
+            resting = getattr(self, "_node_check_rest", {})
+            waiting = [p for p in waiting if resting.get((p.number, p.head_sha), 0) <= time.monotonic()]
             pr = nodecheck.pick(waiting, m.active(nodecheck.RECIPE), self.state.node_pr_checks)
             if not pr:
                 return
@@ -1613,7 +1618,12 @@ class Engine:
         v = nodecheck.verdict(job)
         where = job.get("machine") or "a test node"
         if v == "none":
-            self.ctx.log(f"node PR check: PR #{pr} job {job['id']}: no result ({job.get('summary')}); it runs again later")
+            import time
+            if not hasattr(self, "_node_check_rest"):
+                self._node_check_rest = {}
+            self._node_check_rest[(pr, head)] = time.monotonic() + nodecheck.NO_RESULT_RETRY_SECONDS
+            self.ctx.log(f"node PR check: PR #{pr} job {job['id']}: no result ({job.get('summary')}); it runs again "
+                         f"in {nodecheck.NO_RESULT_RETRY_SECONDS // 60} min at the earliest")
             return
         passed = v == "pass"
         step = nodecheck.MERGE_STEP if str(job.get("summary") or "").startswith(nodecheck.MERGE_STEP) else nodecheck.CHECK_STEP

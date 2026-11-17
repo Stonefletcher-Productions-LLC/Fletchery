@@ -125,6 +125,15 @@ heavy lease (`E:\\GitHubRunner\\ResourceLeases\\heavy.json`): the worker then ho
 paused (takes nothing) while a round, a build or a local editor run holds it, so a node job and other Unreal work on
 the PC never run at the same time. Pause it from Machines (Tests, PR checks, Builds) when the PC is needed.
 
+A node without `heavyLeaseFile` (NODE-01) still watches the default lease that local runs take there
+(`E:\\GitHubRunner\\ResourceLeases\\heavy.json`; worker 10, Fletchery #208). While a local run holds it, the node
+shows as "busy with a local run: <what>" on Machines and takes no PR check, test run or build: before this it looked
+free and took checks that each ended "no result" in under a minute. A merge round's job is the exception: the node
+still takes it, the round counts the node as available (so it does not fall back to the PC), and the job waits up to
+30 minutes for the local run while the round marker keeps new local runs from starting. A PR check that ends with
+"no result" is not queued again for the same PR and head for 10 minutes. Set `"heavyLeaseFile": ""` to switch the
+watching off.
+
 ## Asset folders every node mirrors
 
 Some project imports read files that are not in git: LifeShare's character and wardrobe imports read

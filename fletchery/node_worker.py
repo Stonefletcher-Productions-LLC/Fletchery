@@ -58,7 +58,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-VERSION = "9"   # 9: compacts its own checkout's git store while idle ("compactMinGB");
+VERSION = "10"  # 10: sees a local run's hold on LaneGuard's default lease without "heavyLeaseFile" (#208): takes
+                #     only merge-round jobs meanwhile ("rounds_only" on the claim);
+                # 9: compacts its own checkout's git store while idle ("compactMinGB");
                 # 8: scratch retention while idle (scratch.py beside this file; "scratchRoots");
                 # 7: no console windows for children; "yieldTo" pauses the node while a listed game runs;
                 # 2: mirrors the PC's asset folders (label cap:asset-sync); 3: clears stale git locks, backs off on failed checkouts;
@@ -288,9 +290,18 @@ def package_steps(params: dict, ws: Path, engine: str, result_json: Path | None 
 # and claims nothing while someone else holds it. A PC round or a local editor run then waits for the job, not the other
 # way round. processStartUtc is left out on purpose: HeavyLease then counts the hold live while this worker's PID lives.
 
+def job_lease_path(cfg: dict) -> str:
+    """The heavy lease this machine's local runs take: `heavyLeaseFile` when the config has the key ("" = none), else
+    LaneGuard's default lease on Windows. 2026-11-17 (#208): NODE-01 has no heavyLeaseFile, so it never saw local runs
+    holding the machine, looked free, and took 14 PR checks in a row that each bounced with "no result"."""
+    if "heavyLeaseFile" in cfg:
+        return str(cfg["heavyLeaseFile"] or "")
+    return ROUND_MARKER_DEFAULT_LEASE if WINDOWS else ""
+
+
 def lease_holder(cfg: dict) -> str:
-    """Who else holds the heavy lease now ("" when it is free or not configured)."""
-    path = cfg.get("heavyLeaseFile")
+    """Who else holds the heavy lease now ("" when it is free or there is none)."""
+    path = job_lease_path(cfg)
     if not path or not Path(path).exists():
         return ""
     try:
@@ -454,9 +465,14 @@ def stats(cfg: dict) -> dict:
     holder = lease_holder(cfg)
     if holder:  # the PC is busy with other Unreal work: show as paused and take no job until it is free
         out["paused"], out["lease"] = True, holder
+        # Without a worker-level lease (no heavyLeaseFile) a merge round's job can still come: it waits for the local
+        # run itself (hold_for_round) while the round marker keeps new local runs off. Everything else waits.
+        if "heavyLeaseFile" not in cfg and not out.get("pause_file"):
+            out["lease_only"] = True
     game = yield_holder(cfg)
     if game:  # someone is playing on this machine: paused like a person's pause file, so nothing counts on it
         out["paused"], out["pause_file"], out["yield"] = True, True, game
+        out.pop("lease_only", None)
     try:
         out["disk_free_gb"] = shutil.disk_usage(cfg.get("workRoot") or ".").free / 2**30
     except OSError:
@@ -1153,7 +1169,10 @@ def run(cfg: dict, once: bool = False) -> int:
                 if time.monotonic() < rest_until:  # checkouts keep failing here: check in as paused, take no job
                     st["paused"], st["checkout_failing"] = True, bad_checkouts
                 # While the pause file exists the node still checks in (it shows as paused) but takes no job.
-                answer = coord.call("/v1/claim", {"stats": st, "paused": bool(st.get("paused"))})
+                if st.get("checkout_failing"):
+                    st.pop("lease_only", None)
+                answer = coord.call("/v1/claim", {"stats": st, "paused": bool(st.get("paused")),
+                                                  "rounds_only": bool(st.get("lease_only"))})
                 job = answer.get("job")
                 # A round waits for this node while someone else's run holds it: ask local runs to wait their turn.
                 # Not while a person paused the node or checkouts keep failing here: then the round can't come.

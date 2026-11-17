@@ -328,6 +328,32 @@ class PcLeaseTests(unittest.TestCase):
         node_worker.drop_lease(cfg, "other")
         self.assertTrue(lease.exists(), "never removes someone else's hold")
 
+    def test_a_node_without_a_lease_setting_sees_the_default_lease(self):
+        # #208: NODE-01 has no heavyLeaseFile; it must still see a local run's hold, and only rounds may come.
+        import node_worker
+        from unittest import mock
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        lease = Path(tmp.name) / "heavy.json"
+        cfg = {"workRoot": tmp.name}
+        with mock.patch.object(node_worker, "WINDOWS", True), \
+                mock.patch.object(node_worker, "ROUND_MARKER_DEFAULT_LEASE", str(lease)), \
+                mock.patch.object(node_worker, "_memory", lambda: (0, 0)), \
+                mock.patch.object(node_worker, "_cpu", SimpleNamespace(sample=lambda: None)):
+            self.assertEqual(node_worker.job_lease_path(cfg), str(lease))
+            self.assertEqual(node_worker.job_lease_path({"heavyLeaseFile": ""}), "", "an empty setting switches it off")
+            self.assertNotIn("lease", node_worker.stats(cfg))
+            lease.write_text('{"purpose": "local run Tools\\\\RunSpecs.ps1", "token": "x"}')
+            st = node_worker.stats(cfg)
+            self.assertEqual((st["paused"], st["lease_only"]), (True, True))
+            self.assertIn("RunSpecs", st["lease"])
+            self.assertNotIn("lease_only", node_worker.stats({"heavyLeaseFile": str(lease), "workRoot": tmp.name}),
+                             "a node that takes the lease itself waits for it as before")
+            self.assertEqual(node_worker.take_lease(cfg, {"id": 6}, Path(tmp.name), wait=0), "",
+                             "the worker still takes no lease of its own for an ordinary job")
+        with mock.patch.object(node_worker, "WINDOWS", False):
+            self.assertEqual(node_worker.job_lease_path(cfg), "")
+
 
 class RoundPromptTests(unittest.TestCase):
     def test_round_tests_text_only_when_on(self):
@@ -390,7 +416,26 @@ class ResultTests(Harness):
             self.step()
             self.finish(code, summary)
             Engine._node_pr_check_result(self.eng, self.coord, self.m.unhandled("pr-check")[0])
+            self.eng._node_check_rest.clear()   # the 10-minute rest has its own test below
         self.assertEqual((self.gh.comments, self.eng.state.pr_checks), ([], {}))
+
+    def test_a_no_result_check_rests_before_the_same_head_is_queued_again(self):
+        # 2026-11-17 (#208): 14 checks of one PR bounced in 70 minutes while NODE-01 was busy with local runs.
+        import nodecheck
+        self.online()
+        self.step()
+        self.finish(2, "PR check gave no result (exit 2): nothing was tested")
+        self.step()
+        self.assertEqual(self.m.active("pr-check"), [], "not queued again straight away")
+        self.assertIn("10 min", self.logs[-1])
+        self.gh.prs[0] = pr(7, head=HEAD2)
+        self.step()
+        self.assertEqual(len(self.m.active("pr-check")), 1, "a new head is checked at once")
+        self.finish(0, "Passed")
+        self.gh.prs[0] = pr(7)
+        self.eng._node_check_rest = {k: v - nodecheck.NO_RESULT_RETRY_SECONDS for k, v in self.eng._node_check_rest.items()}
+        self.step()
+        self.assertEqual(len(self.m.active("pr-check")), 1, "after the rest the first head is tried again")
 
     def test_moved_head_drops_the_result(self):
         self.online()

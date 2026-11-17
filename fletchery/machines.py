@@ -397,7 +397,7 @@ class Machines:
                 return "stopping"
             return row["state"]
 
-    def claim(self, machine: str) -> dict | None:
+    def claim(self, machine: str, rounds_only: bool = False) -> dict | None:
         """The first queued job this node can run: every label it needs is one of the node's, and the node has the
         RAM. Merge-round jobs go first (a round waits on them), then builds, then PR checks and the rest, oldest first
         within each (Alex, 2026-11-12: "nodes merge with crit prio"). A node runs one job at a time."""
@@ -415,6 +415,8 @@ class Machines:
                 for row in sorted(rows, key=lambda r: (claim_rank(r["requested_by"]), r["id"])):
                     if KIND.get(row["recipe"]) in off:
                         continue
+                    if rounds_only and claim_rank(row["requested_by"]) != 0:
+                        continue   # the node is busy with a local run: only a merge round's job waits for it (#208)
                     if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
                         t = now()
                         db.execute("UPDATE jobs SET state='running', machine=?, started=?, heartbeat=?, attempts=attempts+1 "
@@ -462,7 +464,8 @@ class Machines:
                 return out
             nodes = []
             for m in db.execute("SELECT * FROM machines WHERE revoked IS NULL").fetchall():
-                if _age(m["last_seen"], at) > ONLINE_SECONDS or self._held_off(db, m, json.loads(m["stats"] or "{}")):
+                if _age(m["last_seen"], at) > ONLINE_SECONDS or self._held_off(db, m, json.loads(m["stats"] or "{}"),
+                                                                               for_round=True):
                     continue
                 run = db.execute("SELECT * FROM jobs WHERE machine=? AND state='running'", (m["name"],)).fetchone()
                 nodes.append((m, set(json.loads(m["labels"] or "[]")), set(self._paused(db, m["name"])), run))
@@ -558,11 +561,14 @@ class Machines:
 
     # ---- pausing one machine from one kind of work ----
     @staticmethod
-    def _held_off(db, m, stats: dict) -> bool:
+    def _held_off(db, m, stats: dict, for_round: bool = False) -> bool:
         """Paused for new work. A node that shows paused only because the heavy lease is taken while it runs one of
         Fletchery's own jobs is busy, not paused: its next job waits for it (2026-11-13: a busy NODE-01 looked
-        paused, so `run` found no node and rounds fell back to the PC)."""
+        paused, so `run` found no node and rounds fell back to the PC). `for_round`: a node held only by a local run
+        (`lease_only`) still takes a merge round's job and waits for that run itself, so it counts (#208)."""
         if not stats.get("paused"):
+            return False
+        if for_round and stats.get("lease_only") and not stats.get("checkout_failing") and not stats.get("pause_file"):
             return False
         if stats.get("lease") and not stats.get("checkout_failing") and not stats.get("pause_file"):
             return db.execute("SELECT 1 FROM jobs WHERE machine=? AND state='running'", (m["name"],)).fetchone() is None
@@ -594,9 +600,9 @@ class Machines:
                        ("paused:" + name, json.dumps(out)))
             return out
 
-    def eligible(self, labels: list, min_ram_gb: float = 0, recipe: str = "") -> list[str]:
+    def eligible(self, labels: list, min_ram_gb: float = 0, recipe: str = "", for_round: bool = False) -> list[str]:
         """Online, unrevoked, unpaused nodes that carry every label and have the RAM; with `recipe`, also not paused
-        from that kind of work."""
+        from that kind of work. `for_round`: also a node that is only busy with a local run (see _held_off)."""
         at = datetime.now(timezone.utc)
         out = []
         with self._db() as db:
@@ -604,7 +610,7 @@ class Machines:
                 stats = json.loads(m["stats"] or "{}")
                 if recipe and KIND.get(recipe) in self._paused(db, m["name"]):
                     continue
-                if (_age(m["last_seen"], at) <= ONLINE_SECONDS and not self._held_off(db, m, stats)
+                if (_age(m["last_seen"], at) <= ONLINE_SECONDS and not self._held_off(db, m, stats, for_round)
                         and set(labels) <= set(json.loads(m["labels"] or "[]")) and float(m["ram_gb"] or 0) >= min_ram_gb):
                     out.append(m["name"])
         return out
@@ -855,12 +861,18 @@ def _desc(text: str) -> str:
 def _clean_stats(stats) -> dict:
     out = {}
     if isinstance(stats, dict):
-        for k in ("ram_free_gb", "ram_total_gb", "cpu_percent", "disk_free_gb", "paused"):
+        for k in ("ram_free_gb", "ram_total_gb", "cpu_percent", "disk_free_gb", "paused", "pause_file", "lease_only",
+                  "checkout_failing"):
             v = stats.get(k)
             if isinstance(v, bool):
                 out[k] = v
             elif isinstance(v, (int, float)):
                 out[k] = round(float(v), 1)
+        # Why a node is paused (#208): until 2026-11-17 these were dropped here, so the coordinator never knew a
+        # node was only busy with a local run, and the dashboard could not say so.
+        for k in ("lease", "yield"):
+            if isinstance(stats.get(k), str) and stats[k]:
+                out[k] = stats[k][:120]
     return out
 
 
@@ -927,7 +939,10 @@ class WorkerApi:
                 return 200, {"poll_seconds": 15}
             if path == "/v1/claim":
                 m.seen(machine, ip, stats=stats)
-                job = None if data.get("paused") else m.claim(machine)
+                if not data.get("paused"):
+                    job = m.claim(machine)
+                else:   # paused; a node held only by a local run still takes a merge round's job (worker 10, #208)
+                    job = m.claim(machine, rounds_only=True) if data.get("rounds_only") is True else None
                 if job:
                     self.log(f"machines: {machine} took job {job['id']} ({job['recipe']} at {job['sha'][:10]})")
                     return 200, {"job": job}
@@ -1118,7 +1133,8 @@ def run_job(m: "Machines", recipe: str, sha: str, params: dict | None = None, re
         if ASSET_SYNC_LABEL not in labels:   # only a worker that mirrors the asset folders first may import
             labels.append(ASSET_SYNC_LABEL)
     need = list(RECIPES[recipe]["labels"]) + [x for x in labels if x not in RECIPES[recipe]["labels"]]
-    names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe)
+    for_round = claim_rank(requested_by) == 0
+    names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe, for_round)
     if not names:
         # A node that dropped off a minute ago is usually its worker restarting (2026-11-13, round 165: NODE-01
         # restarted after a package job, both `run` attempts fell inside the gap and the round imported on the PC).
@@ -1129,7 +1145,7 @@ def run_job(m: "Machines", recipe: str, sha: str, params: dict | None = None, re
             start = clock()
             while not names and clock() - start < RETURN_WAIT_MINUTES * 60:
                 sleep(poll)
-                names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe)
+                names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe, for_round)
     if not names:
         if not m.carriers(need):
             out(f"No result: no node has the labels {' '.join(need)} (no node carries them at all).")

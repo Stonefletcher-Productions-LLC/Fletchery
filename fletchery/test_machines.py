@@ -310,6 +310,33 @@ class ApiTests(Base):
         self.m.enqueue("node-checks", SHA, requested_by="round 216")
         self.assertTrue(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["round_waiting"])
         self.assertFalse(self.m.round_waiting("other"), "an unknown node waits for nothing")
+
+    def test_a_node_busy_with_a_local_run_takes_only_round_jobs(self):
+        # #208: worker 10 reports a local run's hold and asks for round jobs only; a PR check stays queued.
+        api = WorkerApi(self.m, "127.0.0.1:0", log=lambda *_: None)
+        key = self.node()
+        held = {"paused": True, "rounds_only": True,
+                "stats": {"paused": True, "lease_only": True, "lease": "local run Tools\\BuildTown.ps1"}}
+        check = self.m.enqueue("node-checks", SHA, requested_by="pr 2177")
+        self.assertIsNone(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["job"])
+        stats = self.m.view()["machines"][0]["stats"]
+        self.assertEqual((stats["lease"], stats["lease_only"]), ("local run Tools\\BuildTown.ps1", True),
+                         "the dashboard can say why the node is paused")
+        labels = machines.RECIPES["node-checks"]["labels"]
+        self.assertEqual(self.m.eligible(labels, 0, "node-checks"), [], "not free for a PR check")
+        self.assertEqual(self.m.eligible(labels, 0, "node-checks", for_round=True), ["NODE-01"],
+                         "a round still counts on it, so it does not fall back to the PC")
+        round_job = self.m.enqueue("node-checks", SHA, requested_by="round 230")
+        job = api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["job"]
+        self.assertEqual((job["id"], job["round"]), (round_job, True))
+        self.assertEqual(self.m.job(check)["state"], "queued")
+        # A person's pause or an older worker (no rounds_only) takes nothing, as before.
+        self.m.finish("NODE-01", round_job, 0, "Passed")
+        self.m.enqueue("node-checks", SHA, requested_by="round 231")
+        self.assertIsNone(api.handle("/v1/claim", "NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})[1]["job"])
+        paused = {"paused": True, "pause_file": True, "lease": "x", "lease_only": True}
+        self.m.seen("NODE-01", stats=paused)
+        self.assertEqual(self.m.eligible(labels, 0, "node-checks", for_round=True), [])
         self.m.set_paused("NODE-01", "tests", True)
         self.assertFalse(self.m.round_waiting("NODE-01"), "a node paused from tests by a person is not waited for")
         self.m.set_paused("NODE-01", "tests", False)
