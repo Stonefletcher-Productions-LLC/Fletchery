@@ -75,6 +75,9 @@ def log_tail(text: str, step: str) -> str:
     return "\n".join(lines[-TAIL_LINES:])
 
 
+NO_RESULT_RETRY_SECONDS = 10 * 60   # after "no result", the same PR and head wait this long before the next try
+
+
 def pick(waiting: list, active: list[dict], done: dict) -> object | None:
     """The first waiting PR without a queued/running node check and not node-checked at its head."""
     busy = {(int(j["params"].get("pr") or 0), j["params"].get("head")) for j in active}

@@ -2047,7 +2047,7 @@ function renderLanes(d) {
   const pcCheckText = pcCheck ? `PR check #${pcCheck.check}` : "";
   const doing = m => {   // a node's job: which card it belongs to, and its one wording
     const j = m.job;
-    if (m.revoked || !m.online || !j) return {lane: "", text: m.revoked ? "Revoked" : !m.online ? "Offline" : "Idle"};
+    if (m.revoked || !m.online || !j) return {lane: "", text: m.revoked ? "Revoked" : !m.online ? "Offline" : (m.stats || {}).yield ? `Paused while ${m.stats.yield} runs` : (m.stats || {}).lease ? `Busy with a local run: ${m.stats.lease}` : "Idle"};
     if (j.recipe === "pr-check") return {lane: "testing", text: `PR check #${j.pr || (j.params && j.params.pr) || "?"}`};
     if (j.recipe === "package") return {lane: "building", text: `Build ${(j.params && j.params.version) || ""}`.trim()};
     const only = j.params && j.params.only ? ` ${j.params.only}` : "";
@@ -2482,7 +2482,7 @@ function machineStats(m) {
   if (s.cpu_percent != null) bits.push(`CPU ${Math.round(s.cpu_percent)}%`);
   if (s.ram_free_gb != null) bits.push(`RAM ${s.ram_free_gb} of ${s.ram_total_gb || m.ram_gb} GB free`);
   if (s.disk_free_gb != null) bits.push(`disk ${Math.round(s.disk_free_gb)} GB free`);
-  if (s.paused) bits.push("paused on the node");
+  if (s.paused) bits.push(s.yield ? `paused while ${s.yield} runs` : s.lease ? `busy with a local run: ${s.lease}` : "paused on the node");
   return bits.join(" · ");
 }
 // Kinds of work each machine can be paused from (Building -> Machines). Merging on the PC is the Merge section's Pause.

@@ -585,7 +585,8 @@ def node_round(cfg, batch, coord, tasks=None) -> str:
             labels.append("cap:asset-sync")
     try:
         import machines
-        names = coord.machines.eligible(labels, machines.RECIPES["node-checks"]["min_ram_gb"], "node-checks")
+        names = coord.machines.eligible(labels, machines.RECIPES["node-checks"]["min_ram_gb"], "node-checks",
+                                        for_round=True)
     except Exception:
         return ""
     return f"the Unreal work runs on {', '.join(names)}" if names and not coord.machines.shadow else ""
