@@ -181,7 +181,7 @@ def command_lines() -> list[str]:
         return lines
     ps = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -ErrorAction Stop | "
           "Where-Object { $_.ProcessId -ne $PID } | "
-          "ForEach-Object { \"{0}`t{1}`t{2}\" -f $_.ProcessId, $_.Name, ([string]$_.CommandLine -replace '[\\r\\n\\t]', ' ') }")
+          "ForEach-Object { ($_.ProcessId, $_.Name, ([string]$_.CommandLine -replace '[\\r\\n\\t]', ' ')) -join [char]9 }")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
                              text=True, timeout=120, encoding="utf-8", errors="replace", check=True,
