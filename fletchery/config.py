@@ -76,8 +76,9 @@ class Config:
     max_parallel: int = 2                    # on a Claude plan the limits are shared with your own sessions
     worker_rank_limits: dict = None          # None = allocate All workers by task demand; manual per-rank 0..10
     emergency_workers: int = 1              # dedicated build/merge repair slot, independently 0 or 1
-    # Programs (image names, e.g. "Wow.exe") that mean "the PC is someone's right now": while one runs, nothing new
-    # starts on this PC (coding sessions, rounds, PC checks, builds); running work finishes (2026-11-16, Alex gaming).
+    # Programs (image names, e.g. "Wow.exe") that mean "the PC is someone's right now": while one runs, no new
+    # coding session, PC check or build starts on this PC; running work finishes (2026-11-16, Alex gaming). Merge
+    # rounds still start: they build and test on the node, and Alex wants merging to continue (2026-11-17).
     yield_to: list = None
     auto_cleanup: bool = True                # retire verified closed/published task copies when idle
     cleanup_retention_hours: float = 24

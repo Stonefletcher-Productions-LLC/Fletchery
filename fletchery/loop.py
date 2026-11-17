@@ -501,8 +501,10 @@ class Engine:
                 self._builds_at = time.monotonic() + 30
                 self._builds_job = asyncio.ensure_future(asyncio.to_thread(self.builds.tick))
         gaming = self._yield_now()  # a program from workers.yieldTo (a game) runs: start nothing new on this PC
-        hold_new = draining or bool(self.disk_why) or bool(gaming)  # a running round finishes; no new round, build or check starts
-        self._merge_round(hold_new)
+        hold_new = draining or bool(self.disk_why) or bool(gaming)  # no new build or check starts
+        # Merge rounds keep running while a game is open (Alex 2026-11-17: round 228's retry waited 2.5 h behind
+        # Wow.exe). A round builds and tests on the node; this PC only does the git work, at low priority.
+        self._merge_round(draining or bool(self.disk_why))
         self._maybe_node_pr_checks(hold_new)
         if self.plans.active_merge and self.plans.active_merge["state"] == "draining" and not self.merge_priority:
             self.plans.update(self.plans.active_merge, state="queued", reason=self.merge_why)
@@ -1733,7 +1735,7 @@ class Engine:
             self.ctx.log(f"yieldTo: process check failed: {type(e).__name__}: {e}")
             found = ""
         if found != (cached[1] if cached else ""):
-            self.ctx.log(f"{found} is running: this PC starts nothing new until it closes" if found else
+            self.ctx.log(f"{found} is running: this PC starts no new coding, check or build until it closes; merge rounds still run" if found else
                          "yieldTo: no game running; this PC takes work again")
         self._yield_cache = (at, found)
         return found
