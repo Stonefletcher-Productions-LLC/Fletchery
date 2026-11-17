@@ -150,8 +150,11 @@ CLAUDE_USAGE = {"input": "input_tokens", "output": "output_tokens", "cache_read"
                 "cache_write": "cache_creation_input_tokens"}
 
 
-_LIMIT = re.compile(r"usage limit|rate.?limit|limit reached|limit will reset|resets at|overloaded|\b429\b|\b529\b",
-                    re.IGNORECASE)
+# "You've hit your 5-hour limit" (Claude, 2026-11-17) matched none of the older wordings: merge round 228 counted as
+# failed instead of limited, so nothing paused the agent or retried the round when the limit lifted.
+_LIMIT = re.compile(r"usage limit|rate.?limit|limit reached|limit will reset|resets at|overloaded|\b429\b|\b529\b|"
+                    r"\b(?:hit|reached|exceeded)\s+(?:your|the)\s+(?:[\w-]+\s+){0,3}limit\b|"
+                    r"\b(?:\d+-hour|hourly|daily|weekly|monthly|session)\s+limit\b", re.IGNORECASE)
 
 
 _SIGNED_OUT = re.compile(r"failed to authenticate|oauth (session|token).{0,40}(expired|invalid|revoked)|not logged in|"
