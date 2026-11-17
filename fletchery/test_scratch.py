@@ -217,6 +217,31 @@ class ScratchTest(unittest.TestCase):
         self.assertIn("Cannot list", summary["error"])
         self.assertTrue((wt / "Intermediate").exists())
 
+    def test_a_process_list_with_hidden_command_lines_is_not_trusted(self):
+        rows = [(10, "pythonw.exe", r"pythonw C:\node\node_worker.py"), (11, "svchost.exe", ""), (4, "System", "")]
+        self.assertEqual(scratch.readable_lines(rows, 10), ["pythonw c:/node/node_worker.py"])
+        with self.assertRaisesRegex(RuntimeError, "powershell.exe"):   # another account's job: folder unknown
+            scratch.readable_lines(rows + [(12, "powershell.exe", "")], 10)
+        with self.assertRaisesRegex(RuntimeError, "UnrealEditor-Cmd.exe"):
+            scratch.readable_lines(rows + [(13, "UnrealEditor-Cmd.exe", None)], 10)
+        with self.assertRaisesRegex(RuntimeError, "own process"):
+            scratch.readable_lines(rows, 99)
+        with self.assertRaisesRegex(RuntimeError, "own process"):
+            scratch.readable_lines([], 10)
+
+    def test_a_job_writing_only_to_the_results_folder_keeps_its_worktree(self):
+        wt = self.worktree("audit")
+        results = self.root / (wt.name + "-results")
+        results.mkdir()
+        (results / "d7.log").write_text("try 1", encoding="utf-8")
+        os.utime(results / "d7.log", (self.later - 60, self.later - 60))
+        summary = scratch.retain([str(self.root)], mode="remove", now=self.later,
+                                 lines=[f"powershell -file {results.as_posix().lower()}/driver.ps1"])
+        self.assertIn("Used", self.reason(summary, wt))
+        self.assertIn(str(wt), summary["named"])
+        self.assertEqual(summary["processes"], 1)
+        self.assertTrue((wt / "Intermediate").exists())
+
     def test_node_worker_pass_protects_its_own_folders_and_writes_a_receipt(self):
         import node_worker
         wt = self.worktree("feature")

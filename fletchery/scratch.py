@@ -137,9 +137,39 @@ def _git(cwd: Path, *args: str) -> str:
     return done.stdout.rstrip("\r\n")
 
 
+# Programs that do the work in scratch folders. If one is running and Windows will not show its command line (it
+# belongs to another account or session), the pass cannot tell which folder it uses, so the pass touches nothing.
+WORK_PROGRAMS = {"powershell.exe", "pwsh.exe", "cmd.exe", "python.exe", "pythonw.exe", "py.exe", "node.exe", "git.exe",
+                 "bash.exe", "sh.exe", "dotnet.exe", "cl.exe", "link.exe", "msbuild.exe", "blender.exe", "claude.exe"}
+WORK_PREFIXES = ("unreal", "shadercompile", "ue4", "ue5")
+SIBLING_SUFFIXES = ("logs", "log", "out", "output", "results", "result", "captures", "capture")
+
+
+def readable_lines(rows: list[tuple[int, str, str]], own_pid: int | None = None) -> list[str]:
+    """Command lines (forward slashes, lower case) from (pid, image name, command line) rows. Raises unless the list
+    is provably whole: on SF-NODE-01 (2026-11-17) the worker's scheduled task saw no command line for two running
+    jobs, read that as "nothing running", and trimmed the build output of both live worktrees."""
+    hidden, lines, own_seen = [], [], own_pid is None
+    for pid, name, command in rows:
+        command = (command or "").strip()
+        if pid == own_pid:
+            own_seen = bool(command)
+        if command:
+            lines.append(command.replace("\\", "/").lower())
+        elif name.lower() in WORK_PROGRAMS or name.lower().startswith(WORK_PREFIXES):
+            hidden.append(name)
+    if not own_seen:
+        raise RuntimeError("Cannot list running processes: this pass's own process is missing from the list")
+    if hidden:
+        names = ", ".join(sorted(set(hidden))[:6])
+        raise RuntimeError(f"Cannot read the command line of {len(hidden)} running program(s) ({names}); "
+                           "run the cleanup as the account that runs the jobs")
+    return lines
+
+
 def command_lines() -> list[str]:
-    """Every process's command line, forward slashes, lower case. Raises when Windows cannot be asked: a pass that
-    cannot see who is running touches nothing."""
+    """Every process's command line, forward slashes, lower case. Raises when Windows cannot be asked or the answer
+    is not whole (readable_lines): a pass that cannot see who is running touches nothing."""
     if os.name != "nt":
         lines = []
         for proc in Path("/proc").glob("[0-9]*/cmdline"):
@@ -150,15 +180,20 @@ def command_lines() -> list[str]:
                 continue
         return lines
     ps = ("$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process -ErrorAction Stop | "
-          "Where-Object { $_.CommandLine -and $_.ProcessId -ne $PID } | "
-          "ForEach-Object { $_.CommandLine -replace '[\\r\\n]', ' ' }")
+          "Where-Object { $_.ProcessId -ne $PID } | "
+          "ForEach-Object { ($_.ProcessId, $_.Name, ([string]$_.CommandLine -replace '[\\r\\n\\t]', ' ')) -join [char]9 }")
     try:
         out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
                              text=True, timeout=120, encoding="utf-8", errors="replace", check=True,
                              creationflags=0x08000000).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"Cannot list running processes: {exc}") from exc
-    return [line.replace("\\", "/").lower() for line in out.splitlines() if line.strip()]
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) == 3 and parts[0].strip().isdigit():
+            rows.append((int(parts[0]), parts[1].strip(), parts[2]))
+    return readable_lines(rows, os.getpid())
 
 
 def named_by(path: Path, lines: list[str]) -> bool:
@@ -169,8 +204,14 @@ def named_by(path: Path, lines: list[str]) -> bool:
     if drive:
         spellings.append("/" + drive[1] + "/" + re.escape(drive[2]))
     # A job often names only a sibling output folder (<worktree>-logs, 2026-11-16 townhomes): that is this folder's job.
-    pattern = re.compile("(?:" + "|".join(spellings) + r")(?:-(?:logs?|out|output|results?|captures?))?(?=$|[/\s\"'])")
+    pattern = re.compile("(?:" + "|".join(spellings) + r")(?:-(?:" + "|".join(SIBLING_SUFFIXES) + r"))?(?=$|[/\s\"'])")
     return any(pattern.search(line) for line in lines)
+
+
+def _siblings(path: Path) -> list[Path]:
+    """Output folders beside a checkout that belong to its job: <name>-logs, <name>-results and so on."""
+    found = [path.with_name(f"{path.name}-{suffix}") for suffix in SIBLING_SUFFIXES]
+    return [sibling for sibling in found if sibling.is_dir()]
 
 
 def _kind(path: Path) -> str:
@@ -335,6 +376,15 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
     try:
         if lines is None:
             lines = command_lines()
+        # The receipt shows what the pass could see: how many command lines, and which folders they name (kept or
+        # not), so a pass that is blind to running jobs is visible before it matters.
+        summary["processes"], summary["named"] = len(lines), []
+        for root in [Path(r) for r in roots if r]:
+            try:
+                children = [c for c in root.iterdir() if c.is_dir()] if root.is_absolute() and root.is_dir() else []
+            except OSError:
+                children = []
+            summary["named"] += [str(c) for c in children if named_by(c, lines)]
         guard = [Path(p).resolve() for p in protected if p]
         backup_root = Path(backup_dir).resolve() if backup_dir else None
         if backup_root:
@@ -363,7 +413,10 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
                     if kind == "plain" and not is_disposable:
                         raise RuntimeError("Not a git checkout and not a disposable pattern; left alone")
                     # A file time in the future (a clock change, a copied tree) counts as used just now.
-                    idle_hours = max(0.0, now - max(_shallow_newest(path), _git_activity(path) if kind == "worktree" else 0)) / 3600
+                    # A job that writes only to <folder>-results or <folder>-logs is still this folder's job.
+                    newest = max([_shallow_newest(path), _git_activity(path) if kind == "worktree" else 0]
+                                 + [_shallow_newest(sibling) for sibling in _siblings(path)])
+                    idle_hours = max(0.0, now - newest) / 3600
                     entry["idle_hours"] = round(idle_hours, 1)
                     if sizes:
                         entry["bytes"] = _quick_size(path)
