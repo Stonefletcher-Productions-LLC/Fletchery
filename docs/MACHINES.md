@@ -181,7 +181,8 @@ pass now. Without `scratch.py` beside it, or without `scratchRoots`, the worker 
 The worker (version 9) also compacts its own checkout's git store. Every shallow fetch adds a pack, a killed fetch
 leaves `tmp_pack_*` files, and a leftover `fetch-pack <pid>` `.keep` marker makes `git gc` skip its pack for good, so
 the store only grew (81 GB here, 103 GB in a CI checkout, 2026-11-16). Every six idle hours, when the packs are over
-`compactMinGB` (default 20; 0 turns it off) and no git lock exists, the worker removes `tmp_pack_*` files older than a
+`compactMinGB` (default 20; 0 turns it off) no git lock exists and no other worktree is attached to the checkout (a shared store is never compacted, because
+a session could be writing to it), the worker removes `tmp_pack_*` files older than a
 day and the `.keep` markers of fetches that are no longer running, then runs `git gc --prune=now` at below-normal
 priority. Other `.keep` files, LFS storage and worktrees are never touched.
 
