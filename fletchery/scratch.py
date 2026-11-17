@@ -376,7 +376,15 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
     try:
         if lines is None:
             lines = command_lines()
-        summary["processes"] = len(lines)
+        # The receipt shows what the pass could see: how many command lines, and which folders they name (kept or
+        # not), so a pass that is blind to running jobs is visible before it matters.
+        summary["processes"], summary["named"] = len(lines), []
+        for root in [Path(r) for r in roots if r]:
+            try:
+                children = [c for c in root.iterdir() if c.is_dir()] if root.is_absolute() and root.is_dir() else []
+            except OSError:
+                children = []
+            summary["named"] += [str(c) for c in children if named_by(c, lines)]
         guard = [Path(p).resolve() for p in protected if p]
         backup_root = Path(backup_dir).resolve() if backup_dir else None
         if backup_root:

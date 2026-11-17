@@ -235,8 +235,11 @@ class ScratchTest(unittest.TestCase):
         results.mkdir()
         (results / "d7.log").write_text("try 1", encoding="utf-8")
         os.utime(results / "d7.log", (self.later - 60, self.later - 60))
-        summary = scratch.retain([str(self.root)], mode="remove", now=self.later, lines=[])
+        summary = scratch.retain([str(self.root)], mode="remove", now=self.later,
+                                 lines=[f"powershell -file {results.as_posix().lower()}/driver.ps1"])
         self.assertIn("Used", self.reason(summary, wt))
+        self.assertIn(str(wt), summary["named"])
+        self.assertEqual(summary["processes"], 1)
         self.assertTrue((wt / "Intermediate").exists())
 
     def test_node_worker_pass_protects_its_own_folders_and_writes_a_receipt(self):
