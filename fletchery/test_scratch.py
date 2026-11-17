@@ -78,18 +78,89 @@ class ScratchTest(unittest.TestCase):
             summary = self.run_pass(**kw)
             self.assertTrue((wt / "Intermediate" / "Build" / "big.bin").exists())
             self.assertEqual(summary["freed_bytes"], 0)
-        self.assertEqual(len(summary["removed"]), 1)   # the dry run says what it would do
+        self.assertEqual((len(summary["planned"]), summary["removed"]), (1, []))   # the dry run lists it
 
     def test_remove_clean_pushed_worktree_keeps_branch_and_logs(self):
         wt = self.worktree("done")
         backup = self.tmp / "backup"
-        summary = self.run_pass(mode="remove", backup_dir=str(backup))
+        plan = self.tmp / "state" / "scratch-plan.json"
+        day = 86400
+        # Without a plan file nothing is ever moved, however often the pass runs.
+        for _ in range(2):
+            summary = self.run_pass(mode="remove", backup_dir=str(backup))
+            self.assertTrue(wt.exists())
+            self.assertIn("no plan file", self.reason(summary, wt))
+        # Pass 1 lists it (and trims its build output); nothing moves.
+        summary = self.run_pass(mode="remove", backup_dir=str(backup), plan_file=str(plan))
+        self.assertEqual((summary["error"], len(summary["planned"]), summary["quarantined"]), ("", 1, []))
+        self.assertTrue((wt / "Work.cpp").exists() and plan.exists())
+        self.assertIn("listed for quarantine", self.reason(summary, wt))
+        # An hour later is too soon; a day later it moves to quarantine, with a manifest, and git still knows it.
+        summary = self.run_pass(mode="remove", plan_file=str(plan), now=self.later + 3600)
+        self.assertTrue(wt.exists())
+        summary = self.run_pass(mode="remove", backup_dir=str(backup), plan_file=str(plan), now=self.later + day + 60)
         self.assertEqual(summary["error"], "")
         self.assertFalse(wt.exists())
+        moved = Path(summary["quarantined"][0]["to"])
+        self.assertEqual(moved.parent, self.tmp / "lifeshare-quarantine")
+        self.assertTrue((moved / "Work.cpp").exists())
+        manifest = __import__("json").loads((moved.parent / (moved.name + ".quarantine.json")).read_text())
+        self.assertEqual((manifest["original"], manifest["git"]), (str(wt), True))
+        self.assertIn(moved.name, git(self.host, "worktree", "list"))
+        self.assertEqual(summary["removed"], [])
+        # Six days in quarantine: still there. After seven: removed by git, branch and logs kept.
+        summary = self.run_pass(mode="remove", plan_file=str(plan), now=self.later + 7 * day)
+        self.assertTrue(moved.exists() and summary["removed"] == [])
+        summary = self.run_pass(mode="remove", backup_dir=str(backup), plan_file=str(plan), now=self.later + 8 * day + 120)
+        self.assertEqual(summary["error"], "")
+        self.assertFalse(moved.exists())
         self.assertEqual(summary["removed"][0]["branch"], "claude/done")
         self.assertIn("claude/done", git(self.host, "branch", "--list", "claude/done"))
-        self.assertEqual(len(list(backup.glob("done-*/big.bin"))), 1)
-        self.assertNotIn(str(wt).replace("\\", "/"), git(self.host, "worktree", "list").replace("\\", "/"))
+        self.assertEqual(len(list(backup.glob("*-done/big.bin"))), 1)
+        self.assertNotIn(moved.name, git(self.host, "worktree", "list"))
+        self.assertEqual(list(moved.parent.glob("*.quarantine.json")), [])
+
+    def test_a_new_commit_or_work_in_quarantine_starts_over_or_stops_the_removal(self):
+        wt = self.worktree("moving")
+        plan = self.tmp / "scratch-plan.json"
+        day = 86400
+        self.run_pass(mode="remove", plan_file=str(plan))
+        # A new pushed commit after the listing: it is a different worktree state, so it is listed afresh.
+        (wt / "More.cpp").write_text("int z;\n", encoding="utf-8")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-q", "-m", "more")
+        git(wt, "push", "-q", "origin", "HEAD:claude/moving")
+        git(wt, "fetch", "-q", "origin")
+        os.utime(wt / "More.cpp", (time.time() - day, time.time() - day))
+        summary = self.run_pass(mode="remove", plan_file=str(plan), now=self.later + day + 60)
+        self.assertTrue(wt.exists())
+        self.assertEqual(len(summary["planned"]), 1)
+        summary = self.run_pass(mode="remove", plan_file=str(plan), now=self.later + 2 * day + 120)
+        moved = Path(summary["quarantined"][0]["to"])
+        # Someone works in the quarantined copy: it is never removed while that work is only there.
+        (moved / "late.txt").write_text("late\n", encoding="utf-8")
+        summary = self.run_pass(mode="remove", plan_file=str(plan), now=self.later + 20 * day)
+        self.assertTrue((moved / "late.txt").exists())
+        self.assertEqual(summary["removed"], [])
+        self.assertTrue(any("In quarantine; not removed" in k["reason"] for k in summary["kept"]))
+        # A manifest this module did not write (a person's quarantine) is never purged.
+        other = moved.parent / "20260101-000000-by-hand"
+        other.mkdir()
+        (moved.parent / (other.name + ".quarantine.json")).write_text(
+            '{"entry": "20260101-000000-by-hand", "by": "alexa on PC", "purgeAfter": 1, "git": false}', encoding="utf-8")
+        self.run_pass(mode="remove", plan_file=str(plan), now=self.later + 40 * day)
+        self.assertTrue(other.exists())
+
+    def test_standing_build_slots_and_the_quarantine_are_never_entered(self):
+        slots = self.root / "build-slots"
+        slots.mkdir()
+        wt = self.root / "build-slots" / "slot-1"
+        git(self.host, "worktree", "add", "-q", "--detach", str(wt), "origin/main")
+        (wt / "Intermediate").mkdir()
+        (wt / "Intermediate" / "big.bin").write_bytes(b"x" * 100)
+        summary = self.run_pass(mode="remove", plan_file=str(self.tmp / "p.json"))
+        self.assertTrue((wt / "Intermediate" / "big.bin").exists())
+        self.assertEqual(summary["planned"], [])
 
     def test_unpushed_dirty_untracked_and_unique_ignored_are_kept_for_a_person(self):
         unpushed = self.worktree("unpushed", pushed=False)
@@ -199,8 +270,12 @@ class ScratchTest(unittest.TestCase):
         git(wt, "add", "-f", "Binaries/keep.dll")
         git(wt, "commit", "-q", "-m", "tracked binary")
         self.assertTrue(builds.exists() and self.run_pass(mode="trim", disposable=["*-builds"])["removed"] == [])
-        summary = self.run_pass(mode="remove", disposable=["*-builds"])
-        self.assertFalse(builds.exists())
+        plan = self.tmp / "p.json"
+        for at in (self.later, self.later + 2 * 86400, self.later + 30 * 86400):
+            summary = self.run_pass(mode="remove", disposable=["*-builds"], plan_file=str(plan), now=at)
+            self.assertTrue((builds / "Windows" / "Game.exe").exists(), "a folder that is not a checkout is never removed")
+        self.assertEqual([x["path"] for x in summary["listed"]], [str(builds)])
+        self.assertIn("never removed", self.reason(summary, builds))
         self.assertTrue((wt / "Binaries" / "keep.dll").exists())
         self.assertIn("tracked files", self.reason(summary, wt))
 

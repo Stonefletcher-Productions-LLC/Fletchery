@@ -97,9 +97,11 @@ class Config:
     task_backup_days: float = 14
     # Scratch retention (scratch.py; 2026-11-16: sessions' own worktrees filled both machines). Folders directly under
     # `scratch_roots` that Fletchery did not make: build output is trimmed once idle `scratch_trim_hours` (2 h when the
-    # disk guard holds), and in "remove" mode a clean, pushed, unlocked worktree idle `scratch_remove_days` is removed
-    # with `git worktree remove`. `scratch_keep` are folder-name patterns never touched; `scratch_disposable` are
-    # plain-folder patterns (packaged builds) removed when idle. No roots = off. Modes: off, report, trim, remove.
+    # disk guard holds), and in "remove" mode a clean, pushed, unlocked worktree idle `scratch_remove_days` is listed,
+    # a day later moved to the quarantine folder beside the root, and a week after that removed with
+    # `git worktree remove`. `scratch_keep` are folder-name patterns never touched; `scratch_disposable` are
+    # plain-folder patterns (packaged builds) that are listed when idle and never removed: a folder that is not a git
+    # checkout is never removed in any mode (2026-11-17). No roots = off. Modes: off, report, trim, remove.
     scratch_roots: list = None
     scratch_mode: str = "trim"
     scratch_keep: list = None
