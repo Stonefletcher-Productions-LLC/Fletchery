@@ -873,14 +873,19 @@ class Engine:
                         mode=self.cfg.scratch_mode, trim_hours=self.cfg.scratch_trim_hours,
                         remove_days=self.cfg.scratch_remove_days, disposable=list(self.cfg.scratch_disposable or []),
                         protected=[*protected, self.cfg.worktree_root, str(self.state_dir)],
-                        backup_dir=self.cfg.scratch_backup_dir or str(self.state_dir / "scratch-backups"), urgent=urgent)
+                        backup_dir=self.cfg.scratch_backup_dir or str(self.state_dir / "scratch-backups"), urgent=urgent,
+                        plan_file=str(self.state_dir / "scratch-plan.json"))
                     __import__("rounds").write_file(str(self.state_dir / "scratch-retention.json"), found)
                     self.scratch_last = {"checked_at": found["checked_at"], "mode": found["mode"], "error": found["error"],
                                          "freed_bytes": found["freed_bytes"], "trimmed_count": len(found["trimmed"]),
-                                         "removed_count": len(found["removed"]), "attention": found["attention"][:20]}
-                    if found["freed_bytes"]:
-                        self.ctx.log(f"Storage: scratch retention trimmed {len(found['trimmed'])} build-output folders and "
-                                     f"removed {len(found['removed'])} idle folders ({found['freed_bytes'] / 1024**3:.1f} GiB)")
+                                         "removed_count": len(found["removed"]), "attention": found["attention"][:20],
+                                         "planned_count": len(found["planned"]),
+                                         "quarantined_count": len(found["quarantined"]),
+                                         "listed": [x["path"] for x in found["listed"]][:20]}
+                    if found["freed_bytes"] or found["quarantined"]:
+                        self.ctx.log(f"Storage: scratch retention trimmed {len(found['trimmed'])} build-output folders, "
+                                     f"quarantined {len(found['quarantined'])} idle worktrees and removed "
+                                     f"{len(found['removed'])} from quarantine ({found['freed_bytes'] / 1024**3:.1f} GiB)")
                     if found["error"]:
                         self.ctx.log(f"Storage: scratch retention stopped: {found['error']}")
             except Exception as exc:

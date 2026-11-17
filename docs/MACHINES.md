@@ -177,13 +177,16 @@ folders"). Copy `fletchery\scratch.py` beside `node_worker.py` and add to the wo
     "scratchRoots": ["C:\\StoneNode", "E:\\lifeshare-scratch"],
     "scratchMode": "remove",                      # off, report, trim (default) or remove
     "scratchKeep": ["LifeShareArt", "*rescue*"],  # folder names never touched
-    "scratchDisposable": ["*-builds"],            # plain folders removed once idle scratchRemoveDays
+    "scratchDisposable": ["*-builds"],            # plain folders listed once idle scratchRemoveDays (never removed)
     "scratchTrimHours": 24, "scratchRemoveDays": 7, "scratchMinFreeGB": 30
 
 The idle worker runs a pass when it starts and every hour, never during a job and never while a person's pause file
 exists. Under `scratchMinFreeGB` free on a root's drive, build output is trimmed after 2 idle hours instead of
-`scratchTrimHours`; nothing is ever removed sooner. The worker's own `workRoot`, `buildsDir` and mirrored asset folders
-are never entered. Receipts are in `<workRoot>\fletchery\scratch-retention.json`, and its `attention` list names the
+`scratchTrimHours`; nothing is ever removed sooner. In `remove` mode a clean, pushed worktree is first listed
+(`<workRoot>\fletchery\scratch-plan.json`), a day later moved to `lifeshare-quarantine` beside the root, and a week
+after that removed; a folder that is not a git checkout is never removed (README "Session folders"). The worker's own
+`workRoot`, `buildsDir` and mirrored asset folders, `build-slots` and the quarantine are never entered. Receipts are
+in `<workRoot>\fletchery\scratch-retention.json`, and its `attention` list names the
 idle folders that still hold uncommitted or unpushed work. `python node_worker.py scratch --config <file>` runs one
 pass now. Without `scratch.py` beside it, or without `scratchRoots`, the worker cleans nothing.
 

@@ -421,7 +421,8 @@ def mark_round(cfg: dict, on: bool, why: str = "") -> None:
 
 # ---- scratch retention (scratch.py beside this file) ----
 def scratch_pass(cfg: dict, log=print) -> dict:
-    """Trim and retire idle worktrees that sessions left on this machine. This worker's own checkout, builds and
+    """Trim idle worktrees that sessions left on this machine; in remove mode also list, quarantine and, a week
+    later, remove the clean and pushed ones (never a folder that is not a git checkout). This worker's own checkout, builds and
     mirrored asset folders are never entered. Returns scratch.retain's summary ({} when not configured)."""
     roots = cfg.get("scratchRoots") or []
     if not roots or str(cfg.get("scratchMode") or "trim") == "off":
@@ -442,16 +443,18 @@ def scratch_pass(cfg: dict, log=print) -> dict:
         except OSError:
             pass
     protected = [cfg.get("workRoot"), cfg.get("buildsDir"), cfg.get("keyFile"), *(cfg.get("assetMap") or {}).values()]
-    found = scratch.from_config(cfg.get, protected=[p for p in protected if p], urgent=urgent)
+    found = scratch.from_config(cfg.get, protected=[p for p in protected if p], urgent=urgent,
+                                plan_file=str(Path(cfg["workRoot"]) / "fletchery" / "scratch-plan.json"))
     try:
         out = Path(cfg["workRoot"]) / "fletchery" / "scratch-retention.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(found, indent=2), encoding="utf-8")
     except OSError:
         pass
-    if found.get("freed_bytes"):
-        log(f"scratch: trimmed {len(found['trimmed'])} build-output folders, removed {len(found['removed'])} idle "
-            f"folders, {found['freed_bytes'] / 2**30:.1f} GB")
+    if found.get("freed_bytes") or found.get("quarantined"):
+        log(f"scratch: trimmed {len(found['trimmed'])} build-output folders, quarantined "
+            f"{len(found.get('quarantined') or [])} idle worktrees, removed {len(found['removed'])} from quarantine, "
+            f"{found['freed_bytes'] / 2**30:.1f} GB")
     if found.get("error"):
         log(f"scratch: stopped: {found['error']}")
     return found
