@@ -22,56 +22,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Dashboard and profile regression checks
-        timeout-minutes: 4
-        run: ./app/TestLaneApp.ps1
-      - name: Responsive command and machine-health checks
-        timeout-minutes: 4
-        run: ./app/TestLaneFeedback.ps1
-      - name: Responsive release actions and connection checks
-        timeout-minutes: 4
-        run: ./app/TestLaneActions.ps1
-      - name: Waiting reasons and timing history checks
-        timeout-minutes: 4
-        run: ./app/TestLaneHistory.ps1
-      - name: Automatic native-job handoff and stale status checks
-        timeout-minutes: 4
-        run: ./app/TestLaneActivity.ps1
-      - name: Live PR pagination and status checks
-        run: ./app/TestLanePullReader.ps1
-      - name: Completed build PR overview checks
-        timeout-minutes: 4
-        run: ./app/TestLanePullView.ps1 -OutDirectory "$env:RUNNER_TEMP/Buildlane-docs"
-      - name: Authoritative integration mode checks
-        timeout-minutes: 4
-        run: ./app/TestLaneIntegration.ps1 -OutDirectory "$env:RUNNER_TEMP/Buildlane-docs"
-      - name: Staging release request checks
-        timeout-minutes: 4
-        run: ./app/TestLaneReleaseRequests.ps1 -OutDirectory "$env:RUNNER_TEMP/Buildlane-docs"
-      - name: Tall window and repeated handoff layout checks
-        timeout-minutes: 4
-        run: ./app/TestLaneLayout.ps1
-      - name: Advisory build choices and request correlation
-        timeout-minutes: 4
-        run: ./app/TestLanePlanning.ps1
-      - name: GitHub pagination regression checks
-        timeout-minutes: 4
-        run: ./app/TestLaneGitHub.ps1
-      - name: First-run onboarding checks
-        timeout-minutes: 4
-        run: ./app/TestLaneOnboarding.ps1
-      - name: Responsive bulk move checks
-        timeout-minutes: 4
-        run: ./app/TestLaneMoves.ps1
       - name: Shared resource and process cleanup checks
         timeout-minutes: 6
-        run: ./app/TestLaneResources.ps1
+        run: ./tools/TestLaneResources.ps1
       - name: Cancelled-job process cleanup checks
         timeout-minutes: 6
-        run: ./app/TestLaneProcesses.ps1
+        run: ./tools/TestLaneProcesses.ps1
       - name: PowerShell 7 resource cleanup checks
         shell: pwsh
-        run: ./app/TestLaneResources.ps1
+        run: ./tools/TestLaneResources.ps1
       - name: Local runner checks
         timeout-minutes: 6
         shell: pwsh
@@ -198,12 +157,3 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python fletchery/test_doctor.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compile standalone launcher
-        run: ./app/InstallLaneApp.ps1 -Destination "$env:RUNNER_TEMP\Buildlane-check" -NoShortcut
-      - name: Upload illustrative UI screenshots
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: documentation-fixtures
-          path: ${{ runner.temp }}/Buildlane-docs/*.png
-          if-no-files-found: error
-          retention-days: 14

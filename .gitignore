@@ -33,7 +33,6 @@ ui/node_modules/
 *.profile.json
 *.profile.json.*
 !examples/*.profile.json
-!app/BuildLane.profile.json
 *.bak
 *.bak-*
 *.db
