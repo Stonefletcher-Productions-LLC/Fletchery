@@ -22,7 +22,7 @@ secret and no new open port. The Live tab marks the machine silent after a minut
                                                        every 5 minutes if it is not running; no admin needed)
 
 reporter.json:
-    {"coordinator": "http://100.83.43.111:8771", "machine": "SF-NODE-01", "keyFile": "C:\\StoneNode\\keys\\fletchery_node_key",
+    {"coordinator": "http://100.64.0.10:8771", "machine": "SF-NODE-01", "keyFile": "C:\\StoneNode\\keys\\fletchery_node_key",
      "leaseFile": "E:\\GitHubRunner\\ResourceLeases\\heavy.json", "disks": ["C:\\", "E:\\"], "every": 10}
 or {"nodeConfig": "<the node worker's node.json>"}, which supplies coordinator, machine, keyFile and heavyLeaseFile.
 

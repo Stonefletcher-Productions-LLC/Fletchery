@@ -211,7 +211,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). The quick ones:
 
 | Folder | What |
 |---|---|
-| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `builds.py`, `publish.py`, `push.py`, `scratch.py` |
+| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `presence.py` and `agent_status.py` (which coding agents are working: [docs/AGENT-PRESENCE.md](docs/AGENT-PRESENCE.md)), `builds.py`, `publish.py`, `push.py`, `scratch.py` |
 | `ui/portal/` | The page (no build step): `kit.js` (folding cards, long lists), `portal.js`, `live.js`, `portal.css`, `sw.js` |
 | `shell/` | `Fletchery.exe` (C# + WebView2), the supervisor and the install script |
 | `tools/` | The heavy-work reservation tool ([RESERVATIONS.md](docs/RESERVATIONS.md), [CANCELLATION.md](docs/CANCELLATION.md)) |

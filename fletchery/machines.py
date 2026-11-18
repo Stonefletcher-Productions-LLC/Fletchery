@@ -27,6 +27,9 @@ The worker API (all POST, JSON, `Authorization: Bearer <key>` and `X-Fletchery-M
     /v1/assets/list {}                                              -> {host, roots: [{root, files: [[path, size,
                    sha256]]}], missing}: the PC folders nodes mirror before imports (workers.machines.assetRoots)
     /v1/assets/read {root, path, offset}                            -> {data (base64), size}: one chunk of one file
+    /v1/report     {lease, queue, activities, procs, stats, ...}    -> {ok, every}: what the machine does (reporter.py)
+    /v1/agent      {agent, session, work, branch, step, state}      -> {ok, state}: a coding agent on the machine says
+                   what it is doing (agent_status.py; docs/AGENT-PRESENCE.md). 400 on a bad field, 429 past the limits
 
 Command line (on the PC, against the same state folder as the backend):
     python machines.py --state-dir <dir> add <name>        print a new node's key (once)
@@ -47,6 +50,8 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import presence  # beside this file: agent heartbeats' limits (POST /v1/agent)
 
 ONLINE_SECONDS = 90          # a node that has not called for this long shows as offline
 # A running job past its recipe's timeout is asked to stop after this much grace, and given up (lost) at twice its
@@ -808,7 +813,7 @@ class WorkerApi:
         self.log = log
         self.server: ThreadingHTTPServer | None = None
         self._fails: dict[str, list[float]] = {}
-        self.reports = None     # devwatch.DevWatch, set by the portal: takes /v1/report (reporter.py)
+        self.reports = None     # devwatch.DevWatch, set by the portal: takes /v1/report (reporter.py) and /v1/agent
 
     def _throttled(self, ip: str) -> bool:
         t = time.monotonic()
@@ -829,6 +834,13 @@ class WorkerApi:
                 if self.reports is None:
                     return 503, {"error": "the Live tab is off (workers.portal)"}
                 return 200, self.reports.report(machine, data, ip)
+            if path == "/v1/agent":    # a coding agent on this machine says what it is doing (agent_status.py)
+                if self.reports is None:
+                    return 503, {"error": "the Live tab is off (workers.portal)"}
+                try:
+                    return 200, self.reports.agent(machine, data)
+                except presence.TooMany as e:      # over 60 heartbeats a minute, or 50 live sessions
+                    return 429, {"error": str(e)}
             if path == "/v1/hello":
                 m.seen(machine, ip, data.get("labels") or [], data.get("ram_gb") or 0, data.get("version") or "", stats)
                 self.log(f"machines: {machine} connected from {ip}")

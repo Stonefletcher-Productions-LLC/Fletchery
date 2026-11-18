@@ -93,9 +93,15 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
     assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
-    // Agents: one row per Claude or Codex branch, with its PR, status and last activity; no process count on machines
-    assert.match(await page.textContent('#liveAgents'), /Claude[\s\S]*#12[\s\S]*Bus lines[\s\S]*Waiting on checks[\s\S]*Codex[\s\S]*#13[\s\S]*Checks failing[\s\S]*claude\/town-benches[\s\S]*Coding, no PR yet/);
+    // Agents: only those working now. Heartbeats show the step, where it runs and the PR's checks; a GitHub-only row is marked a guess.
+    const agents = await page.textContent('#liveAgents');
+    assert.match(agents, /Claude[\s\S]*#12[\s\S]*Bus lines[\s\S]*Working[\s\S]*Fixing the bus stop importer[\s\S]*Gaming PC[\s\S]*checks running[\s\S]*checked in/);
+    assert.match(agents, /Codex[\s\S]*#13[\s\S]*Weather[\s\S]*NODE-01[\s\S]*checks failing/);
+    assert.match(agents, /#40[\s\S]*Hair import[\s\S]*Waiting[\s\S]*Waiting on PR checks[\s\S]*cloud/);
+    assert.match(agents, /claude\/town-benches[\s\S]*Coding, no PR yet[\s\S]*seen on GitHub[\s\S]*active/);
+    assert.equal(await page.$$eval('#liveAgents .guess', list => list.length), 1);
     assert.doesNotMatch(await page.textContent('#liveMachines'), /Claude: \d+ session/);
+    assert.match(await page.textContent('#liveAgentsCard'), /12 more agents were active earlier today, but not in the last 15 minutes/);
     // the disk guard's drive: free/total, a warning under warnGB, the biggest folders; not listed twice in the stats
     assert.match(await page.textContent('#liveMachines'), /SF-NODE-01[\s\S]*C: 88\/230 GB free[\s\S]*Under 50 GB[\s\S]*E: 31\/250 GB free[\s\S]*Biggest: lifeshare-scratch\\wt-bus-lines 61 GB/);
     assert.doesNotMatch(await page.textContent('#liveMachines'), /E: 31\/250 GB free[\s\S]*E: 31\/250 GB free/);
@@ -120,6 +126,12 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 6);
     await page.click('#liveBlockers .more-btn');
     if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png')});
+    if (shots) {   // the Agents card alone, without the fixed header and tab bar over it
+      const bars = 'header.top, nav.tabs';
+      await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = 'hidden'; }), bars);
+      await page.locator('#liveAgentsCard').screenshot({path: path.join(shots, 'portal-agents.png')});
+      await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = ''; }), bars);
+    }
 
     // GitHub Actions controls on Live: cancel a run that is going, after a confirm.
     await page.waitForSelector('#liveRuns button:has-text("Cancel run")');

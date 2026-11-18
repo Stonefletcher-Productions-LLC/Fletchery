@@ -127,7 +127,8 @@ Settings, all optional, under `workers.portal`:
 
 `owners` are the organisations and users whose repositories are watched (every repository pushed in the last
 `activeDays`); `exclude` drops some. `names` gives machines friendly names. `diskFreeGb` flags a machine with less free
-disk. `"live": false` turns it off. Runners are listed for each organisation and for each repository. Listing an
+disk. `agentIssues` names each repository's status issue for cloud agents and `agentActiveMinutes` (15) how
+recent a heartbeat must be for the Agents card: see [AGENT-PRESENCE.md](AGENT-PRESENCE.md). `"live": false` turns it off. Runners are listed for each organisation and for each repository. Listing an
 organisation's runners needs the `admin:org` scope on the PC's `gh` sign-in (`gh auth refresh -h github.com -s
 admin:org`); without it they still show through their jobs, and the list is asked again every hour.
 
