@@ -4,7 +4,7 @@
 (function () {
   'use strict';
   const FOLD_KEY = 'fletchery-folded';
-  const FOLDED_FIRST = ['h-liss', 'h-lrun', 'h-jobs'];   // folded until someone opens them
+  const FOLDED_FIRST = ['h-liss', 'h-lrun'];   // folded until someone opens them
   let folded;
   try { folded = JSON.parse(localStorage.getItem(FOLD_KEY) || 'null'); } catch (e) { folded = null; }
   if (!Array.isArray(folded)) folded = FOLDED_FIRST.slice();

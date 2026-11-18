@@ -101,7 +101,19 @@ const server = http.createServer((req, res) => {
     for (const box of await page.$$eval('.tabs button, #bell, #refreshTop', list => list.map(b => b.getBoundingClientRect().toJSON()))) {
       assert.ok(box.width >= 44 && box.height >= 44, 'touch target ' + JSON.stringify(box));
     }
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png'), fullPage: true});
+    // Every card folds from its heading, and the page remembers it; long lists show a few and "Show N more".
+    assert.equal(await page.getAttribute('#h-liss .fold', 'aria-expanded'), 'false', 'issues start folded');
+    await page.click('#h-lblock .fold');
+    assert.equal(await page.isVisible('#liveBlockers'), false);
+    assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem('fletchery-folded')).includes('h-lblock')));
+    await page.click('#h-lblock .fold');
+    assert.equal(await page.isVisible('#liveBlockers'), true);
+    assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 4);
+    assert.match(await page.textContent('#liveBlockers .more-btn'), /Show 2 more/);
+    await page.click('#liveBlockers .more-btn');
+    assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 6);
+    await page.click('#liveBlockers .more-btn');
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png')});
 
     // GitHub Actions controls on Live: cancel a run that is going, after a confirm.
     await page.waitForSelector('#liveRuns button:has-text("Cancel run")');
@@ -159,7 +171,7 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => /Queued again/.test(document.getElementById('toast').textContent));
     assert.deepEqual(lastPost(), ['/api/jobs/retry', {id: 6}]);
     assert.ok(await fits(), 'Builds fits the phone');
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-builds.png'), fullPage: true});
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-builds.png')});
 
     // A control that fails says why, in red.
     await page.evaluate(() => window.fletcheryAct('/api/builds/now', {id: 'nope'}, 'x'));
@@ -180,7 +192,7 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => /Restarting/.test(document.getElementById('rMsg').textContent));
     assert.deepEqual(lastPost(), ['/api/restart', {}]);
     assert.ok(await fits(), 'Activity fits the phone');
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-activity.png'), fullPage: true});
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-activity.png')});
 
     // A reload on a tab comes back to that tab.
     await page.reload();
@@ -224,7 +236,7 @@ const server = http.createServer((req, res) => {
     await ro.goto(base + '/#builds');
     await ro.waitForSelector('#buildsOpen .title');
     assert.equal(await ro.isVisible('#newBuildCard'), false);
-    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent).length), 0);
+    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent && !b.classList.contains('fold')).length), 0);
     await ro.click('#tab-activity');
     assert.equal(await ro.isVisible('#restart'), false);
     assert.equal(await ro.isVisible('#reload'), true);
