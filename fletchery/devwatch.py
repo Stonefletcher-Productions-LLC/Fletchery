@@ -117,6 +117,8 @@ class GitHub:
         self.free = 0           # 304s
         self._token = ""
         self._lock = threading.Lock()
+        self.via = "https"          # or "gh" once direct HTTPS fails on this machine
+        self.gh_cmd = "gh"          # None: never fall back (tests)
 
     def token(self) -> str:
         if not self._token:
@@ -130,39 +132,68 @@ class GitHub:
         url = path if path.startswith("https://") else API + "/" + path.lstrip("/")
         with self._lock:
             etag, kept = self.cache.get(url, ("", None))
+        if self.via == "gh":
+            code, headers, body = self._gh(url, etag)
+        else:
+            try:
+                code, headers, body = self._urllib(url, etag)
+            except GitHubError as e:
+                if e.code or self.gh_cmd is None:
+                    raise
+                # Some processes on a PC can't open sockets of their own (a sandbox, a firewall rule for one program)
+                # while `gh` can: 2026-11-18 the Gaming PC backend got URLError on every call. Use gh from then on.
+                self.via = "gh"
+                self.log(f"live: direct HTTPS failed ({e}); reading GitHub through gh from now on")
+                code, headers, body = self._gh(url, etag)
+        self._limits(headers)
+        if code == 304 and kept is not None:
+            with self._lock:
+                self.free += 1
+            return kept
+        with self._lock:
+            self.calls += 1
+        if 200 <= code < 300:
+            data = json.loads(body or b"null")
+            if headers.get("ETag"):
+                with self._lock:
+                    self.cache[url] = (headers["ETag"], data)
+            return data
+        if code == 401:
+            self._token = ""        # read the token again next time (gh may have refreshed it)
+        if code in (403, 429) and (headers.get("Retry-After") or headers.get("X-RateLimit-Remaining") == "0"):
+            wait = float(headers.get("Retry-After") or 0) or max(60.0, float(headers.get("X-RateLimit-Reset") or 0) - time.time())
+            self.wait_until = time.time() + min(wait, 3600)
+        try:
+            msg = json.loads(body or b"{}").get("message", "")
+        except (ValueError, AttributeError):
+            msg = ""
+        raise GitHubError(code, msg or f"HTTP {code}")
+
+    def _urllib(self, url: str, etag: str):
         req = urllib.request.Request(url, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Fletchery-Live",
             **({"Authorization": "Bearer " + self.token()} if self.token() else {}),
             **({"If-None-Match": etag} if etag else {})})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                self._limits(r.headers)
-                data = json.loads(r.read() or b"null")
-                with self._lock:
-                    self.calls += 1
-                    if r.headers.get("ETag"):
-                        self.cache[url] = (r.headers["ETag"], data)
-                return data
+                return r.status, _Headers(r.headers.items()), r.read()
         except urllib.error.HTTPError as e:
-            self._limits(e.headers)
-            if e.code == 304 and kept is not None:
-                with self._lock:
-                    self.free += 1
-                return kept
-            with self._lock:
-                self.calls += 1
-            if e.code == 401:
-                self._token = ""        # read the token again next time (gh may have refreshed it)
-            if e.code in (403, 429) and (e.headers.get("Retry-After") or e.headers.get("X-RateLimit-Remaining") == "0"):
-                wait = float(e.headers.get("Retry-After") or 0) or max(60.0, float(e.headers.get("X-RateLimit-Reset") or 0) - time.time())
-                self.wait_until = time.time() + min(wait, 3600)
-            try:
-                msg = json.loads(e.read() or b"{}").get("message", "")
-            except (ValueError, AttributeError):
-                msg = ""
-            raise GitHubError(e.code, msg or e.reason)
+            return e.code, _Headers((e.headers or {}).items()), e.read()
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise GitHubError(0, f"GitHub could not be reached ({type(e).__name__})")
+            raise GitHubError(0, f"GitHub could not be reached: {getattr(e, 'reason', None) or e}"[:300])
+
+    def _gh(self, url: str, etag: str):
+        """The same GET through `gh api -i` (no window): status line, headers, then the body."""
+        path = url[len(API) + 1:] if url.startswith(API + "/") else url
+        cmd = [self.gh_cmd or "gh", "api", "-i", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"]
+        if etag:
+            cmd += ["-H", f"If-None-Match: {etag}"]
+        try:
+            out = subprocess.run(cmd + [path], capture_output=True, timeout=self.timeout + 10,
+                                 creationflags=0x08000000 if os.name == "nt" else 0)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise GitHubError(0, f"gh could not be run: {e}"[:300])
+        return parse_gh_output(out.stdout, out.stderr)
 
     def _limits(self, headers) -> None:
         if headers is None:
@@ -173,6 +204,35 @@ class GitHub:
                 self.reset_at = float(headers.get("X-RateLimit-Reset") or 0)
         except ValueError:
             pass
+
+
+class _Headers(dict):
+    """Case-insensitive header lookup."""
+
+    def __init__(self, items=()):
+        super().__init__((str(k).lower(), str(v)) for k, v in items)
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+    def __getitem__(self, key):
+        return super().__getitem__(str(key).lower())
+
+
+def parse_gh_output(stdout: bytes, stderr: bytes = b""):
+    """`gh api -i` prints "HTTP/2.0 200 OK", the headers, a blank line, then the body; on an error status it still prints
+    them, and stderr says "HTTP 404"."""
+    text = stdout or b""
+    head, _, body = text.replace(b"\r\n", b"\n").partition(b"\n\n")
+    lines = head.decode("utf-8", "replace").split("\n")
+    m = re.match(r"HTTP/[\d.]+\s+(\d{3})", lines[0] if lines else "")
+    if not m:
+        e = re.search(r"HTTP (\d{3})", (stderr or b"").decode("utf-8", "replace"))
+        if not e:
+            raise GitHubError(0, ("gh: " + (stderr or b"").decode("utf-8", "replace").strip())[:300] or "gh gave no answer")
+        return int(e.group(1)), _Headers(), b""
+    headers = _Headers(tuple(x.split(":", 1)) for x in lines[1:] if ":" in x)
+    return int(m.group(1)), _Headers((k, v.strip()) for k, v in headers.items()), body
 
 
 class GitHubError(Exception):
