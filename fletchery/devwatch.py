@@ -162,7 +162,8 @@ class GitHub:
                 msg = ""
             raise GitHubError(e.code, msg or e.reason)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise GitHubError(0, f"GitHub could not be reached ({type(e).__name__})")
+            why = getattr(e, "reason", None) or e     # a URLError's reason says what failed (DNS, refused, TLS...)
+            raise GitHubError(0, f"GitHub could not be reached ({type(e).__name__}: {str(why)[:200]})")
 
     def _limits(self, headers) -> None:
         if headers is None:

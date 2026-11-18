@@ -192,6 +192,19 @@ class Etags(unittest.TestCase):
             srv.shutdown()
 
 
+class Unreachable(unittest.TestCase):
+    def test_error_says_why(self):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        port = srv.server_address[1]
+        srv.server_close()                     # nothing listens on this port now: connection refused
+        gh = devwatch.GitHub(lambda: "t", timeout=5)
+        with self.assertRaises(devwatch.GitHubError) as cm:
+            _plain(gh, f"http://127.0.0.1:{port}/x")
+        msg = str(cm.exception)
+        self.assertIn("could not be reached (URLError: ", msg)
+        self.assertGreater(len(msg.split("URLError: ", 1)[1]), 2)   # the reason itself, not just the class name
+
+
 def _plain(gh, url):
     old = devwatch.API
     try:
