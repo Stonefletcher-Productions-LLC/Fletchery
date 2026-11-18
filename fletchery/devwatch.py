@@ -1,6 +1,6 @@
 """Live: everything happening in development, across every repository and machine, for the phone portal's Live tab.
 
-Two sources, merged into one snapshot (`DevWatch.snapshot()`), which portal.py serves at /api/live:
+Three sources, merged into one snapshot (`DevWatch.snapshot()`), which portal.py serves at /api/live:
 
 1. GitHub, read by this PC. Every repository the token can see is found by itself (`/user/repos`), so a new project
    shows up with no code change. For each repository that saw a push in the last `activeDays`: Actions runs (and the
@@ -18,6 +18,10 @@ Two sources, merged into one snapshot (`DevWatch.snapshot()`), which portal.py s
    Blender) and its CPU, memory and disk, every ~10 seconds, to the machines worker API (/v1/report), signed with the
    machine's existing key. That covers work GitHub never sees.
 
+3. The coding agents themselves (presence.py, docs/AGENT-PRESENCE.md): a heartbeat from an agent on a machine
+   (/v1/agent), or an edited comment on a repository's status issue from a cloud agent. The Agents card lists only
+   agents working now, and falls back to pushes and PR updates for an agent that sends nothing.
+
 Nothing goes stale quietly: every item carries its age, and `blockers` names what looks stuck (a feed that stopped, a
 machine that stopped reporting, a lease whose process is gone, a lease held with the CPU idle, a step or queue that ran
 far too long, an offline runner, a failed check, an issue labelled blocked).
@@ -25,7 +29,8 @@ far too long, an offline runner, a failed check, an issue labelled blocked).
 Profile, under `workers.portal` (all optional):
 
     "live": {"owners": ["My-Org", "me"], "exclude": ["me/old-repo"], "activeDays": 21,
-             "fastSeconds": 15, "slowSeconds": 90, "names": {"ALEX-GAMING-PC": "Gaming PC"}}
+             "fastSeconds": 15, "slowSeconds": 90, "names": {"MY-PC": "Gaming PC"},
+             "agentIssues": {"My-Org/game": 123}, "agentActiveMinutes": 15}
 
 Standard library only."""
 from __future__ import annotations
@@ -40,6 +45,9 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
+
+import presence  # beside this file, like every Fletchery module
 
 API = "https://api.github.com"
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
@@ -54,6 +62,7 @@ NO_RESULT = re.compile(r"no result", re.I)
 # Coding agents' branches (and PR authors): one Agents row per branch with recent activity.
 AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))
 AGENT_HOURS = 24      # a branch quiet this long drops off the Agents card (workers.portal.live.agentHours)
+AGENT_ACTIVE_MINUTES = 15   # working now: a heartbeat this recent (or, for an agent that sends none, a push or PR update)
 CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
 GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
@@ -95,6 +104,10 @@ def _latest_checks(cr: list) -> list:
 def _ago_text(seconds: float) -> str:
     s = int(seconds)
     return f"{s} s" if s < 120 else f"{s // 60} min" if s < 7200 else f"{s // 3600} h"
+
+
+def now_iso_at(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def now_iso() -> str:
@@ -341,7 +354,8 @@ def _runner_job(run: dict) -> dict:
 
 
 class DevWatch:
-    def __init__(self, conf: dict | None = None, log=None, token_fn=gh_token, github: GitHub | None = None):
+    def __init__(self, conf: dict | None = None, log=None, token_fn=gh_token, github: GitHub | None = None,
+                 state_dir=None):
         conf = conf or {}
         self.log = log or (lambda line: None)
         self.owners = {str(o).lower() for o in conf.get("owners") or []}
@@ -365,6 +379,7 @@ class DevWatch:
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
         self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
+        self.closed: dict[str, list] = {}           # repo -> recently merged or closed PRs' branches (they leave Agents)
         self.no_result: dict[int, bool] = {}        # failed check run id -> its annotations say "No result" (asked once)
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
@@ -386,8 +401,18 @@ class DevWatch:
             self.disk_low = DISK_LOW_GB
         try:
             self.agent_hours = float(conf.get("agentHours", AGENT_HOURS)) if isinstance(conf, dict) else AGENT_HOURS
+            self.agent_active = 60 * float(conf.get("agentActiveMinutes", AGENT_ACTIVE_MINUTES)) if isinstance(conf, dict) else 60 * AGENT_ACTIVE_MINUTES
         except (TypeError, ValueError):
-            self.agent_hours = AGENT_HOURS
+            self.agent_hours, self.agent_active = AGENT_HOURS, 60 * AGENT_ACTIVE_MINUTES
+        # Cloud agents' status issues (docs/AGENT-PRESENCE.md): {"Owner/Repo": 123}. Anything else is ignored, with a note.
+        self.agent_issues: dict[str, int] = {}
+        for repo, number in ((conf.get("agentIssues") or {}) if isinstance(conf.get("agentIssues"), dict) else {}).items():
+            if re.match(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$", str(repo)) and isinstance(number, int) and number > 0:
+                self.agent_issues[str(repo).lower()] = number
+            else:
+                self.log(f"live: agentIssues entry {str(repo)[:80]!r} ignored: give \"Owner/Repo\": <issue number>")
+        self.presence = presence.Presence(Path(state_dir) / "agent-presence.json" if state_dir else None, clean=_scrub,
+                                          active_seconds=self.agent_active, log=self.log)
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -403,6 +428,11 @@ class DevWatch:
         if data.get("busy") and not was.get("busy"):
             self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
         return {"ok": True, "every": 10}
+
+    def agent(self, machine: str, data: dict) -> dict:
+        """An agent's heartbeat from a registered machine (machines.py /v1/agent). Raises ValueError (400) or
+        presence.TooMany (429)."""
+        return self.presence.beat(machine, data)
 
     # ---- the loop ----
     def start(self) -> None:
@@ -436,14 +466,16 @@ class DevWatch:
             # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
             places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
-        runs, jobs, prs, checks, issues, pushes = {}, {}, {}, {}, {}, {}
+        runs, jobs, prs, checks, issues, pushes, closed = {}, {}, {}, {}, {}, {}, {}
         errors = [g["error"] for g in got.values() if g.get("error")]
         for repo, g in got.items():
             runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
+            closed[repo] = g.get("closed") or []
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
+            self.closed = closed
             self.runners = {k: v for k, v in found.items() if v is not None}
         busy = any(r.get("status") in ACTIVE for rs in runs.values() for r in rs) or any(
             (rep["data"] or {}).get("busy") for rep in list(self.reports.values()))
@@ -501,14 +533,14 @@ class DevWatch:
         except GitHubError as e:
             with self._lock:
                 old = {"runs": self.runs.get(repo, []), "prs": self.prs.get(repo, []), "issues": self.issues.get(repo, []),
-                       "pushes": self.pushes.get(repo, []),
+                       "pushes": self.pushes.get(repo, []), "closed": self.closed.get(repo, []),
                        "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
                        "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
             old["error"] = f"{repo}: {e}"
             return old
 
     def _read_repo(self, repo: str) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": []}
+        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
         out["runs"] = runs
         for run in runs:
@@ -545,9 +577,33 @@ class DevWatch:
             if _agent_of(branch, ""):
                 out["pushes"].append({"branch": _text(branch, 120), "at": _text(e.get("created_at"), 30),
                                       "actor": _text((e.get("actor") or {}).get("login"), 60)})
+        # Agent branches whose PR was merged or closed: their work is done, so they leave the Agents card.
+        for p in self._try(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50") or []:
+            branch = str((p.get("head") or {}).get("ref") or "")
+            if isinstance(p, dict) and p.get("closed_at") and _agent_of(branch, ""):
+                out["closed"].append({"branch": _text(branch, 120), "at": _text(p.get("closed_at"), 30), "number": p.get("number")})
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
+        self._read_status_issue(repo)
         return out
+
+    def _read_status_issue(self, repo: str) -> None:
+        """Cloud agents' heartbeats: comments on the repository's status issue edited in the last day. `since` is
+        rounded down to the hour, so the same question (and its ETag) holds for an hour and an unchanged answer is a
+        free 304."""
+        number = self.agent_issues.get(repo.lower())
+        if not number:
+            return
+        since = now_iso_at(int((time.time() - presence.KEEP_HOURS * 3600) // 3600 * 3600))
+        comments: list = []
+        for page in range(1, presence.MAX_COMMENTS // 100 + 1):
+            batch = self._try(f"repos/{repo}/issues/{number}/comments?since={since}&per_page=100&page={page}")
+            if not isinstance(batch, list):
+                break
+            comments += batch
+            if len(batch) < 100:
+                break
+        self.presence.relay(repo, comments)
 
     def _poll_runners(self, where: tuple):
         kind, name = where
@@ -747,7 +803,7 @@ class DevWatch:
                 block("feed", "Fletchery could not check its own machines", f"{type(e).__name__}: {e}"[:200], key="extra")
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
-        agents = self._agents(at, prs_out, runs_out)
+        agents = self._agents(at, prs_out, runs_out, issues_out)
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
         # Everything building, checking, testing, merging or importing right now, on any machine, in one list.
         building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a["kind"] in BUILD_KINDS]
@@ -760,18 +816,67 @@ class DevWatch:
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building),
-                       "agents": len(agents)},
-            "agents": agents,
+                       "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"])},
+            "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "building": building[:30],
             "blockers": blockers[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
 
-    def _agents(self, at: float, prs: list, runs: list) -> list:
-        """One row per coding agent's branch with recent activity (Claude: claude/..., Codex: codex/... or a codex
-        author): its PR (or just the branch), what it is waiting on, and when it last did something."""
+    def _agents(self, at: float, prs: list, runs: list, issues: list = ()) -> list:
+        """The coding agents (Claude, Codex), one row each, newest first; `active` marks those working now.
+
+        1. What agents say (presence.py): one row per session whose last heartbeat is not `done`. Its work is linked
+           to the PR or issue when the repository is watched.
+        2. What GitHub shows, for agents that send no heartbeat: an agent branch (claude/..., codex/... or a codex
+           author) with a push, or its PR updated, recently. Marked `source: github`, a guess. A PR or branch a
+           heartbeat covers is left to the heartbeat; after it only a newer push brings the guess back.
+        Gone: done, quiet past the window, or its PR merged or closed after the last sign of work."""
         with self._lock:
             pushes = {repo: list(ps) for repo, ps in self.pushes.items()}
+            closed_at = {}
+            for repo, cs in self.closed.items():
+                for c in cs:
+                    for k in ((repo.lower(), c["branch"]), (repo.lower(), f"#{c.get('number')}")):
+                        if _ts(c["at"]) > _ts(closed_at.get(k, "")):
+                            closed_at[k] = c["at"]
+        watched = {r["full_name"].lower(): r["full_name"] for r in self.repos}
+        pr_by = {}
+        for p in prs:
+            pr_by[(p["repo"].lower(), f"#{p['number']}")] = p
+            pr_by.setdefault((p["repo"].lower(), p["branch"]), p)
+        issue_by = {(i["repo"].lower(), f"#{i['number']}"): i for i in issues}
+        out, covered = [], {}
+
+        for r in self.presence.current():
+            m = presence.WORK.match(r["work"]) if r["work"] else None
+            repo = f"{m.group(1)}/{m.group(2)}" if m and m.group(1) else r["repo"]
+            num = f"#{m.group(3)}" if m else ""
+            key = repo.lower()
+            for k in ((key, num), (key, r["branch"])):
+                if key and k[1]:
+                    covered[k] = max(covered.get(k, 0.0), r["at"])
+            if r["state"] == "done":
+                continue
+            if key and max(_ts(closed_at.get((key, num), "")) if num else 0, _ts(closed_at.get((key, r["branch"]), "")) if r["branch"] else 0) >= r["at"]:
+                continue      # its PR was merged or closed after the last heartbeat
+            pr = pr_by.get((key, num)) if num else None
+            pr = pr or (pr_by.get((key, r["branch"])) if r["branch"] else None)
+            issue = issue_by.get((key, num)) if num and not pr else None
+            linked = key in watched
+            title = (pr or issue or {}).get("title") or (f"{repo}{num}" if repo and num else r["work"] or r["branch"] or "No issue or PR named")
+            url = ""      # linked only inside the repositories Live watches
+            if linked:
+                url = (pr or issue or {}).get("url") or (f"https://github.com/{watched[key]}/issues/{num[1:]}" if num else "")
+            waiting = r["state"] == "waiting"
+            out.append({"agent": presence.AGENTS[r["agent"]], "source": "heartbeat", "repo": watched.get(key, repo),
+                        "number": int(num[1:]) if num else 0, "title": _text(title, 200), "url": _web(url),
+                        "branch": _text(r["branch"], 120), "state": "Waiting" if waiting else "Working",
+                        "tone": "wait" if waiting else "run", "step": _text(r["step"], presence.STEP_MAX),
+                        "where": self.display(r["machine"]) if r["machine"] else "cloud",
+                        "checks": (pr or {}).get("checks", {}).get("state", ""), "last": now_iso_at(r["at"]),
+                        "active": at - r["at"] < self.agent_active})
+
         last_push = {}
         for repo, ps in pushes.items():
             for p in ps:
@@ -779,7 +884,14 @@ class DevWatch:
                 if _ts(p["at"]) > _ts(last_push.get(k, "")):
                     last_push[k] = p["at"]
         building = {(r["repo"], r["branch"]) for r in runs if r["status"] in ACTIVE}
-        out, seen = [], set()
+
+        def guess(last, pushed, cover):
+            """When the GitHub guess last saw work, or "" when a heartbeat already tells more."""
+            if not cover:
+                return last
+            return pushed if pushed and _ts(pushed) > cover + 60 else ""
+
+        seen = set()
         for p in prs:
             who = _agent_of(p["branch"], p["author"])
             if not who:
@@ -787,8 +899,9 @@ class DevWatch:
             k = (p["repo"], p["branch"])
             seen.add(k)
             pushed = last_push.get(k, "")
-            last = max((p["updated"], pushed), key=lambda x: _ts(x) or 0)
-            if _age(last, at) > self.agent_hours * 3600:
+            cover = max(covered.get((p["repo"].lower(), f"#{p['number']}"), 0.0), covered.get((p["repo"].lower(), p["branch"]), 0.0))
+            last = guess(max((p["updated"], pushed), key=lambda x: _ts(x) or 0), pushed, cover)
+            if not last or _age(last, at) > self.agent_hours * 3600:
                 continue
             c = p["checks"]["state"]
             if p.get("blocked"):
@@ -807,17 +920,23 @@ class DevWatch:
                 state = ("run", "Merging when green" if p["auto_merge"] else "Checks pass, ready to merge")
             else:
                 state = ("", "No checks yet")
-            out.append({"agent": who, "repo": p["repo"], "number": p["number"], "title": p["title"], "url": p["url"],
-                        "branch": p["branch"], "state": state[1], "tone": state[0], "last": last})
+            out.append({"agent": who, "source": "github", "repo": p["repo"], "number": p["number"], "title": p["title"],
+                        "url": p["url"], "branch": p["branch"], "state": state[1], "tone": state[0], "step": "", "where": "",
+                        "checks": c, "last": last, "active": _age(last, at) < self.agent_active})
         for (repo, branch), pushed in last_push.items():
             if (repo, branch) in seen or _age(pushed, at) > self.agent_hours * 3600:
                 continue
-            out.append({"agent": _agent_of(branch, ""), "repo": repo, "number": 0, "title": branch,
+            if _ts(closed_at.get((repo.lower(), branch), "")) >= _ts(pushed):   # its PR was merged or closed after the push
+                continue
+            if not guess(pushed, pushed, covered.get((repo.lower(), branch), 0.0)):
+                continue
+            fresh = _age(pushed, at) < CODING_FRESH
+            out.append({"agent": _agent_of(branch, ""), "source": "github", "repo": repo, "number": 0, "title": branch,
                         "url": _web(f"https://github.com/{repo}/tree/{branch}"), "branch": branch,
-                        "state": "Coding, no PR yet" if _age(pushed, at) < CODING_FRESH else "Pushed, no PR yet",
-                        "tone": "run" if _age(pushed, at) < CODING_FRESH else "", "last": pushed})
-        out.sort(key=lambda a: -_ts(a["last"]))
-        return out[:40]
+                        "state": "Coding, no PR yet" if fresh else "Pushed, no PR yet", "tone": "run" if fresh else "",
+                        "step": "", "where": "", "checks": "", "last": pushed, "active": _age(pushed, at) < self.agent_active})
+        out.sort(key=lambda x: (not x["active"], x["source"] != "heartbeat", -_ts(x["last"])))
+        return out
 
     def _machines(self, at: float, runners: list, block) -> list:
         with self._lock:

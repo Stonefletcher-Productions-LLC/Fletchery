@@ -199,7 +199,7 @@ class Portal:
         self.live = None
         if conf.get("live") is not None:
             import devwatch
-            self.live = devwatch.DevWatch(conf["live"], self.log)
+            self.live = devwatch.DevWatch(conf["live"], self.log, state_dir=state_dir)
         self.push = None
         if conf.get("push") is not None and state_dir is not None:
             import push

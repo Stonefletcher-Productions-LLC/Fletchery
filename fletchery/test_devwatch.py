@@ -165,6 +165,88 @@ class Feed(unittest.TestCase):
         self.assertEqual(s["counts"]["agents"], 3)
         self.assertEqual(s["agents"][0]["number"], 12)            # newest activity first (a push 3 min ago)
 
+    def test_agents_active_idle_and_done(self):
+        first = {
+            f"repos/{REPO}/pulls?state=closed": [
+                {"number": 20, "head": {"ref": "claude/merged-work"}, "closed_at": ago(30), "merged_at": ago(30)}],
+            f"repos/{REPO}/events": [
+                {"type": "PushEvent", "created_at": ago(40), "payload": {"ref": "refs/heads/claude/merged-work"}},   # merged after: gone
+                {"type": "PushEvent", "created_at": ago(60 * 5), "payload": {"ref": "refs/heads/claude/quiet"}},     # 5 h ago: quiet
+                {"type": "PushEvent", "created_at": ago(10), "payload": {"ref": "refs/heads/codex/fresh"}}]}         # active
+        w = self.watch_first(first)
+        s = w.snapshot()
+        rows = [a["title"] for a in s["agents"] if not a["number"]]
+        self.assertEqual(rows, ["codex/fresh"])                  # only what moved in the last 15 min is listed
+        self.assertEqual((s["counts"]["agents"], s["counts"]["agents_idle"]), (len(s["agents"]), 1))   # the quiet branch is counted
+
+    def test_heartbeats_lead_and_cover_the_github_guess(self):
+        """What agents say beats what GitHub suggests (docs/AGENT-PRESENCE.md)."""
+        first = {f"repos/{REPO}/events": [
+            {"type": "PushEvent", "created_at": ago(4), "payload": {"ref": "refs/heads/claude/bus"}},
+            {"type": "PushEvent", "created_at": ago(6), "payload": {"ref": "refs/heads/codex/shy"}}]}
+        w = self.watch_first(first)
+        w.prs[REPO][0]["head"]["ref"] = "claude/bus"                 # PR #12, pushed 4 min ago
+        w.presence.beat("ALEX-PC", {"agent": "claude", "session": "wt-1", "work": "Acme/Game#12", "branch": "claude/bus",
+                                    "step": "Fixing the importer", "state": "working"})
+        w.presence.beat("ALEX-PC", {"agent": "codex", "session": "wt-2", "work": "Acme/Game#40", "step": "Reading the issue",
+                                    "state": "waiting"})
+        w.presence.beat("ALEX-PC", {"agent": "claude", "session": "wt-3", "work": "Other/Repo#5", "step": "Elsewhere"})
+        s = w.snapshot()
+        rows = {(a["source"], a["number"] or a["title"]): a for a in s["agents"]}
+        self.assertEqual(set(rows), {("heartbeat", 12), ("heartbeat", 40), ("heartbeat", 5), ("github", "codex/shy")})
+        pr = rows[("heartbeat", 12)]                                  # linked to the PR, its title and checks
+        self.assertEqual((pr["title"], pr["url"], pr["step"], pr["where"], pr["state"], pr["checks"]),
+                         ("Bus lines", "https://github.com/Acme/Game/pull/12", "Fixing the importer", "Gaming PC", "Working", "running"))
+        issue = rows[("heartbeat", 40)]
+        self.assertEqual((issue["state"], issue["tone"], issue["url"]), ("Waiting", "wait", "https://github.com/Acme/Game/issues/40"))
+        self.assertEqual(rows[("heartbeat", 5)]["url"], "")           # not a watched repository: never linked
+        self.assertEqual(s["agents"][-1]["source"], "github")         # the guess comes after what agents say
+        self.assertEqual(s["counts"]["agents"], 4)
+
+    def test_heartbeat_done_quiet_and_closed(self):
+        first = {
+            f"repos/{REPO}/pulls?state=closed": [{"number": 21, "head": {"ref": "claude/landed"}, "closed_at": ago(2)}],
+            f"repos/{REPO}/events": [{"type": "PushEvent", "created_at": ago(8), "payload": {"ref": "refs/heads/claude/bus"}}]}
+        w = self.watch_first(first)
+        w.prs[REPO][0]["head"]["ref"] = "claude/bus"                 # pushed 8 min ago, then the agent said done (5 min)
+        beat = lambda **kw: w.presence.beat("ALEX-PC", {"agent": "claude", "step": "x", **kw})   # noqa: E731
+        beat(session="done", work="Acme/Game#12", branch="claude/bus", state="done")   # said done: gone, and covers #12
+        beat(session="landed", work="Acme/Game#21")                                    # its PR merged after: gone
+        beat(session="quiet", work="Acme/Game#40")
+        for r in w.presence.records.values():
+            r["at"] -= 5 * 60
+        w.presence.records[next(k for k in w.presence.records if k.endswith("|quiet"))]["at"] -= 20 * 60   # 25 min quiet
+        s = w.snapshot()
+        self.assertEqual(s["agents"], [])
+        self.assertEqual(s["counts"]["agents_idle"], 1)               # the quiet one is counted, not listed
+        # A push after the agent said done is new work: the GitHub guess comes back.
+        w.pushes[REPO] = [{"branch": "claude/bus", "at": ago(1), "actor": "dev"}]
+        self.assertEqual([(a["source"], a["number"]) for a in w.snapshot()["agents"]], [("github", 12)])
+
+    def test_status_issue_comments_are_read_once_an_hour_with_etags(self):
+        marker = '<!-- fletchery-agent {"agent":"claude","session":"thread-1","work":"#12","step":"Planning","state":"working"} -->'
+        first = {f"repos/{REPO}/issues/9/comments": [
+            {"id": 1, "body": marker + "\n**Claude** on #12: Planning", "author_association": "MEMBER", "updated_at": ago(2)},
+            {"id": 2, "body": marker.replace("thread-1", "spoof"), "author_association": "NONE", "updated_at": ago(1)}]}
+        answers = dict(first)
+        for k, v in world().items():
+            answers.setdefault(k, v)
+        w = devwatch.DevWatch({"agentIssues": {"acme/game": 9, "Bad Key": "x"}}, github=FakeGitHub(answers))
+        w.poll()
+        asked = [a for a in w.gh.asked if "/comments" in a]
+        self.assertEqual(len(asked), 1)
+        since = asked[0].split("since=")[1].split("&")[0]
+        self.assertTrue(since.endswith(":00:00Z"), since)              # rounded to the hour: the same URL all hour
+        rows = [a for a in w.snapshot()["agents"] if a["source"] == "heartbeat"]
+        self.assertEqual([(a["number"], a["where"], a["step"]) for a in rows], [(12, "cloud", "Planning")])
+
+    def test_agent_presence_is_kept_in_the_state_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = devwatch.DevWatch({}, github=FakeGitHub(world()), state_dir=d)
+            w.agent("ALEX-PC", {"agent": "codex", "session": "s", "step": "Building"})
+            again = devwatch.DevWatch({}, github=FakeGitHub(world()), state_dir=d)
+            self.assertEqual([r["session"] for r in again.presence.current()], ["s"])
+
     def test_blocked_labels_match_the_whole_name(self):
         m = devwatch.BLOCKED_LABEL.match
         for yes in ("blocked", "foreman:blocked", "status:needs-alex", "needs-you", "Blocked: upstream", "waiting-on-art"):

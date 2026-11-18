@@ -88,12 +88,19 @@
         g.updated ? [' · checked ', ago(g.updated)] : ''),
       (g.holders || []).length ? el('p', {class: 'sub', text: 'Biggest: ' + g.holders.slice(0, 5).map(h => h.name + ' ' + Math.round(h.gb) + ' GB').join(' · ')}) : null);
   }
-  // One coding agent's branch: who (Claude or Codex), its PR or branch, what it is waiting on, when it last moved.
+  // One coding agent working now. From its own heartbeat: what it is on, its step, where it runs, when it checked in.
+  // From GitHub only (an agent that sends no heartbeat): its PR or branch and what that waits on, marked as a guess.
+  const CHECKS = {failed: 'checks failing', rerun: 'checks need a re-run', running: 'checks running', queued: 'checks queued', passed: 'checks pass'};
   function agentRow(x) {
+    const said = x.source === 'heartbeat';
+    const head = a(x.url, 't', x.number ? el('span', {class: 'num', text: '#' + x.number}) : null, x.title);
+    const repo = (x.repo || '').split('/')[1] || x.repo || '';
     return el('li', null, el('span', {class: 'chip k-' + (x.agent === 'Codex' ? 'codex' : 'coding'), text: x.agent}),
-      el('div', {class: 'what'}, a(x.url, 't', x.number ? el('span', {class: 'num', text: '#' + x.number}) : null, x.title),
+      el('div', {class: 'what'}, head,
         el('p', {class: 'sub'}, el('span', {class: 'chip ' + (x.tone || ''), text: x.state}), ' ',
-          ...sep(join(x.repo.split('/')[1], x.last ? ['active ', ago(x.last)] : '')))));
+          said ? (x.step || '') : el('span', {class: 'guess', title: 'This agent sends no heartbeat: Fletchery guessed from its pushes and PR', text: 'seen on GitHub'})),
+        el('p', {class: 'sub'}, ...sep(join(said ? x.where : '', repo, said && CHECKS[x.checks] ? CHECKS[x.checks] : '',
+          x.last ? [said ? 'checked in ' : 'active ', ago(x.last)] : '')))));
   }
   function machineRow(m) {
     const st = m.stats || {}, g = m.disk_guard;
@@ -214,7 +221,10 @@
     const agents = (full.agents || []).filter(x => !repo || x.repo === repo);
     $('n-lagents').textContent = agents.length ? '(' + agents.length + ')' : '';
     $('liveAgentsCard').classList.toggle('calm', !agents.length);
-    fill($('liveAgents'), agents.map(agentRow), 'No Claude or Codex branch has been active in the last day.');
+    fill($('liveAgents'), agents.map(agentRow), 'No Claude or Codex agent is working right now.');
+    const quiet = (full.counts || {}).agents_idle || 0;
+    $('liveAgentsQuiet').textContent = quiet ? quiet + ' more agent' + (quiet > 1 ? 's were' : ' was') + ' active earlier today, but not in the last 15 minutes.' : '';
+    $('liveAgentsQuiet').hidden = !quiet;
     fill($('liveMachines'), (d.machines || []).map(machineRow), 'No machine has reported yet, and no runner is registered.');
     const note = (d.fresh || {}).runner_note;
     $('liveRunnerNote').hidden = !note; $('liveRunnerNote').textContent = note || '';
