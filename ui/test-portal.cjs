@@ -92,7 +92,18 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await page.$$eval('#liveStats b', list => list.map(b => b.textContent)), ['2/3', '2', '2', '6']);
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
-    assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
+    // B: a machine says in plain words what it does for which change, with its parts, badges, two bars and why
+    const machinesText = await page.textContent('#liveMachines');
+    assert.match(machinesText, /Gaming PC[\s\S]*Testing #12 Bus lines before it can merge[\s\S]*Specs[\s\S]*Running[\s\S]*~12 min left[\s\S]*Town change[\s\S]*Overall[\s\S]*48%[\s\S]*This step[\s\S]*31 min of ~43 min[\s\S]*Why:/);
+    assert.match(machinesText, /SF-NODE-01[\s\S]*Building Test-Staging with #9 Folk greetings and everything merged before it[\s\S]*Hand merge batch 7/);
+    assert.doesNotMatch(machinesText, /PR check #12 \(GitHub run 7\)/);          // the same work is not listed twice
+    // A: every change with its six steps, the current one marked, and the bars
+    const changesText = await page.textContent('#liveChanges');
+    assert.match(changesText, /#12[\s\S]*Bus lines[\s\S]*Written[\s\S]*Quick checks[\s\S]*Build & test[\s\S]*Into Test-Staging[\s\S]*Staging build[\s\S]*In a release/);
+    assert.match(changesText, /#13[\s\S]*Weather[\s\S]*Failed[\s\S]*Compile and test/);
+    assert.match(changesText, /#14[\s\S]*Shop signs[\s\S]*Queued[\s\S]*still learning/);
+    assert.equal(await page.getAttribute('#liveChanges li.chg:nth-child(2) .st.now', 'aria-current'), 'step');
+    assert.equal(await page.getAttribute('#liveChanges li.chg:nth-child(2) .pb .meter', 'aria-valuenow'), '48');
     // Agents: only those working now. Heartbeats show the step, where it runs and the PR's checks; a GitHub-only row is marked a guess.
     const agents = await page.textContent('#liveAgents');
     assert.match(agents, /Claude[\s\S]*#12[\s\S]*Bus lines[\s\S]*Working[\s\S]*Fixing the bus stop importer[\s\S]*Gaming PC[\s\S]*checks running[\s\S]*checked in/);
@@ -130,6 +141,8 @@ const server = http.createServer((req, res) => {
       const bars = 'header.top, nav.tabs';
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = 'hidden'; }), bars);
       await page.locator('#liveAgentsCard').screenshot({path: path.join(shots, 'portal-agents.png')});
+      await page.locator('#liveChangesCard').screenshot({path: path.join(shots, 'portal-changes.png')});
+      await page.locator('#liveMachinesCard').screenshot({path: path.join(shots, 'portal-machines.png')});
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = ''; }), bars);
     }
 

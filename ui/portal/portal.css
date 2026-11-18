@@ -271,3 +271,46 @@ body.desktop .top-row { gap: 6px; }
 body.desktop .fresh { margin-top: -4px; }
 .form-row > label { min-width: 0; }
 .form-row input { width: 100%; min-width: 0; }
+
+/* Changes: where each change is in the whole process (live.js changeRow, machineAct) */
+.lead { margin-bottom: 6px; }
+.chg .t { font-weight: 600; color: var(--ink); text-decoration: none; display: block; overflow-wrap: anywhere; }
+.chg .num { color: var(--muted); font-weight: 400; margin-right: 4px; }
+.stepper { display: flex; margin: 10px 0 2px; }
+.stepper .st { flex: 1; min-width: 0; text-align: center; position: relative; font-size: 11.5px; color: var(--muted); line-height: 1.2; }
+.stepper .st::before { content: ""; position: absolute; top: 9px; right: 50%; width: 100%; height: 3px; background: var(--rule); z-index: 0; }
+.stepper .st:first-child::before { display: none; }
+.stepper .st.done::before, .stepper .st.skipped::before, .stepper .st.now::before, .stepper .st.failed::before { background: var(--accent); }
+.stepper .st i { display: grid; place-items: center; width: 20px; height: 20px; margin: 0 auto 4px; border-radius: 50%; background: var(--panel);
+  border: 3px solid var(--rule); position: relative; z-index: 1; font-style: normal; font-size: 11px; font-weight: 700; color: var(--muted); }
+.stepper .st.done i { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+.stepper .st.skipped i { background: var(--soft); border-color: var(--accent); }
+.stepper .st.now i { border-color: var(--running); color: var(--running); box-shadow: 0 0 0 4px var(--running-bg); }
+.stepper .st.now { color: var(--ink); font-weight: 700; }
+.stepper .st.failed i { border-color: var(--failed); background: var(--failed); color: #fff; }
+.stepper .st.failed { color: var(--failed); font-weight: 700; }
+.badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 4px; }
+.badges .chip { margin: 0; }
+.chip.eta { background: var(--soft); color: var(--ink); }
+.chip.kind { background: var(--hold-bg); color: var(--hold); }
+.pb { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; font-size: 13px; color: var(--muted); margin-top: 6px; }
+.pb .lbl { font-weight: 600; }
+.pb b { text-align: right; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.pb .meter { grid-column: 1 / -1; height: 10px; border-radius: 5px; background: var(--soft); border: 1px solid var(--rule); overflow: hidden; }
+.pb .meter > span { display: block; height: 100%; background: var(--accent); }
+.pb .meter.step > span { background: var(--running); }
+.pb .meter.late > span { background: var(--blocked); }
+.pb .meter.bad > span { background: var(--failed); }
+.basis { font-size: 12.5px; color: var(--muted); margin-top: 5px; overflow-wrap: anywhere; }
+.acts li.mact { display: block; padding: 6px 0 10px; }
+.mact .say { font-size: 16px; margin: 2px 0 4px; overflow-wrap: anywhere; }
+.parts .seg { display: flex; gap: 3px; margin: 6px 0 3px; }
+.parts .seg span { flex: 1; height: 8px; border-radius: 4px; background: var(--soft); border: 1px solid var(--rule); overflow: hidden; }
+.parts .seg span.done { background: var(--accent); border-color: var(--accent); }
+.parts .seg span.failed { background: var(--failed); border-color: var(--failed); }
+.parts .seg span.now { border-color: var(--running); background: var(--running-bg); }
+.parts .seg span.now i { display: block; height: 100%; background: var(--running); }
+.parts .legend { display: flex; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.parts .legend span { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.parts .legend .on { color: var(--running); font-weight: 700; }
+.why { font-size: 13px; color: var(--muted); margin-top: 6px; background: var(--soft); border-radius: 8px; padding: 6px 8px; }

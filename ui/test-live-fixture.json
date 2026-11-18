@@ -26,7 +26,9 @@
   "blockers": 6,
   "building": 1,
   "agents": 4,
-  "agents_idle": 12
+  "agents_idle": 12,
+  "changes": 4,
+  "changes_moving": 3
  },
  "blockers": [
   {
@@ -107,7 +109,8 @@
      "kind": "check",
      "title": "PR check #12 (GitHub run 7): PrCheckJob.ps1",
      "since": "2026-11-18T04:23:29Z",
-     "detail": "holds the machine"
+     "detail": "holds the machine",
+     "change": "Acme/Game#12"
     }
    ],
    "runners": [
@@ -157,6 +160,16 @@
    ],
    "procs": {},
    "activities": [
+    {
+     "kind": "check",
+     "title": "Build and test \u00b7 Test-Staging",
+     "since": "2026-11-18T04:17:29Z",
+     "detail": "step: Build \u00b7 Acme/Game",
+     "repo": "Acme/Game",
+     "pr": 0,
+     "run": 31,
+     "change": "Acme/Game#9"
+    },
     {
      "kind": "merging",
      "title": "Hand merge batch 7: NavCheck",
@@ -442,6 +455,288 @@
    "checks": "",
    "last": "2026-11-18T04:20:29Z",
    "active": true
+  }
+ ],
+ "changes": [
+  {
+   "key": "Acme/Game#13",
+   "repo": "Acme/Game",
+   "number": 13,
+   "title": "Weather",
+   "url": "https://github.com/Acme/Game/pull/13",
+   "kind": "Change",
+   "base": "Test-Staging",
+   "merged": false,
+   "stage": "build",
+   "status": "failed",
+   "stages": [
+    {
+     "id": "written",
+     "label": "Written",
+     "state": "done"
+    },
+    {
+     "id": "quick",
+     "label": "Quick checks",
+     "state": "done"
+    },
+    {
+     "id": "build",
+     "label": "Build & test",
+     "state": "failed"
+    },
+    {
+     "id": "merge",
+     "label": "Into Test-Staging",
+     "state": "todo"
+    },
+    {
+     "id": "staging",
+     "label": "Staging build",
+     "state": "todo"
+    },
+    {
+     "id": "release",
+     "label": "In a release",
+     "state": "todo"
+    }
+   ],
+   "step": null,
+   "overall": {
+    "pct": 40,
+    "left": null,
+    "learning": false
+   },
+   "note": "Failed: Compile and test. It starts again after a fix is pushed.",
+   "auto_merge": true,
+   "why": "Every change is built and tested on a real machine before it can merge.",
+   "updated": "2026-11-18T04:24:29Z"
+  },
+  {
+   "key": "Acme/Game#12",
+   "repo": "Acme/Game",
+   "number": 12,
+   "title": "Bus lines",
+   "url": "https://github.com/Acme/Game/pull/12",
+   "kind": "Town change",
+   "base": "Test-Staging",
+   "merged": false,
+   "stage": "build",
+   "status": "running",
+   "stages": [
+    {
+     "id": "written",
+     "label": "Written",
+     "state": "done"
+    },
+    {
+     "id": "quick",
+     "label": "Quick checks",
+     "state": "done"
+    },
+    {
+     "id": "build",
+     "label": "Build & test",
+     "state": "now"
+    },
+    {
+     "id": "merge",
+     "label": "Into Test-Staging",
+     "state": "todo"
+    },
+    {
+     "id": "staging",
+     "label": "Staging build",
+     "state": "todo"
+    },
+    {
+     "id": "release",
+     "label": "In a release",
+     "state": "todo"
+    }
+   ],
+   "step": {
+    "elapsed": 1860,
+    "avg": 2580,
+    "samples": 20,
+    "machine": "Gaming PC",
+    "pct": 72,
+    "left": 720,
+    "late": false,
+    "parts": [
+     {
+      "name": "Build editor",
+      "state": "done",
+      "avg": 840
+     },
+     {
+      "name": "Import",
+      "state": "done",
+      "avg": 360
+     },
+     {
+      "name": "Specs",
+      "state": "now",
+      "avg": 900
+     },
+     {
+      "name": "Town check",
+      "state": "todo",
+      "avg": 360
+     }
+    ],
+    "part": 2,
+    "part_elapsed": 600
+   },
+   "overall": {
+    "pct": 48,
+    "left": 4800,
+    "learning": false
+   },
+   "note": "",
+   "auto_merge": true,
+   "why": "Every change is built and tested on a real machine before it can merge.",
+   "updated": "2026-11-18T04:29:29Z"
+  },
+  {
+   "key": "Acme/Game#9",
+   "repo": "Acme/Game",
+   "number": 9,
+   "title": "Folk greetings",
+   "url": "https://github.com/Acme/Game/pull/9",
+   "kind": "Change",
+   "base": "Test-Staging",
+   "merged": true,
+   "stage": "staging",
+   "status": "running",
+   "stages": [
+    {
+     "id": "written",
+     "label": "Written",
+     "state": "done"
+    },
+    {
+     "id": "quick",
+     "label": "Quick checks",
+     "state": "done"
+    },
+    {
+     "id": "build",
+     "label": "Build & test",
+     "state": "done"
+    },
+    {
+     "id": "merge",
+     "label": "Into Test-Staging",
+     "state": "done"
+    },
+    {
+     "id": "staging",
+     "label": "Staging build",
+     "state": "now"
+    },
+    {
+     "id": "release",
+     "label": "In a release",
+     "state": "todo"
+    }
+   ],
+   "step": {
+    "elapsed": 900,
+    "avg": 2400,
+    "samples": 12,
+    "machine": "SF-NODE-01",
+    "pct": 37,
+    "left": 1500,
+    "late": false,
+    "parts": [
+     {
+      "name": "Get code",
+      "state": "done",
+      "avg": 180
+     },
+     {
+      "name": "Build",
+      "state": "now",
+      "avg": 1440
+     },
+     {
+      "name": "Tests",
+      "state": "todo",
+      "avg": 540
+     },
+     {
+      "name": "Package",
+      "state": "todo",
+      "avg": 240
+     }
+    ],
+    "part": 1,
+    "part_elapsed": 700
+   },
+   "overall": {
+    "pct": 78,
+    "left": 1500,
+    "learning": false
+   },
+   "note": "Building Test-Staging with this change and everything merged before it.",
+   "why": "After changes merge, the whole game is built again to make sure they work together. A green run here is what the next playable build comes from.",
+   "updated": "2026-11-18T03:52:29Z",
+   "run": 31
+  },
+  {
+   "key": "Acme/Game#14",
+   "repo": "Acme/Game",
+   "number": 14,
+   "title": "Shop signs",
+   "url": "https://github.com/Acme/Game/pull/14",
+   "kind": "Change",
+   "base": "Test-Staging",
+   "merged": false,
+   "stage": "quick",
+   "status": "queued",
+   "stages": [
+    {
+     "id": "written",
+     "label": "Written",
+     "state": "done"
+    },
+    {
+     "id": "quick",
+     "label": "Quick checks",
+     "state": "now"
+    },
+    {
+     "id": "build",
+     "label": "Build & test",
+     "state": "todo"
+    },
+    {
+     "id": "merge",
+     "label": "Into Test-Staging",
+     "state": "todo"
+    },
+    {
+     "id": "staging",
+     "label": "Staging build",
+     "state": "todo"
+    },
+    {
+     "id": "release",
+     "label": "In a release",
+     "state": "todo"
+    }
+   ],
+   "step": null,
+   "overall": {
+    "pct": null,
+    "left": null,
+    "learning": true
+   },
+   "note": "Waiting for its checks to start.",
+   "auto_merge": false,
+   "why": "",
+   "updated": "2026-11-18T04:31:29Z"
   }
  ]
 }
