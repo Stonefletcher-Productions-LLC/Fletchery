@@ -1,0 +1,329 @@
+{
+ "at": "2026-11-18T04:32:29Z",
+ "fresh": {
+  "github": "2026-11-18T04:32:29Z",
+  "tried": "2026-11-18T04:32:29Z",
+  "every": 15,
+  "error": "",
+  "remaining": 4000,
+  "free": 0,
+  "calls": 0,
+  "runner_note": ""
+ },
+ "repos": [
+  {
+   "name": "Acme/Game",
+   "url": "https://github.com/Acme/Game"
+  }
+ ],
+ "counts": {
+  "machines": 3,
+  "busy": 2,
+  "runs": 2,
+  "queued": 1,
+  "prs": 2,
+  "issues": 1,
+  "blockers": 6
+ },
+ "blockers": [
+  {
+   "kind": "stuck",
+   "title": "PR check \u00b7 PR #13 has waited 30 min for a runner",
+   "detail": "Acme/Game: no free runner with its labels picked it up.",
+   "url": "",
+   "since": "2026-11-18T04:02:29Z"
+  },
+  {
+   "kind": "stuck",
+   "title": "PR check \u00b7 PR #12: step \"Build editor\" has run 75 min",
+   "detail": "Acme/Game on ALEX-PC-unreal-pr",
+   "url": "https://github.com/Acme/Game/actions/runs/7",
+   "since": "2026-11-18T03:17:29Z"
+  },
+  {
+   "kind": "check",
+   "title": "PR #13 check failed: Compile and test",
+   "detail": "Acme/Game \u00b7 Weather",
+   "url": "https://github.com/Acme/Game/runs/1",
+   "since": "2026-11-18T04:28:29Z"
+  },
+  {
+   "kind": "runner",
+   "title": "Runner NODE-unreal-light is offline",
+   "detail": "NODE \u00b7 unreal-light",
+   "url": "",
+   "since": ""
+  },
+  {
+   "kind": "label",
+   "title": "#40 is blocked: Bench clipping",
+   "detail": "Acme/Game \u00b7 foreman:blocked",
+   "url": "https://github.com/Acme/Game/issues/40",
+   "since": "2026-11-18T04:30:29Z"
+  },
+  {
+   "kind": "label",
+   "title": "PR #13 is marked blocked",
+   "detail": "Acme/Game \u00b7 status:needs-alex",
+   "url": "https://github.com/Acme/Game/pull/13",
+   "since": "2026-11-18T04:27:29Z"
+  }
+ ],
+ "machines": [
+  {
+   "name": "Gaming PC",
+   "host": "ALEX-PC",
+   "online": true,
+   "last_report": "2026-11-18T04:32:29Z",
+   "busy": true,
+   "stats": {
+    "cpu": 82,
+    "ram_used_gb": 21.3,
+    "ram_total_gb": 32
+   },
+   "disks": [
+    {
+     "name": "C:",
+     "free_gb": 40
+    },
+    {
+     "name": "E:",
+     "free_gb": 140
+    }
+   ],
+   "procs": {
+    "claude": 1,
+    "unreal": 1,
+    "runner": 1,
+    "compiler": 6
+   },
+   "activities": [
+    {
+     "kind": "check",
+     "title": "PR check #12 (GitHub run 7): PrCheckJob.ps1",
+     "since": "2026-11-18T04:23:29Z",
+     "detail": "holds the machine"
+    },
+    {
+     "kind": "coding",
+     "title": "Claude: 1 session",
+     "since": "",
+     "detail": ""
+    }
+   ],
+   "runners": [
+    "ALEX-PC-unreal-pr"
+   ],
+   "version": ""
+  },
+  {
+   "name": "NODE",
+   "host": "NODE",
+   "online": false,
+   "last_report": "",
+   "busy": false,
+   "stats": {},
+   "disks": [],
+   "procs": {},
+   "activities": [],
+   "runners": [
+    "NODE-unreal-light"
+   ],
+   "version": ""
+  },
+  {
+   "name": "SF-NODE-01",
+   "host": "SF-NODE-01",
+   "online": true,
+   "last_report": "2026-11-18T04:32:29Z",
+   "busy": true,
+   "stats": {
+    "cpu": 95,
+    "ram_used_gb": 19,
+    "ram_total_gb": 24
+   },
+   "disks": [
+    {
+     "name": "C:",
+     "free_gb": 88
+    }
+   ],
+   "procs": {},
+   "activities": [
+    {
+     "kind": "merging",
+     "title": "Hand merge batch 7: NavCheck",
+     "since": "2026-11-18T04:01:29Z",
+     "detail": "holds the machine"
+    },
+    {
+     "kind": "queued",
+     "title": "local run PR check #13",
+     "since": "2026-11-18T04:28:29Z",
+     "detail": "waiting for the machine"
+    }
+   ],
+   "runners": [],
+   "version": ""
+  }
+ ],
+ "runners": [
+  {
+   "name": "ALEX-PC-unreal-pr",
+   "owner": "Acme",
+   "labels": [
+    "unreal-pr"
+   ],
+   "machine": "Gaming PC",
+   "online": true,
+   "busy": true,
+   "job": {
+    "title": "PR check \u00b7 PR #12",
+    "repo": "Acme/Game",
+    "step": "Build editor",
+    "url": "https://github.com/Acme/Game/actions/runs/7",
+    "started": "2026-11-18T03:12:29Z"
+   }
+  },
+  {
+   "name": "NODE-unreal-light",
+   "owner": "Acme",
+   "labels": [
+    "unreal-light"
+   ],
+   "machine": "NODE",
+   "online": false,
+   "busy": false,
+   "job": null
+  }
+ ],
+ "runs": [
+  {
+   "repo": "Acme/Game",
+   "id": 7,
+   "name": "PR check",
+   "title": "",
+   "event": "pull_request",
+   "status": "in_progress",
+   "conclusion": "",
+   "branch": "",
+   "pr": 12,
+   "url": "https://github.com/Acme/Game/actions/runs/7",
+   "created": "2026-11-18T03:12:29Z",
+   "started": "2026-11-18T03:12:29Z",
+   "updated": "2026-11-18T04:31:29Z",
+   "runner": "ALEX-PC-unreal-pr",
+   "job": "Compile and test",
+   "step": "Build editor",
+   "step_started": "2026-11-18T03:17:29Z",
+   "steps_done": 1,
+   "steps_total": 3
+  },
+  {
+   "repo": "Acme/Game",
+   "id": 8,
+   "name": "PR check",
+   "title": "",
+   "event": "",
+   "status": "queued",
+   "conclusion": "",
+   "branch": "",
+   "pr": 13,
+   "url": "",
+   "created": "2026-11-18T04:02:29Z",
+   "started": "2026-11-18T04:02:29Z",
+   "updated": "2026-11-18T04:02:29Z",
+   "runner": "",
+   "job": "",
+   "step": "",
+   "step_started": "",
+   "steps_done": 0,
+   "steps_total": 0
+  },
+  {
+   "repo": "Acme/Game",
+   "id": 6,
+   "name": "PR check",
+   "title": "",
+   "event": "",
+   "status": "completed",
+   "conclusion": "success",
+   "branch": "",
+   "pr": 0,
+   "url": "",
+   "created": "2026-11-18T01:12:29Z",
+   "started": "2026-11-18T01:12:29Z",
+   "updated": "2026-11-18T01:32:29Z",
+   "runner": "",
+   "job": "",
+   "step": "",
+   "step_started": "",
+   "steps_done": 0,
+   "steps_total": 0
+  }
+ ],
+ "prs": [
+  {
+   "repo": "Acme/Game",
+   "number": 13,
+   "title": "Weather",
+   "url": "https://github.com/Acme/Game/pull/13",
+   "draft": false,
+   "author": "dev",
+   "branch": "wx",
+   "base": "main",
+   "updated": "2026-11-18T04:27:29Z",
+   "created": "",
+   "labels": [
+    "status:needs-alex"
+   ],
+   "checks": {
+    "state": "failed",
+    "total": 1,
+    "done": 1,
+    "failed": [
+     "Compile and test"
+    ],
+    "running": [],
+    "url": "https://github.com/Acme/Game/runs/1"
+   }
+  },
+  {
+   "repo": "Acme/Game",
+   "number": 12,
+   "title": "Bus lines",
+   "url": "https://github.com/Acme/Game/pull/12",
+   "draft": false,
+   "author": "dev",
+   "branch": "bus",
+   "base": "main",
+   "updated": "2026-11-18T04:30:29Z",
+   "created": "",
+   "labels": [],
+   "checks": {
+    "state": "running",
+    "total": 1,
+    "done": 0,
+    "failed": [],
+    "running": [
+     "Compile and test"
+    ],
+    "url": ""
+   }
+  }
+ ],
+ "issues": [
+  {
+   "repo": "Acme/Game",
+   "number": 40,
+   "title": "Bench clipping",
+   "url": "https://github.com/Acme/Game/issues/40",
+   "labels": [
+    "foreman:blocked"
+   ],
+   "created": "2026-11-18T04:29:29Z",
+   "updated": "2026-11-18T04:30:29Z",
+   "blocked": true
+  }
+ ]
+}

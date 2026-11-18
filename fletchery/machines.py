@@ -917,6 +917,7 @@ class WorkerApi:
         self.log = log
         self.server: ThreadingHTTPServer | None = None
         self._fails: dict[str, list[float]] = {}
+        self.reports = None     # devwatch.DevWatch, set by the portal: takes /v1/report (reporter.py)
 
     def _throttled(self, ip: str) -> bool:
         t = time.monotonic()
@@ -933,6 +934,10 @@ class WorkerApi:
         m = self.machines
         stats = data.get("stats") if isinstance(data.get("stats"), dict) else None
         try:
+            if path == "/v1/report":   # what the machine is doing, for the portal's Live tab (reporter.py)
+                if self.reports is None:
+                    return 503, {"error": "the Live tab is off (workers.portal)"}
+                return 200, self.reports.report(machine, data, ip)
             if path == "/v1/hello":
                 m.seen(machine, ip, data.get("labels") or [], data.get("ram_gb") or 0, data.get("version") or "", stats)
                 self.log(f"machines: {machine} connected from {ip}")

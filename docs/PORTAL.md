@@ -105,3 +105,44 @@ phone and make a new key.
 (Web Push: RFC 8291 encryption, RFC 8292 VAPID), `ui/portal/` (the page, no inline code, strict CSP). Checks:
 `python fletchery/test_portal.py` and `node ui/test-portal.cjs`. To look at it with made-up data:
 `python fletchery demo --serve --profile <a profile with workers.portal>`.
+
+## Live tab: every machine, runner, Actions run, PR and issue
+
+The **Live** tab (first tab) shows everything happening in development, across every repository the PC's GitHub
+sign-in can see and every machine that reports: what each machine is doing right now (PR check, hand merge, proof,
+build, Claude coding), who queues for it, CPU/RAM/disk, the self-hosted runners and their jobs, Actions runs with the
+current step, open pull requests with their checks, and open issues. **Stuck or blocked** at the top names anything that
+stopped moving. Code: `fletchery/devwatch.py` (the feed), `fletchery/reporter.py` (each machine), `ui/portal/live.js`.
+
+**Never stale.** The page asks every 5 s and every time shows how old each item is. If its data is older than 45 s,
+the PC can't be reached, or GitHub has not been read for a few minutes, a red line at the top says so. The feed marks
+as stuck: a machine that stopped reporting, a machine hold whose process is gone, a hold with the CPU idle 10 min, a
+queue wait over 90 min, an Actions run unclaimed for 20 min, a step over 60 min, a check over 90 min, an offline
+runner, a failed PR check, and any issue or PR with a blocked / needs-you label.
+
+**Cost.** GitHub is read from the PC with ETags: a "nothing changed" answer (304) does not count against GitHub's
+limit and uses no Actions minutes. It asks every 15 s while anything runs, every 90 s when idle, and slows down by
+itself when the hourly limit runs low. New repositories appear on their own (every repository pushed in the last 21
+days). Settings, all optional, under `workers.portal`:
+
+```json
+"live": {"owners": ["Stonefletcher-Productions-LLC", "ProjektPayne"], "exclude": [], "activeDays": 21,
+         "fastSeconds": 15, "slowSeconds": 90, "names": {"ALEX-GAMING-PC": "Gaming PC"}}
+```
+
+`"live": false` turns it off. Listing an organisation's runners needs the `admin:org` scope on the PC's `gh` sign-in
+(`gh auth refresh -h github.com -s admin:org`); without it, runners still show through their jobs.
+
+**Each machine reports** with `reporter.py` (standard library, no window, read-only). It reads LaneGuard's lease and
+queue, so every run that names itself with `LS_LANE_PURPOSE` ("PR check #2290", "Hand merge batch 7") shows by
+name, plus any `<lease folder>\activity\*.json` file a script keeps fresh, and posts to the machines worker API
+(`/v1/report`) with the machine's existing node key. Needs `workers.machines.listen` on the PC. Install once per
+machine, no admin:
+
+```powershell
+# reporter.json beside the node worker's node.json:  {"nodeConfig": "<path to node.json>", "disks": ["C:\\", "E:\\"]}
+pythonw <Fletchery>\fletchery\reporter.py install --config <path to reporter.json>
+```
+
+It adds a Task Scheduler entry that starts it every 5 minutes if it is not already running, so it comes back by
+itself after a crash or reboot. `reporter.py once --config ...` prints one report without sending it.

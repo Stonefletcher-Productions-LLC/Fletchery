@@ -193,6 +193,10 @@ def start_portal(fm, cfg, dash=None):
             dash = Dashboard(fm, 0)
         p = portal.Portal(dash.status, conf, fm.state_dir, fm.ctx.log, cfg.repo)
         p.start()
+        if p.live is not None:  # machines report to the worker API; the Live tab shows them
+            api = getattr(getattr(fm, "machines", None), "api", None)
+            if api is not None:
+                api.reports = p.live
     except Exception as e:  # a bad portal block or a taken port must not stop Fletchery
         fm.ctx.log(f"portal: not started: {type(e).__name__}: {e}")
         return None
