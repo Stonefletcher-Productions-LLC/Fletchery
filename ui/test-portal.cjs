@@ -119,6 +119,7 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveRunners'), /MY-PC-unreal-pr[\s\S]*Busy[\s\S]*NODE-unreal-light[\s\S]*Offline/);
     assert.match(await page.textContent('#liveRuns'), /PR check · PR #12/);
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
+    assert.match(await page.textContent('#liveParked'), /1 issue parked until other work lands \(not stuck\): #42/);
     assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
     assert.ok(await fits(), 'Live fits the phone');
     for (const box of await page.$$eval('.tabs button, #bell, #refreshTop', list => list.map(b => b.getBoundingClientRect().toJSON()))) {

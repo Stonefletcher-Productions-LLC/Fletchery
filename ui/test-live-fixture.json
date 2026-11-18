@@ -28,7 +28,8 @@
   "agents": 4,
   "agents_idle": 12,
   "changes": 4,
-  "changes_moving": 3
+  "changes_moving": 3,
+  "parked": 1
  },
  "blockers": [
   {
@@ -737,6 +738,17 @@
    "auto_merge": false,
    "why": "",
    "updated": "2026-11-18T04:31:29Z"
+  }
+ ],
+ "parked": [
+  {
+   "kind": "parked",
+   "key": "parked:Acme/Game:42",
+   "title": "#42 Boathouse",
+   "detail": "Acme/Game \u00b7 blocked",
+   "url": "https://github.com/Acme/Game/issues/42",
+   "since": "",
+   "repo": "Acme/Game"
   }
  ]
 }

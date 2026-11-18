@@ -56,6 +56,10 @@ ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
 # bad a bug is) is not one (2026-11-18: it put a crash report under Stuck or blocked).
 BLOCKED_LABEL = re.compile(r"^(?:[\w .-]{1,20}[:/]\s*)?(?:blocked(?:[\s_:-].*)?|needs[\s_:-]*(?:alex|you|human|person|owner|decision)"
                            r"|waiting[\s_:-]*(?:on|for)(?:[\s_:-].*)?)$", re.I)
+# A blocked issue that waits on a person (not on other work) still counts as blocked (2026-11-18: triage labels parked
+# nine issues "blocked" on other issues and Stuck jumped from 9 to 23).
+NEEDS_PERSON_LABEL = re.compile(r"^(?:[\w .-]{1,20}[:/]\s*)?(?:needs[\s_:-]*(?:alex|you|human|person|owner|decision)"
+                                r"|(?:blocked|waiting)[\s_:-]*(?:on|for)[\s_:-]*(?:alex|you|human|person|owner|decision))$", re.I)
 FAILED = ("failure", "timed_out", "action_required", "startup_failure")
 # A check that gave no verdict on the PR: cancelled, or a run whose machine stayed busy (LifeShare's PrCheckJob exits 2
 # with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
@@ -799,6 +803,7 @@ class DevWatch:
         prs_out.sort(key=lambda r: (r["draft"], order.get(r["checks"]["state"], 5), -_ts(r["updated"])))
 
         issues_out = []
+        parked: list[dict] = []     # issues marked blocked on other work: shown apart, not counted as stuck
         for repo, issues in issues_by.items():
             for i in issues:
                 labels = [str(lab.get("name")) for lab in i.get("labels") or []][:10]
@@ -806,9 +811,13 @@ class DevWatch:
                        "labels": labels, "created": _text(i.get("created_at"), 30), "updated": _text(i.get("updated_at"), 30),
                        "blocked": any(BLOCKED_LABEL.match(lab) for lab in labels)}
                 issues_out.append(row)
-                if row["blocked"]:
-                    block("label", f"#{row['number']} is blocked: {row['title']}", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
+                if row["blocked"] and any(NEEDS_PERSON_LABEL.match(lab) for lab in labels):
+                    block("label", f"#{row['number']} needs you: {row['title']}", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
                           f"label:{repo}:{row['number']}", repo)
+                elif row["blocked"]:
+                    # Parked on purpose until other work lands (a triage label): listed, but nothing is stuck.
+                    parked.append({"kind": "parked", "key": f"parked:{repo}:{row['number']}", "title": f"#{row['number']} {row['title']}",
+                                    "detail": f"{repo} · {', '.join(labels[:3])}", "url": row["url"], "since": row["updated"], "repo": _text(repo, 140)})
         issues_out.sort(key=lambda r: -_ts(r["updated"]))
 
         if self.extra is not None:
@@ -834,13 +843,13 @@ class DevWatch:
             "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
-                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building),
+                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
                        "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "changes": changes[:60],
             "building": building[:30],
-            "blockers": blockers[:40], "machines": machines_out, "runners": runners_out,
+            "blockers": blockers[:40], "parked": parked[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
 

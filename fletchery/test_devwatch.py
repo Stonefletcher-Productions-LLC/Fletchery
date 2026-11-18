@@ -66,6 +66,8 @@ def world(**over):
                                                                        "completed_at": ago(4), "html_url": "https://github.com/Acme/Game/runs/1"}]},
         f"repos/{REPO}/issues": [{"number": 40, "title": "Bench clipping", "html_url": "https://github.com/Acme/Game/issues/40", "labels": [{"name": "foreman:blocked"}],
                                   "created_at": ago(3), "updated_at": ago(2)},
+                                 {"number": 41, "title": "Pick a pack", "html_url": "https://github.com/Acme/Game/issues/41", "labels": [{"name": "needs-alex"}],
+                                  "created_at": ago(3), "updated_at": ago(2)},
                                  {"number": 13, "title": "Weather", "pull_request": {}, "labels": []}],
         f"orgs/{ORG}/actions/runners": {"runners": [
             {"id": 1, "name": "ALEX-PC-unreal-pr", "status": "online", "busy": True, "labels": [{"name": "self-hosted", "type": "read-only"}, {"name": "unreal-pr", "type": "custom"}]},
@@ -90,7 +92,7 @@ class Feed(unittest.TestCase):
         s = self.watch().snapshot()
         run = s["runs"][0]
         self.assertEqual((run["id"], run["runner"], run["step"], run["steps_done"], run["steps_total"]), (7, "ALEX-PC-unreal-pr", "Build editor", 1, 3))
-        self.assertEqual([i["number"] for i in s["issues"]], [40])      # PRs are not issues
+        self.assertEqual(sorted(i["number"] for i in s["issues"]), [40, 41])      # PRs are not issues
         self.assertEqual(s["prs"][0]["checks"]["state"], "failed")
         pc = next(m for m in s["machines"] if m["name"] == "Gaming PC")
         self.assertTrue(pc["busy"])
@@ -101,8 +103,15 @@ class Feed(unittest.TestCase):
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
         for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 check failed",
-                     "Runner NODE-unreal-light is offline", "PR #13 is marked blocked", "#40 is blocked"):
+                     "Runner NODE-unreal-light is offline", "PR #13 is marked blocked", "#41 needs you"):
             self.assertIn(want, titles)
+
+    def test_issue_blocked_on_other_work_is_parked_not_stuck(self):
+        s = self.watch().snapshot()
+        self.assertNotIn("#40", " | ".join(b["title"] for b in s["blockers"]))
+        self.assertEqual([p["title"] for p in s["parked"]], ["#40 Bench clipping"])
+        self.assertEqual(s["counts"]["parked"], 1)
+        self.assertEqual(s["counts"]["blockers"], len(s["blockers"]))
 
     def watch_first(self, first: dict, **over):
         """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
