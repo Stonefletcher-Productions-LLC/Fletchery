@@ -43,20 +43,40 @@ from datetime import datetime, timezone
 
 API = "https://api.github.com"
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
-BLOCKED_LABEL = re.compile(r"block|needs[\s_:-]*(alex|you|human|person|owner|decision)|waiting[\s_:-]*on", re.I)
+# A label that says the item is blocked: the whole label, after an optional "status:"-style prefix. "sev: blocker" (how
+# bad a bug is) is not one (2026-11-18: it put a crash report under Stuck or blocked).
+BLOCKED_LABEL = re.compile(r"^(?:[\w .-]{1,20}[:/]\s*)?(?:blocked(?:[\s_:-].*)?|needs[\s_:-]*(?:alex|you|human|person|owner|decision)"
+                           r"|waiting[\s_:-]*(?:on|for)(?:[\s_:-].*)?)$", re.I)
+FAILED = ("failure", "timed_out", "action_required", "startup_failure")
+# A check that gave no verdict on the PR: cancelled, or a run whose machine stayed busy (LifeShare's PrCheckJob exits 2
+# with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
+NO_RESULT = re.compile(r"no result", re.I)
+GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
 RUNNER_REFUSED_RETRY = 3600   # a runner list GitHub refused (no admin rights) is asked again after an hour
 LIMITS = {                 # seconds before something counts as stuck
     "queued_run": 20 * 60,      # an Actions run nobody picked up
-    "step": 60 * 60,            # one job step
+    "step": 150 * 60,           # one job step (LifeShare's PR check "Build and test" runs 60-90 min)
     "job": 3 * 3600,            # one job
     "lease": 4 * 3600,          # one hold on a machine
     "idle_lease": 10 * 60,      # a hold while the machine's CPU stays idle
     "queue_wait": 90 * 60,      # a run waiting in a machine's queue
-    "check": 90 * 60,           # one PR check run
+    "check": 3 * 3600,          # one PR check run (as long as a job)
     "auto_merge": 2 * 3600,     # a PR set to merge automatically, checks green, not merged
 }
 DISK_LOW_GB = 30               # a machine's drive with less free space than this is flagged (workers.portal.live.diskFreeGb)
+
+
+def _latest_checks(cr: list) -> list:
+    """The newest check run per name on a commit: a re-run (queued, running or passed) replaces the failure before it."""
+    best = {}
+    for c in cr:
+        if not isinstance(c, dict):
+            continue
+        k, b = str(c.get("name") or ""), best.get(str(c.get("name") or ""))
+        if b is None or (c.get("id") or 0) > (b.get("id") or 0):
+            best[k] = c
+    return list(best.values())
 
 
 def _ago_text(seconds: float) -> str:
@@ -331,6 +351,7 @@ class DevWatch:
         self.jobs: dict[int, list] = {}             # run id -> jobs
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
+        self.no_result: dict[int, bool] = {}        # failed check run id -> its annotations say "No result" (asked once)
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
         self.skip: dict[str, float] = {}            # path -> don't ask again before
@@ -489,6 +510,13 @@ class DevWatch:
                 out["checks"][(repo, sha)] = kept    # finished checks on an unchanged commit do not change
                 continue
             out["checks"][(repo, sha)] = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
+            for c in out["checks"][(repo, sha)]:
+                # A failed check's annotations, once per check run (they never change): "No result" = needs a re-run.
+                if c.get("conclusion") in FAILED and c.get("id") and c["id"] not in self.no_result \
+                        and (c.get("output") or {}).get("annotations_count"):
+                    notes = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=30") or []
+                    self.no_result[c["id"]] = any(NO_RESULT.search(str(n.get("message") or "") + " " + str(n.get("title") or ""))
+                                                  for n in notes if isinstance(n, dict))
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
         return out
@@ -542,6 +570,7 @@ class DevWatch:
         # jobs per runner (from runs still going)
         repo_of_run = {}
         runs_out = []
+        waiting = []     # runs queued past the limit: stuck only if a runner that could take them is idle, or none is online
         open_heads = {repo: {str((p.get("head") or {}).get("ref") or "") for p in ps} | {f"#{p.get('number')}" for p in ps}
                       for repo, ps in prs_by.items()}
         for repo, runs in runs_by.items():
@@ -572,8 +601,7 @@ class DevWatch:
                           "request is closed", f"{repo}{' on ' + row['runner'] if row['runner'] else ''}: nothing needs this run. "
                           "Cancel it to free the runner.", row["url"], row["started"], f"closed:{repo}:{row['id']}", repo)
                 if row["status"] == "queued" and _age(row["created"], at) > LIMITS["queued_run"]:
-                    block("stuck", f"{label} has waited {int(_age(row['created'], at) // 60)} min for a runner",
-                          f"{repo}: no free runner with its labels picked it up.", row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
+                    waiting.append((row, label))
                 if row["step"] and _age(row["step_started"], at) > LIMITS["step"]:
                     block("stuck", f"{label}: step \"{row['step']}\" has run {int(_age(row['step_started'], at) // 60)} min",
                           f"{repo} on {row['runner'] or 'a runner'}", row["url"], row["step_started"], f"step:{repo}:{row['id']}:{row['step']}", repo)
@@ -609,17 +637,36 @@ class DevWatch:
                                     "online": True, "busy": True, "job": _runner_job(job)})
         runners_out.sort(key=lambda r: (r["machine"].lower(), r["name"].lower()))
 
+        for row, label in waiting:
+            repo, mins = row["repo"], int(_age(row["created"], at) // 60)
+            want = {x.lower() for x in row["labels"]} - GENERIC_LABELS
+            fits = [r for r in runners_out if want and want <= {x.lower() for x in r["labels"]}]
+            if not runners_out or not want:      # nothing to compare with: the old rule
+                block("stuck", f"{label} has waited {mins} min for a runner", f"{repo}: no runner picked it up.",
+                      row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
+            elif not any(r["online"] for r in fits):
+                block("stuck", f"{label} has waited {mins} min: no runner with its labels is online",
+                      f"{repo} · needs {', '.join(sorted(want))}", row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
+            elif any(r["online"] and not r["busy"] and not r["job"] for r in fits):
+                block("stuck", f"{label} has waited {mins} min although a runner with its labels is idle",
+                      f"{repo} · idle: {', '.join(r['name'] for r in fits if r['online'] and not r['busy'] and not r['job'])}",
+                      row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
+            # else every runner that could take it is busy: a queue, shown with the runs, not stuck
+
         machines_out = self._machines(at, runners_out, block)
 
         prs_out = []
         for repo, prs in prs_by.items():
             for p in prs:
                 sha = (p.get("head") or {}).get("sha")
-                cr = checks_by.get((repo, sha)) or []
-                failed = [c for c in cr if c.get("status") == "completed" and c.get("conclusion") in ("failure", "timed_out", "action_required", "startup_failure")]
+                cr = _latest_checks(checks_by.get((repo, sha)) or [])
+                done_ = [c for c in cr if c.get("status") == "completed"]
+                rerun = [c for c in done_ if c.get("conclusion") == "cancelled" or
+                         (c.get("conclusion") in FAILED and self.no_result.get(c.get("id")))]
+                failed = [c for c in done_ if c.get("conclusion") in FAILED and c not in rerun]
                 going = [c for c in cr if c.get("status") != "completed"]
                 state = "failed" if failed else "running" if any(c.get("status") == "in_progress" for c in going) else \
-                        "queued" if going else "passed" if cr else "none"
+                        "queued" if going else "rerun" if rerun else "passed" if cr else "none"
                 labels = [str(lab.get("name")) for lab in p.get("labels") or []][:10]
                 row = {"repo": repo, "number": p.get("number"), "title": _text(p.get("title"), 200), "url": _web(p.get("html_url")),
                        "draft": bool(p.get("draft")), "auto_merge": bool(p.get("auto_merge")), "author": _text((p.get("user") or {}).get("login"), 60),
@@ -628,7 +675,9 @@ class DevWatch:
                        "checks": {"state": state, "total": len(cr), "done": len(cr) - len(going),
                                   "failed": [_text(c.get("name"), 80) for c in failed][:4],
                                   "running": [_text(c.get("name"), 80) for c in going][:4],
-                                  "url": _web((failed or going or cr or [{}])[0].get("html_url"))}}
+                                  "rerun": [{"name": _text(c.get("name"), 80), "job": c.get("id") if isinstance(c.get("id"), int) else 0,
+                                             "why": "cancelled" if c.get("conclusion") == "cancelled" else "no result"} for c in rerun][:4],
+                                  "url": _web((failed or rerun or going or cr or [{}])[0].get("html_url"))}}
                 prs_out.append(row)
                 if failed and not row["draft"]:
                     block("check", f"PR #{row['number']} check failed: {', '.join(row['checks']['failed'][:2])}",
@@ -642,10 +691,10 @@ class DevWatch:
                     block("stuck", f"PR #{row['number']} is set to merge automatically but has waited "
                           f"{int(_age(row['updated'], at) // 3600)} h", f"{repo} · checks pass; a required review, a conflict or "
                           "the merge queue may be holding it", row["url"], row["updated"], f"automerge:{repo}:{row['number']}", repo)
-                if any(BLOCKED_LABEL.search(lab) for lab in labels):
+                if any(BLOCKED_LABEL.match(lab) for lab in labels):
                     block("label", f"PR #{row['number']} is marked blocked", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
                           f"label:{repo}:{row['number']}", repo)
-        order = {"failed": 0, "running": 1, "queued": 2, "none": 3, "passed": 4}
+        order = {"failed": 0, "rerun": 1, "running": 2, "queued": 3, "none": 4, "passed": 5}
         prs_out.sort(key=lambda r: (r["draft"], order.get(r["checks"]["state"], 5), -_ts(r["updated"])))
 
         issues_out = []
@@ -654,7 +703,7 @@ class DevWatch:
                 labels = [str(lab.get("name")) for lab in i.get("labels") or []][:10]
                 row = {"repo": repo, "number": i.get("number"), "title": _text(i.get("title"), 200), "url": _web(i.get("html_url")),
                        "labels": labels, "created": _text(i.get("created_at"), 30), "updated": _text(i.get("updated_at"), 30),
-                       "blocked": any(BLOCKED_LABEL.search(lab) for lab in labels)}
+                       "blocked": any(BLOCKED_LABEL.match(lab) for lab in labels)}
                 issues_out.append(row)
                 if row["blocked"]:
                     block("label", f"#{row['number']} is blocked: {row['title']}", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],

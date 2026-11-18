@@ -49,7 +49,7 @@ def world(**over):
             {"full_name": "Acme/Gone", "owner": {"login": ORG, "type": "Organization"}, "pushed_at": ago(5), "archived": True}],
         f"repos/{REPO}/actions/runs/7/jobs": {"jobs": [{"name": "Compile and test", "status": "in_progress", "runner_name": "ALEX-PC-unreal-pr",
                                                          "steps": [{"name": "Checkout", "status": "completed"},
-                                                                   {"name": "Build editor", "status": "in_progress", "started_at": ago(75)},
+                                                                   {"name": "Build editor", "status": "in_progress", "started_at": ago(160)},
                                                                    {"name": "Specs", "status": "queued"}]}]},
         f"repos/{REPO}/actions/runs": {"workflow_runs": [
             {"id": 7, "name": "PR check", "status": "in_progress", "event": "pull_request", "created_at": ago(80), "run_started_at": ago(80),
@@ -100,9 +100,60 @@ class Feed(unittest.TestCase):
 
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
-        for want in ("waited 30 min for a runner", "\"Build editor\" has run 75 min", "PR #13 check failed",
+        for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 check failed",
                      "Runner NODE-unreal-light is offline", "PR #13 is marked blocked", "#40 is blocked"):
             self.assertIn(want, titles)
+
+    def watch_first(self, first: dict, **over):
+        """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
+        answers = dict(first)
+        for k, v in world(**over).items():
+            answers.setdefault(k, v)
+        w = devwatch.DevWatch({"names": {"ALEX-PC": "Gaming PC"}}, github=FakeGitHub(answers))
+        w.poll()
+        return w
+
+    def test_only_real_blockers(self):
+        sha_bad = "b" * 40
+        pr_labels = [{"name": "sev: blocker"}]
+        first = {
+            # run 8 waits for unreal-pr, whose only runner is busy: a queue, not stuck
+            f"repos/{REPO}/actions/runs/8/jobs": {"jobs": [{"name": "Compile and test", "status": "queued", "labels": ["self-hosted", "unreal-pr"]}]},
+            # the old failure was re-run on the same commit and is running; a cancelled check and a "No result" one need a re-run
+            f"repos/{REPO}/commits/{sha_bad}/check-runs": {"check_runs": [
+                {"id": 1, "name": "Compile and test", "status": "completed", "conclusion": "failure", "completed_at": ago(40)},
+                {"id": 5, "name": "Compile and test", "status": "in_progress", "started_at": ago(3)},
+                {"id": 6, "name": "Cheap checks", "status": "completed", "conclusion": "cancelled"},
+                {"id": 7, "name": "Import check", "status": "completed", "conclusion": "failure", "output": {"annotations_count": 1}}]},
+            f"repos/{REPO}/check-runs/7/annotations": [{"message": "No result: the machine stayed busy. Re-run this check."}],
+        }
+        w = self.watch_first(first)
+        w.prs[REPO][1]["labels"] = pr_labels                  # "sev: blocker" is how bad a bug is, not "blocked"
+        s = w.snapshot()
+        titles = " | ".join(b["title"] for b in s["blockers"])
+        self.assertNotIn("for a runner", titles)
+        self.assertNotIn("check failed", titles)
+        self.assertNotIn("marked blocked", titles)
+        pr = next(p for p in s["prs"] if p["number"] == 13)
+        self.assertEqual(pr["checks"]["state"], "running")
+        self.assertEqual([(x["name"], x["why"], x["job"]) for x in pr["checks"]["rerun"]],
+                         [("Cheap checks", "cancelled", 6), ("Import check", "no result", 7)])
+        self.assertEqual(sum(1 for q in w.gh.asked if "/annotations" in q), 1)
+        w.poll()                                              # annotations are asked once per check run
+        self.assertEqual(sum(1 for q in w.gh.asked if "/annotations" in q), 1)
+
+        # the same queued run, with the runner idle: stuck
+        w.runners = {k: [{**r, "busy": False} for r in v] for k, v in w.runners.items()}
+        w.runs[REPO] = [r for r in w.runs[REPO] if r["id"] != 7]      # nothing running on it either
+        titles = " | ".join(b["title"] for b in w.snapshot()["blockers"])
+        self.assertIn("although a runner with its labels is idle", titles)
+
+    def test_blocked_labels_match_the_whole_name(self):
+        m = devwatch.BLOCKED_LABEL.match
+        for yes in ("blocked", "foreman:blocked", "status:needs-alex", "needs-you", "Blocked: upstream", "waiting-on-art"):
+            self.assertTrue(m(yes), yes)
+        for no in ("sev: blocker", "blocker", "unblocks-2263", "needs-tests"):
+            self.assertFalse(m(no), no)
 
     def test_one_bad_repo_keeps_the_rest(self):
         w = self.watch()

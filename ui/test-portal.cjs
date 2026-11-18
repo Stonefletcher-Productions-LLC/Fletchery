@@ -124,6 +124,10 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('#toast:not([hidden])');
     assert.deepEqual(lastPost(), ['/api/actions/cancel', {repo: 'Acme/Game', id: 7}]);
     assert.match(await page.textContent('#toast'), /Sent to GitHub/);
+    // A check that gave no verdict (cancelled, or "No result") is re-run from its PR, one job.
+    await page.click('#livePrs button:has-text("Re-run Cheap checks")');
+    await page.waitForFunction(() => document.querySelector('#toast') && !document.querySelector('#toast').hidden);
+    assert.deepEqual(lastPost(), ['/api/actions/rerun-job', {repo: 'Acme/Game', id: 41}]);
 
     // A feed whose data is old says so at the top, in words.
     liveAt = new Date(Date.now() - 5 * 60000).toISOString();

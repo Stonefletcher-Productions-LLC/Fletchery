@@ -362,9 +362,13 @@ class App:
             known = {r["full_name"] for r in (live.repos if live else [])}
             if run <= 0 or repo not in known:
                 raise ValueError("Unknown repository or run.")
-            path = {"cancel": "cancel", "rerun": "rerun", "rerun-failed": "rerun-failed-jobs"}[what]
-            self.gh.api(f"repos/{repo}/actions/runs/{run}/{path}", "POST", {})
-            self.log(f"Actions: {what} run {run} in {repo} (from {src(d)})")
+            if what == "rerun-job":     # one job (a check run's id is its job's id): a check that gave no result
+                self.gh.api(f"repos/{repo}/actions/jobs/{run}/rerun", "POST", {})
+                self.log(f"Actions: re-run job {run} in {repo} (from {src(d)})")
+            else:
+                path = {"cancel": "cancel", "rerun": "rerun", "rerun-failed": "rerun-failed-jobs"}[what]
+                self.gh.api(f"repos/{repo}/actions/runs/{run}/{path}", "POST", {})
+                self.log(f"Actions: {what} run {run} in {repo} (from {src(d)})")
             if live is not None:
                 live._wake.set()
             return {"ok": True}
@@ -390,6 +394,7 @@ class App:
                 "/api/machines/pause": machine_pause, "/api/machines/hold": hold,
                 "/api/actions/cancel": lambda d: run_action(d, "cancel"),
                 "/api/actions/rerun": lambda d: run_action(d, "rerun-failed" if d.get("failed") else "rerun"),
+                "/api/actions/rerun-job": lambda d: run_action(d, "rerun-job"),
                 "/api/live/refresh": live_refresh, "/api/restart": restart}
 
     def job_log(self, job_id: int) -> str:

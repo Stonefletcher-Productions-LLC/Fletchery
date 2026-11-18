@@ -323,7 +323,8 @@
      "Compile and test"
     ],
     "running": [],
-    "url": "https://github.com/Acme/Game/runs/1"
+    "url": "https://github.com/Acme/Game/runs/1",
+    "rerun": []
    }
   },
   {
@@ -340,13 +341,20 @@
    "labels": [],
    "checks": {
     "state": "running",
-    "total": 1,
-    "done": 0,
+    "total": 2,
+    "done": 1,
     "failed": [],
     "running": [
      "Compile and test"
     ],
-    "url": ""
+    "url": "",
+    "rerun": [
+     {
+      "name": "Cheap checks",
+      "job": 41,
+      "why": "cancelled"
+     }
+    ]
    }
   }
  ],

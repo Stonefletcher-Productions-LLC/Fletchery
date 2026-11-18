@@ -159,14 +159,18 @@
   function prRow(p) {
     const c = p.checks || {};
     const chip = p.draft ? ['', 'Draft'] : {failed: ['bad', 'Failing'], running: ['wait', 'Checking'], queued: ['wait', 'Check queued'],
-      passed: ['run', 'Checks pass'], none: ['', 'No checks']}[c.state] || ['', c.state];
+      rerun: ['wait', 'Needs re-run'], passed: ['run', 'Checks pass'], none: ['', 'No checks']}[c.state] || ['', c.state];
+    const again = c.rerun || [];
     const what = c.state === 'failed' ? 'failed: ' + (c.failed || []).join(', ') : c.state === 'running' || c.state === 'queued' ?
-      (c.running || []).join(', ') + (c.total ? ' (' + c.done + '/' + c.total + ' done)' : '') : '';
+      (c.running || []).join(', ') + (c.total ? ' (' + c.done + '/' + c.total + ' done)' : '') :
+      c.state === 'rerun' ? 'no verdict: ' + again.map(x => x.name + ' (' + x.why + ')').join(', ') : '';
     return el('li', null, el('div', {class: 'r-row'},
       el('div', null, a(p.url, 'title', el('span', {class: 'num', text: '#' + p.number}), p.title),
         el('p', {class: 'sub'}, ...sep(join(p.repo.split('/')[1], p.author, what, ago(p.updated))))),
       el('div', {class: 'chips'}, el('span', {class: 'chip ' + chip[0], text: chip[1]}),
-        p.auto_merge ? el('span', {class: 'chip run', text: 'Auto-merge on'}) : null)));
+        p.auto_merge ? el('span', {class: 'chip run', text: 'Auto-merge on'}) : null)),
+      desk() && again.some(x => x.job) ? el('div', {class: 'ctl'}, again.filter(x => x.job).map(x =>
+        control('Re-run ' + x.name, '/api/actions/rerun-job', {repo: p.repo, id: x.job}))) : null);
   }
   function issueRow(i) {
     return el('li', null, a(i.url, 'title', el('span', {class: 'num', text: '#' + i.number}), i.title),

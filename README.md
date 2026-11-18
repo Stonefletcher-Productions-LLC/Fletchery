@@ -33,11 +33,13 @@ the top right.
 | **Activity** | Health (up since, code version, GitHub reads, build machines), **Check GitHub now**, **Restart the backend**, and the log of everything done, including who did it ("from the window" or "from the phone") |
 
 **Never stale.** The page asks every 5 s and shows how old each item is. If its data is older than 45 s, the PC can't
-be reached, or GitHub has not been read for a few minutes, a red line at the top says so. **Stuck or blocked** names: a
-machine that stopped reporting, a hold whose process is gone or whose CPU sat idle 10 minutes, a queue wait over 90
-minutes, an Actions run nobody picked up for 20 minutes, a step over 60 minutes, a check over 90 minutes, an offline
-runner, a run that keeps going after its pull request closed, a failed PR check, and any issue or PR labelled blocked
-or needs-you.
+be reached, or GitHub has not been read for a few minutes, a red line at the top says so. **Stuck or blocked** names only what needs someone: a machine that stopped reporting, a hold whose process is gone
+or whose CPU sat idle 10 minutes, a queue wait over 90 minutes, an Actions run waiting 20 minutes while a runner that
+could take it is idle or none is online (waiting behind busy runners is a queue, not stuck), a step over 150 minutes, a
+check or job over 3 hours, an offline runner, a run that keeps going after its pull request closed, a failed PR check
+(the newest run of each check on the commit), a machine low on disk, and an issue or PR labelled `blocked`,
+`needs-you`/`needs-alex` or `waiting-on…`. A check that was cancelled, or ended "No result" because its machine stayed
+busy, shows as **Needs re-run** on its pull request, with a re-run button, and is not counted.
 
 **Cheap to run.** GitHub is read with ETags, so "nothing changed" costs nothing against GitHub's limit and no Actions
 minutes. It reads every 15 s while anything runs and every 90 s when idle, and slows down by itself when the hourly
