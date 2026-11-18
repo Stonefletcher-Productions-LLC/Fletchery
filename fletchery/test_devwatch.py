@@ -113,6 +113,19 @@ class Feed(unittest.TestCase):
         self.assertEqual(s["counts"]["parked"], 1)
         self.assertEqual(s["counts"]["blockers"], len(s["blockers"]))
 
+    def test_status_only_commit_counts_as_checked(self):
+        # A commit the PR check pushed with its own token has no check runs, only the statuses the job posted on it.
+        sha = "b" * 40
+        w = self.watch_first({f"repos/{REPO}/commits/{sha}/check-runs": {"check_runs": []},
+                              f"repos/{REPO}/commits/{sha}/status": {"statuses": [
+                                  {"id": 5, "context": "PR check / Compile and test", "state": "failure", "description": "Checked with its generated content",
+                                   "target_url": "https://github.com/Acme/Game/actions/runs/9", "created_at": ago(4), "updated_at": ago(4)},
+                                  {"id": 6, "context": "PR check / Cheap checks", "state": "success", "created_at": ago(4), "updated_at": ago(4)}]}})
+        s = w.snapshot()
+        pr = next(p for p in s["prs"] if p["number"] == 13)
+        self.assertEqual((pr["checks"]["state"], pr["checks"]["failed"]), ("failed", ["PR check / Compile and test"]))
+        self.assertIn("PR #13 check failed: PR check / Compile and test", " | ".join(b["title"] for b in s["blockers"]))
+
     def watch_first(self, first: dict, **over):
         """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
         answers = dict(first)
