@@ -142,6 +142,14 @@ machine, no admin:
 pythonw <Fletchery>\fletchery\reporter.py install --config <path to reporter.json>
 ```
 
+**Disk space.** When a disk guard writes `<lease folder>\disk.json` (LifeShare's `Tools/CI/DiskGuard.ps1`, every 10
+minutes: `drive`, `freeGB`, `totalGB`, `state` ok/low/full, `warnGB`, `runnerStopped`, `holders`), the reporter (version
+2) sends it too. The Machines card then shows that drive's free/total space, a warning under `warnGB` (50 GB by default),
+and its biggest folders (by folder name, never the full path). Under `warnGB` it is listed in **Stuck or blocked** as
+Low disk; with `state` full or a runner service stopped it is stuck as "PR runner offline: disk full". A disk.json not
+rewritten for an hour is ignored. Without one, every drive's free space comes from the reporter itself, flagged under
+`live.diskFreeGb` (30 GB).
+
 It adds a Task Scheduler entry that starts it every 5 minutes if it is not already running, so it comes back by
 itself after a crash or reboot. `reporter.py once --config ...` prints one report without sending it. Builds that
 Fletchery itself runs show under **Building now** without a reporter.

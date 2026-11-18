@@ -93,6 +93,9 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
     assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
+    // the disk guard's drive: free/total, a warning under warnGB, the biggest folders; not listed twice in the stats
+    assert.match(await page.textContent('#liveMachines'), /SF-NODE-01[\s\S]*C: 88\/230 GB free[\s\S]*Under 50 GB[\s\S]*E: 31\/250 GB free[\s\S]*Biggest: lifeshare-scratch\\wt-bus-lines 61 GB/);
+    assert.doesNotMatch(await page.textContent('#liveMachines'), /E: 31\/250 GB free[\s\S]*E: 31\/250 GB free/);
     assert.match(await page.textContent('#liveRunners'), /MY-PC-unreal-pr[\s\S]*Busy[\s\S]*NODE-unreal-light[\s\S]*Offline/);
     assert.match(await page.textContent('#liveRuns'), /PR check · PR #12/);
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
