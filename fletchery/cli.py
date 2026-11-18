@@ -193,6 +193,7 @@ def start_portal(fm, cfg, dash=None):
             dash = Dashboard(fm, 0)
         p = portal.Portal(dash.status, conf, fm.state_dir, fm.ctx.log, cfg.repo)
         p.start()
+        fm.portal_port = conf["port"]   # the desktop window shows the portal's Live tab in its Live view
         if p.live is not None:  # machines report to the worker API; the Live tab shows them
             api = getattr(getattr(fm, "machines", None), "api", None)
             if api is not None:

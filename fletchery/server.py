@@ -166,7 +166,7 @@ class Dashboard:
         snap["emergency_workers"] = {"max_parallel": cfg.emergency_workers,
                                      "live": [row for row in activity if row["emergency"]],
                                      "why": "Emergency workers are set to 0; running repairs finish." if not cfg.emergency_workers else fm.emergency_why}
-        return {**snap, "lane": lane_view, "next_pass_at": fm.next_pass_at, "passing": fm.passing, "live": activity,
+        return {**snap, "portal_port": getattr(fm, "portal_port", 0), "lane": lane_view, "next_pass_at": fm.next_pass_at, "passing": fm.passing, "live": activity,
                 "log": live["log"][-200:], "history": ledger_tail(fm.state_dir / "ledger.jsonl", 40)}
 
     def add_task(self, data: dict) -> dict:
@@ -753,7 +753,7 @@ class Dashboard:
                 self.send_header("Content-Security-Policy",
                                  "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                                  "font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline'; "
-                                 "connect-src 'self'; frame-ancestors 'none'")
+                                 "connect-src 'self'; frame-src http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

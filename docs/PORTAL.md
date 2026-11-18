@@ -114,6 +114,16 @@ build, Claude coding), who queues for it, CPU/RAM/disk, the self-hosted runners 
 current step, open pull requests with their checks, and open issues. **Stuck or blocked** at the top names anything that
 stopped moving. Code: `fletchery/devwatch.py` (the feed), `fletchery/reporter.py` (each machine), `ui/portal/live.js`.
 
+**One view on both.** The desktop Fletchery window opens on the same Live view (its **Live** menu item shows the
+portal page from this PC), and the phone shows it as the first tab. When the coder agents and merge rounds are switched
+off (`workers.enabled: false`), their screens leave both menus: what stays is Live, Building and Activity on the desktop,
+Live and Builds on the phone. Several projects: chips under the numbers show one project at a time (remembered per device).
+
+**Told when something sticks.** With notifications on, each new item in **Stuck or blocked** is sent once (event
+`stuck`; a lost feed or a silent machine only after 3 minutes, so blips stay quiet). The phone app loads the newest page
+from the PC whenever it answers within 4 seconds, and its saved copy only when the PC can't be reached, so an update
+shows on the next open.
+
 **Never stale.** The page asks every 5 s and every time shows how old each item is. If its data is older than 45 s,
 the PC can't be reached, or GitHub has not been read for a few minutes, a red line at the top says so. The feed marks
 as stuck: a machine that stopped reporting, a machine hold whose process is gone, a hold with the CPU idle 10 min, a

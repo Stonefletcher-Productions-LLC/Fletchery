@@ -11,7 +11,7 @@ notifications are unavailable. State (the key, the subscribed phones, what was a
 the state folder; it never leaves this PC.
 
     "push": {"contact": "mailto:you@example.com",   # who the push service may contact about this sender (required by Apple)
-             "events": ["needs", "merge", "build", "signin"]}   # default: all four"""
+             "events": ["needs", "merge", "build", "signin", "stuck"]}   # default: all five"""
 from __future__ import annotations
 
 import base64
@@ -25,7 +25,8 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-EVENTS = ("needs", "merge", "build", "signin")
+EVENTS = ("needs", "merge", "build", "signin", "stuck")
+SETTLE = 180   # a lost feed or a silent machine is announced only once it has lasted this long (no blips)
 # Only real push services are ever contacted: a subscription cannot point Fletchery at another address.
 SERVICES = (".push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", ".notify.windows.com")
 MAX_SUBSCRIPTIONS = 10
@@ -139,6 +140,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 # ---- what is worth a notification ----
+def _seconds_ago(iso):
+    try:
+        from datetime import datetime, timezone
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(str(iso).replace("Z", "+00:00"))).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
 def marks(view: dict) -> dict:
     """What the portal's summary says now, as {key: notification}. A key that was not there at the last look is news."""
     out = {}
@@ -159,6 +168,13 @@ def marks(view: dict) -> dict:
             "event": "build", "tab": "builds",
             "title": f"Build {b.get('version')} " + ("is ready to download" if ready and b.get("links") else "finished" if ready else str(b.get("state"))),
             "body": ("Open Fletchery for the download link." if ready and b.get("links") else str(b.get("reason") or ""))[:160]}
+    for b in view.get("live_blockers") or []:
+        since = _seconds_ago(b.get("since"))
+        if b.get("kind") in ("feed", "machine") and (since is None or since < SETTLE):
+            continue
+        what = {"label": "Blocked", "check": "Check failed", "runner": "Runner offline"}.get(b.get("kind"), "Stuck")
+        out[f"stuck:{b.get('key') or b.get('title')}"] = {"event": "stuck", "tab": "live", "title": what,
+                                                           "body": " · ".join(x for x in (str(b.get("title") or ""), str(b.get("detail") or "")) if x)[:160]}
     for p in view.get("pauses") or []:
         if p.get("kind") == "signed_out":
             out["signin"] = {"event": "signin", "title": "An agent needs signing in", "tab": "now", "body": str(p.get("text") or "")[:160]}

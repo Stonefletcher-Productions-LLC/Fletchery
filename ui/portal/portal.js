@@ -137,6 +137,10 @@
   }
 
   function draw(d) {
+    // The coder agents and merge rounds are switched off in most profiles now: their tabs show only while they run.
+    const engine = d.workers_enabled !== false;
+    for (const t of ['now', 'tasks', 'merges']) $('tab-' + t).hidden = !engine;
+    if (!engine && ['now', 'tasks', 'merges'].includes(location.hash.slice(1))) show('live');
     $('project').textContent = d.project && d.project !== 'project' ? d.project : 'Fletchery';
     document.title = (d.needs.length ? '(' + d.needs.length + ') ' : '') + 'Fletchery';
     $('alerts').replaceChildren(...d.pauses.map(p => el('div', {class: 'alert' + (p.kind === 'signed_out' || p.kind === 'sync' ? ' bad' : ''), role: 'status'},
@@ -246,7 +250,11 @@
   const isApple = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   let registration = null;
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').then(r => { registration = r; markBell(); }).catch(() => {});
+    navigator.serviceWorker.register('/sw.js', {updateViaCache: 'none'}).then(r => { registration = r; markBell(); r.update().catch(() => {}); }).catch(() => {});
+    // A new version took over while this page was open (after an update on the PC): load it once.
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
     navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.tab) { show(e.data.tab); refresh(); } });
   }
   function keyBytes(text) {

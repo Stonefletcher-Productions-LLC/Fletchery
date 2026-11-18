@@ -179,7 +179,7 @@ def summary(status: dict) -> dict:
     return {"project": _text(s.get("project"), 80), "repo": _text(s.get("repo"), 140), "repo_url": _web(s.get("repo_url")),
             "at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
             "last_pass": _text(s.get("last_pass"), 40), "next_pass_at": _text(s.get("next_pass_at"), 40),
-            "passing": bool(s.get("passing")), "pauses": pauses,
+            "passing": bool(s.get("passing")), "pauses": pauses, "workers_enabled": s.get("workers_enabled", True) is not False,
             "max_parallel": s.get("max_parallel") or 0, "spent_today": s.get("spent_today") or 0,
             "daily_budget": s.get("daily_budget") or 0, "auth": _text(s.get("auth"), 20),
             "pc": _text(_scrub(pc.get("text") or mv.get("pc_text")), 200),
@@ -218,7 +218,14 @@ class Portal:
             self.push = push.Push(Path(state_dir) / "portal-push.json", conf["push"], self.summary, self.log, repo)
 
     def summary(self) -> dict:
-        return summary(self.status_fn())
+        out = summary(self.status_fn())
+        if self.live is not None:   # for notifications (push.py "stuck"): what the Live tab lists as stuck or blocked
+            try:
+                out["live_blockers"] = [{k: b.get(k) for k in ("kind", "key", "title", "detail", "since", "repo")}
+                                        for b in self.live.snapshot().get("blockers") or []]
+            except Exception:
+                out["live_blockers"] = []
+        return out
 
     def summary_bytes(self) -> bytes:
         """One read of the engine serves every phone that asks within three seconds."""
@@ -303,7 +310,9 @@ class Portal:
                 self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
-                self.send_header("Content-Security-Policy", CSP)
+                # The desktop window (server.py, this PC only) shows the Live tab in a frame; nothing else may frame it.
+                local = portal._local((self.headers.get("Host") or "").strip().lower()) and not self.headers.get("Tailscale-User-Login")
+                self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors http://127.0.0.1:* http://localhost:*") if local else CSP)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if self.command != "HEAD":

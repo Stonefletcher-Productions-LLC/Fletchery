@@ -156,6 +156,36 @@ class Feed(unittest.TestCase):
             self.assertEqual(devwatch.kind_of(text), kind, text)
 
 
+class StuckNotifications(unittest.TestCase):
+    def test_keys_are_stable_while_minutes_change(self):
+        w = devwatch.DevWatch({}, github=FakeGitHub(world()))
+        w.poll()
+        first = {b["key"] for b in w.snapshot()["blockers"]}
+        self.assertIn("runner:NODE-unreal-light", first)
+        self.assertTrue(all(b["repo"] == REPO for b in w.snapshot()["blockers"] if b["kind"] in ("check", "label")))
+        self.assertEqual(first, {b["key"] for b in w.snapshot()["blockers"]})
+
+    def test_push_says_each_stuck_thing_once_and_skips_blips(self):
+        import push
+        view = {"live_blockers": [{"kind": "stuck", "key": "step:r:7:Build", "title": "PR check: step Build has run 75 min", "detail": "r", "since": ago(75)},
+                                  {"kind": "feed", "key": "feed", "title": "GitHub can't be read right now", "since": ago(1)},
+                                  {"kind": "machine", "key": "machine:N", "title": "N stopped reporting", "since": ago(5)}]}
+        marks = push.marks(view)
+        self.assertIn("stuck:step:r:7:Build", marks)
+        self.assertIn("stuck:machine:N", marks)
+        self.assertNotIn("stuck:feed", marks)       # one minute old: may be a blip
+        self.assertEqual(marks["stuck:step:r:7:Build"]["tab"], "live")
+        self.assertIn("stuck", push.EVENTS)
+
+    def test_token_is_read_again(self):
+        calls = []
+        gh = devwatch.GitHub(lambda: calls.append(1) or f"t{len(calls)}")
+        self.assertEqual(gh.token(), "t1")
+        self.assertEqual(gh.token(), "t1")
+        gh._token_at -= 601
+        self.assertEqual(gh.token(), "t2")
+
+
 class Etags(unittest.TestCase):
     def test_304_is_free_and_answers_from_memory(self):
         hits = []
