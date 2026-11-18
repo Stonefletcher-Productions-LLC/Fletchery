@@ -192,6 +192,29 @@ class Etags(unittest.TestCase):
             srv.shutdown()
 
 
+class GhFallback(unittest.TestCase):
+    def test_switches_to_gh_when_sockets_fail_and_keeps_etags(self):
+        gh = devwatch.GitHub(lambda: "t")
+        def no_socket(url, etag):
+            raise devwatch.GitHubError(0, "GitHub could not be reached: [WinError 10013] forbidden")
+        asked = []
+        def via_gh(url, etag):
+            asked.append(etag)
+            if etag:
+                return devwatch.parse_gh_output(b'HTTP/2.0 304 Not Modified\r\nEtag: "e1"\r\n\r\n', b"gh: HTTP 304")
+            return devwatch.parse_gh_output(b'HTTP/2.0 200 OK\r\nEtag: "e1"\r\nX-Ratelimit-Remaining: 4990\r\n\r\n[{"a": 1}]')
+        gh._urllib, gh._gh = no_socket, via_gh
+        self.assertEqual(gh.get("user/repos"), [{"a": 1}])
+        self.assertEqual(gh.via, "gh")
+        self.assertEqual(gh.get("user/repos"), [{"a": 1}])
+        self.assertEqual((asked, gh.calls, gh.free, gh.remaining), (["", '"e1"'], 1, 1, 4990))
+
+    def test_gh_errors(self):
+        self.assertEqual(devwatch.parse_gh_output(b"", b"gh: Not Found (HTTP 404)")[0], 404)
+        with self.assertRaises(devwatch.GitHubError):
+            devwatch.parse_gh_output(b"", b"error connecting to api.github.com")
+
+
 def _plain(gh, url):
     old = devwatch.API
     try:
