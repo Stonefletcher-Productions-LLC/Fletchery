@@ -28,7 +28,7 @@ the top right.
 
 | Tab | What it shows |
 |---|---|
-| **Live** | **Building now** (every build on every machine, whether Fletchery or a GitHub job started it), **Stuck or blocked**, **Machines** (what each one is doing, CPU, RAM, disk), **Runners** (online, busy, idle, with the job and step), **GitHub Actions** runs with the current step, **Open pull requests** with their checks, and **Tasks and issues**. With several projects, chips under the numbers show one at a time. |
+| **Live** | **Building now** (every build on every machine, whether Fletchery or a GitHub job started it), **Agents** (one row per Claude or Codex branch active in the last day: its PR or branch, what it waits on, when it last moved), **Stuck or blocked**, **Machines** (what each one is doing, CPU, RAM, disk), **Runners** (online, busy, idle, with the job and step), **GitHub Actions** runs with the current step, **Open pull requests** with their checks, and **Tasks and issues**. With several projects, chips under the numbers show one at a time. |
 | **Builds** | **Running and coming up**, **Start a build** (version and branch; later, daily or with the Full tests under *Later, daily or with Full tests*), **Finished builds** with their download links, and the **Build machines** |
 | **Activity** | Health (up since, code version, GitHub reads, build machines), **Check GitHub now**, **Restart the backend**, and the log of everything done, including who did it ("from the window" or "from the phone") |
 

@@ -51,6 +51,10 @@ FAILED = ("failure", "timed_out", "action_required", "startup_failure")
 # A check that gave no verdict on the PR: cancelled, or a run whose machine stayed busy (LifeShare's PrCheckJob exits 2
 # with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
 NO_RESULT = re.compile(r"no result", re.I)
+# Coding agents' branches (and PR authors): one Agents row per branch with recent activity.
+AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))
+AGENT_HOURS = 24      # a branch quiet this long drops off the Agents card (workers.portal.live.agentHours)
+CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
 GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
 RUNNER_REFUSED_RETRY = 3600   # a runner list GitHub refused (no admin rights) is asked again after an hour
@@ -65,6 +69,15 @@ LIMITS = {                 # seconds before something counts as stuck
     "auto_merge": 2 * 3600,     # a PR set to merge automatically, checks green, not merged
 }
 DISK_LOW_GB = 30               # a machine's drive with less free space than this is flagged (workers.portal.live.diskFreeGb)
+
+
+def _agent_of(branch: str, author: str) -> str:
+    """Which coding agent a branch (or PR author) belongs to: "Claude", "Codex" or ""."""
+    b, a = str(branch or "").lower(), str(author or "").lower()
+    for prefix, name in AGENTS:
+        if b.startswith(prefix):
+            return name
+    return "Codex" if "codex" in a else ""
 
 
 def _latest_checks(cr: list) -> list:
@@ -351,6 +364,7 @@ class DevWatch:
         self.jobs: dict[int, list] = {}             # run id -> jobs
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
+        self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
         self.no_result: dict[int, bool] = {}        # failed check run id -> its annotations say "No result" (asked once)
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
@@ -370,6 +384,10 @@ class DevWatch:
             self.disk_low = float(conf.get("diskFreeGb", DISK_LOW_GB)) if isinstance(conf, dict) else DISK_LOW_GB
         except (TypeError, ValueError):
             self.disk_low = DISK_LOW_GB
+        try:
+            self.agent_hours = float(conf.get("agentHours", AGENT_HOURS)) if isinstance(conf, dict) else AGENT_HOURS
+        except (TypeError, ValueError):
+            self.agent_hours = AGENT_HOURS
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -418,14 +436,14 @@ class DevWatch:
             # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
             places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
-        runs, jobs, prs, checks, issues = {}, {}, {}, {}, {}
+        runs, jobs, prs, checks, issues, pushes = {}, {}, {}, {}, {}, {}
         errors = [g["error"] for g in got.values() if g.get("error")]
         for repo, g in got.items():
-            runs[repo], prs[repo], issues[repo] = g["runs"], g["prs"], g["issues"]
+            runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
-            self.runs, self.jobs, self.prs, self.checks, self.issues = runs, jobs, prs, checks, issues
+            self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
             self.runners = {k: v for k, v in found.items() if v is not None}
         busy = any(r.get("status") in ACTIVE for rs in runs.values() for r in rs) or any(
             (rep["data"] or {}).get("busy") for rep in list(self.reports.values()))
@@ -483,13 +501,14 @@ class DevWatch:
         except GitHubError as e:
             with self._lock:
                 old = {"runs": self.runs.get(repo, []), "prs": self.prs.get(repo, []), "issues": self.issues.get(repo, []),
+                       "pushes": self.pushes.get(repo, []),
                        "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
                        "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
             old["error"] = f"{repo}: {e}"
             return old
 
     def _read_repo(self, repo: str) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": []}
+        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
         out["runs"] = runs
         for run in runs:
@@ -517,6 +536,15 @@ class DevWatch:
                     notes = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=30") or []
                     self.no_result[c["id"]] = any(NO_RESULT.search(str(n.get("message") or "") + " " + str(n.get("title") or ""))
                                                   for n in notes if isinstance(n, dict))
+        # Pushes to agent branches (claude/..., codex/...): what the Agents card shows before a PR exists. One call, ETag.
+        for e in self._try(f"repos/{repo}/events?per_page=100") or []:
+            if not isinstance(e, dict) or e.get("type") != "PushEvent":
+                continue
+            ref = str((e.get("payload") or {}).get("ref") or "")
+            branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ""
+            if _agent_of(branch, ""):
+                out["pushes"].append({"branch": _text(branch, 120), "at": _text(e.get("created_at"), 30),
+                                      "actor": _text((e.get("actor") or {}).get("login"), 60)})
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
         return out
@@ -719,6 +747,7 @@ class DevWatch:
                 block("feed", "Fletchery could not check its own machines", f"{type(e).__name__}: {e}"[:200], key="extra")
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
+        agents = self._agents(at, prs_out, runs_out)
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
         # Everything building, checking, testing, merging or importing right now, on any machine, in one list.
         building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a["kind"] in BUILD_KINDS]
@@ -730,11 +759,65 @@ class DevWatch:
             "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
-                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building)},
+                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building),
+                       "agents": len(agents)},
+            "agents": agents,
             "building": building[:30],
             "blockers": blockers[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
+
+    def _agents(self, at: float, prs: list, runs: list) -> list:
+        """One row per coding agent's branch with recent activity (Claude: claude/..., Codex: codex/... or a codex
+        author): its PR (or just the branch), what it is waiting on, and when it last did something."""
+        with self._lock:
+            pushes = {repo: list(ps) for repo, ps in self.pushes.items()}
+        last_push = {}
+        for repo, ps in pushes.items():
+            for p in ps:
+                k = (repo, p["branch"])
+                if _ts(p["at"]) > _ts(last_push.get(k, "")):
+                    last_push[k] = p["at"]
+        building = {(r["repo"], r["branch"]) for r in runs if r["status"] in ACTIVE}
+        out, seen = [], set()
+        for p in prs:
+            who = _agent_of(p["branch"], p["author"])
+            if not who:
+                continue
+            k = (p["repo"], p["branch"])
+            seen.add(k)
+            pushed = last_push.get(k, "")
+            last = max((p["updated"], pushed), key=lambda x: _ts(x) or 0)
+            if _age(last, at) > self.agent_hours * 3600:
+                continue
+            c = p["checks"]["state"]
+            if p.get("blocked"):
+                state = ("needs", "Blocked")
+            elif c == "failed":
+                state = ("bad", "Checks failing: " + ", ".join(p["checks"]["failed"][:2]))
+            elif c == "rerun":
+                state = ("wait", "Needs re-run")
+            elif c in ("running", "queued") or k in building:
+                state = ("wait", "Waiting on checks")
+            elif pushed and _age(pushed, at) < CODING_FRESH:
+                state = ("run", "Coding")
+            elif p["draft"]:
+                state = ("", "Draft")
+            elif c == "passed":
+                state = ("run", "Merging when green" if p["auto_merge"] else "Checks pass, ready to merge")
+            else:
+                state = ("", "No checks yet")
+            out.append({"agent": who, "repo": p["repo"], "number": p["number"], "title": p["title"], "url": p["url"],
+                        "branch": p["branch"], "state": state[1], "tone": state[0], "last": last})
+        for (repo, branch), pushed in last_push.items():
+            if (repo, branch) in seen or _age(pushed, at) > self.agent_hours * 3600:
+                continue
+            out.append({"agent": _agent_of(branch, ""), "repo": repo, "number": 0, "title": branch,
+                        "url": _web(f"https://github.com/{repo}/tree/{branch}"), "branch": branch,
+                        "state": "Coding, no PR yet" if _age(pushed, at) < CODING_FRESH else "Pushed, no PR yet",
+                        "tone": "run" if _age(pushed, at) < CODING_FRESH else "", "last": pushed})
+        out.sort(key=lambda a: -_ts(a["last"]))
+        return out[:40]
 
     def _machines(self, at: float, runners: list, block) -> list:
         with self._lock:
@@ -775,9 +858,6 @@ class DevWatch:
                     acts.append({"kind": _text(a.get("kind") or kind_of(a.get("title")), 20), "title": _scrub(a.get("title"), 200),
                                  "since": _text(a.get("since"), 30), "detail": _scrub(a.get("detail"), 200)})
             procs = d.get("procs") if isinstance(d.get("procs"), dict) else {}
-            if procs.get("claude"):
-                acts.append({"kind": "coding", "title": f"Claude: {int(procs['claude'])} session" + ("s" if int(procs["claude"]) > 1 else ""),
-                             "since": "", "detail": ""})
             guard = _disk_guard(d.get("disk_guard"))
             if guard:
                 drive, who = guard["drive"] or "The build drive", self.display(host)

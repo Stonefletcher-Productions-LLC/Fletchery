@@ -148,6 +148,23 @@ class Feed(unittest.TestCase):
         titles = " | ".join(b["title"] for b in w.snapshot()["blockers"])
         self.assertIn("although a runner with its labels is idle", titles)
 
+    def test_agents_one_row_per_active_branch(self):
+        first = {f"repos/{REPO}/events": [
+            {"type": "PushEvent", "created_at": ago(5), "actor": {"login": "dev"}, "payload": {"ref": "refs/heads/claude/new-idea"}},
+            {"type": "PushEvent", "created_at": ago(3), "actor": {"login": "dev"}, "payload": {"ref": "refs/heads/claude/bus"}},
+            {"type": "PushEvent", "created_at": ago(60 * 30), "actor": {"login": "dev"}, "payload": {"ref": "refs/heads/claude/old"}},
+            {"type": "PushEvent", "created_at": ago(2), "actor": {"login": "dev"}, "payload": {"ref": "refs/heads/main"}},
+            {"type": "IssuesEvent", "created_at": ago(1)}]}
+        w = self.watch_first(first)
+        w.prs[REPO][0]["head"]["ref"] = "claude/bus"             # PR #12: checks running
+        w.prs[REPO][1]["user"] = {"login": "chatgpt-codex-connector[bot]"}   # PR #13 by Codex: its check failed
+        s = w.snapshot()
+        rows = {(a["agent"], a["number"] or a["title"]): a["state"] for a in s["agents"]}
+        self.assertEqual(rows, {("Claude", 12): "Waiting on checks", ("Codex", 13): "Checks failing: Compile and test",
+                                ("Claude", "claude/new-idea"): "Coding, no PR yet"})   # main and a branch quiet 30 h: not agents
+        self.assertEqual(s["counts"]["agents"], 3)
+        self.assertEqual(s["agents"][0]["number"], 12)            # newest activity first (a push 3 min ago)
+
     def test_blocked_labels_match_the_whole_name(self):
         m = devwatch.BLOCKED_LABEL.match
         for yes in ("blocked", "foreman:blocked", "status:needs-alex", "needs-you", "Blocked: upstream", "waiting-on-art"):
@@ -234,7 +251,7 @@ class Feed(unittest.TestCase):
         pc = next(m for m in s["machines"] if m["name"] == "Gaming PC")
         kinds = [a["kind"] for a in pc["activities"]]
         self.assertIn("merging", kinds)
-        self.assertIn("coding", kinds)
+        self.assertNotIn("coding", kinds)          # a count of claude.exe processes said nothing (Agents card instead)
         self.assertNotIn("E:\\scratch", json.dumps(s))                  # folder paths stay on the machine
         self.assertIn("ALEX-PC-unreal-pr", pc["runners"])                 # runner and report land on one machine
         titles = " | ".join(b["title"] for b in s["blockers"])

@@ -24,7 +24,8 @@
   "prs": 2,
   "issues": 1,
   "blockers": 6,
-  "building": 1
+  "building": 1,
+  "agents": 4
  },
  "blockers": [
   {
@@ -106,12 +107,6 @@
      "title": "PR check #12 (GitHub run 7): PrCheckJob.ps1",
      "since": "2026-11-18T04:23:29Z",
      "detail": "holds the machine"
-    },
-    {
-     "kind": "coding",
-     "title": "Claude: 1 session",
-     "since": "",
-     "detail": ""
     }
    ],
    "runners": [
@@ -380,6 +375,52 @@
    "detail": "step: Build editor \u00b7 Acme/Game",
    "url": "https://github.com/Acme/Game/actions/runs/7",
    "machine": "Gaming PC"
+  }
+ ],
+ "agents": [
+  {
+   "agent": "Claude",
+   "repo": "Acme/Game",
+   "number": 12,
+   "title": "Bus lines",
+   "url": "https://github.com/Acme/Game/pull/12",
+   "branch": "claude/bus-lines",
+   "state": "Waiting on checks",
+   "tone": "wait",
+   "last": "2026-11-18T04:29:29Z"
+  },
+  {
+   "agent": "Codex",
+   "repo": "Acme/Game",
+   "number": 13,
+   "title": "Weather",
+   "url": "https://github.com/Acme/Game/pull/13",
+   "branch": "codex/weather",
+   "state": "Checks failing: Compile and test",
+   "tone": "bad",
+   "last": "2026-11-18T04:24:29Z"
+  },
+  {
+   "agent": "Claude",
+   "repo": "Acme/Game",
+   "number": 0,
+   "title": "claude/town-benches",
+   "url": "https://github.com/Acme/Game/tree/claude/town-benches",
+   "branch": "claude/town-benches",
+   "state": "Coding, no PR yet",
+   "tone": "run",
+   "last": "2026-11-18T04:20:29Z"
+  },
+  {
+   "agent": "Claude",
+   "repo": "Acme/Game",
+   "number": 9,
+   "title": "Folk greetings",
+   "url": "https://github.com/Acme/Game/pull/9",
+   "branch": "claude/greetings",
+   "state": "Merging when green",
+   "tone": "run",
+   "last": "2026-11-18T03:52:29Z"
   }
  ]
 }

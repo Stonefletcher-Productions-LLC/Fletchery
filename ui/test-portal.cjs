@@ -93,6 +93,9 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
     assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
+    // Agents: one row per Claude or Codex branch, with its PR, status and last activity; no process count on machines
+    assert.match(await page.textContent('#liveAgents'), /Claude[\s\S]*#12[\s\S]*Bus lines[\s\S]*Waiting on checks[\s\S]*Codex[\s\S]*#13[\s\S]*Checks failing[\s\S]*claude\/town-benches[\s\S]*Coding, no PR yet/);
+    assert.doesNotMatch(await page.textContent('#liveMachines'), /Claude: \d+ session/);
     // the disk guard's drive: free/total, a warning under warnGB, the biggest folders; not listed twice in the stats
     assert.match(await page.textContent('#liveMachines'), /SF-NODE-01[\s\S]*C: 88\/230 GB free[\s\S]*Under 50 GB[\s\S]*E: 31\/250 GB free[\s\S]*Biggest: lifeshare-scratch\\wt-bus-lines 61 GB/);
     assert.doesNotMatch(await page.textContent('#liveMachines'), /E: 31\/250 GB free[\s\S]*E: 31\/250 GB free/);

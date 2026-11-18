@@ -26,7 +26,7 @@
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
   // How many rows each list shows before "Show N more" (kit.js).
-  const CAP = {liveBuilding: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
+  const CAP = {liveBuilding: 6, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
   function fill(node, rows, empty, more) {
     const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
     node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
@@ -87,6 +87,13 @@
         (g.drive || 'Build drive') + ' ' + Math.round(g.free_gb) + (g.total_gb ? '/' + Math.round(g.total_gb) : '') + ' GB free',
         g.updated ? [' · checked ', ago(g.updated)] : ''),
       (g.holders || []).length ? el('p', {class: 'sub', text: 'Biggest: ' + g.holders.slice(0, 5).map(h => h.name + ' ' + Math.round(h.gb) + ' GB').join(' · ')}) : null);
+  }
+  // One coding agent's branch: who (Claude or Codex), its PR or branch, what it is waiting on, when it last moved.
+  function agentRow(x) {
+    return el('li', null, el('span', {class: 'chip k-' + (x.agent === 'Codex' ? 'codex' : 'coding'), text: x.agent}),
+      el('div', {class: 'what'}, a(x.url, 't', x.number ? el('span', {class: 'num', text: '#' + x.number}) : null, x.title),
+        el('p', {class: 'sub'}, el('span', {class: 'chip ' + (x.tone || ''), text: x.state}), ' ',
+          ...sep(join(x.repo.split('/')[1], x.last ? ['active ', ago(x.last)] : '')))));
   }
   function machineRow(m) {
     const st = m.stats || {}, g = m.disk_guard;
@@ -204,6 +211,10 @@
     $('n-lbuild').textContent = building.length ? '(' + building.length + ')' : '';
     $('liveBuildingCard').classList.toggle('calm', !building.length);
     fill($('liveBuilding'), building.map(x => actRow({...x, detail: join(x.machine, x.detail).join(' · ')})), 'Nothing is building right now.');
+    const agents = (full.agents || []).filter(x => !repo || x.repo === repo);
+    $('n-lagents').textContent = agents.length ? '(' + agents.length + ')' : '';
+    $('liveAgentsCard').classList.toggle('calm', !agents.length);
+    fill($('liveAgents'), agents.map(agentRow), 'No Claude or Codex branch has been active in the last day.');
     fill($('liveMachines'), (d.machines || []).map(machineRow), 'No machine has reported yet, and no runner is registered.');
     const note = (d.fresh || {}).runner_note;
     $('liveRunnerNote').hidden = !note; $('liveRunnerNote').textContent = note || '';
