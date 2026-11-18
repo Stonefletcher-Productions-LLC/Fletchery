@@ -524,6 +524,23 @@ class DevWatch:
             page += 1
         return out
 
+    def _statuses(self, repo: str, sha: str) -> list:
+        """A commit's statuses, shaped like check runs (newest per context)."""
+        state = {"success": ("completed", "success"), "failure": ("completed", "failure"), "error": ("completed", "failure"),
+                 "pending": ("in_progress", None)}
+        out = []
+        for st in (self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}).get("statuses") or []:
+            if not isinstance(st, dict) or str(st.get("state")) not in state:
+                continue
+            status, conclusion = state[str(st["state"])]
+            row = {"id": st.get("id"), "name": st.get("context"), "status": status, "conclusion": conclusion,
+                   "html_url": st.get("target_url"), "started_at": st.get("created_at"),
+                   "completed_at": st.get("updated_at") if status == "completed" else None, "source": "status"}
+            if conclusion == "failure" and isinstance(st.get("id"), int):
+                self.no_result[st["id"]] = bool(NO_RESULT.search(str(st.get("description") or "")))
+            out.append(row)
+        return out
+
     def _try(self, path: str, quiet_for: float = 1800):
         """GET that remembers a 403/404 (no access, Actions off) and stops asking for a while."""
         if self.skip.get(path, 0) > time.time():
@@ -576,6 +593,10 @@ class DevWatch:
                 out["checks"][(repo, sha)] = kept    # finished checks on an unchanged commit do not change
                 continue
             out["checks"][(repo, sha)] = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
+            if not out["checks"][(repo, sha)]:
+                # A commit pushed with a workflow's token starts no check run; the job posts its result as a commit status
+                # instead (LifeShare's PR check on generated content). Without this such a PR looked unchecked, not failed.
+                out["checks"][(repo, sha)] = self._statuses(repo, sha)
             for c in out["checks"][(repo, sha)]:
                 # A failed check's annotations, once per check run (they never change): "No result" = needs a re-run.
                 if c.get("conclusion") in FAILED and c.get("id") and c["id"] not in self.no_result \
