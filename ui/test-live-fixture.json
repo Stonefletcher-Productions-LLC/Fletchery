@@ -37,7 +37,7 @@
   {
    "kind": "stuck",
    "title": "PR check \u00b7 PR #12: step \"Build editor\" has run 75 min",
-   "detail": "Acme/Game on ALEX-PC-unreal-pr",
+   "detail": "Acme/Game on MY-PC-unreal-pr",
    "url": "https://github.com/Acme/Game/actions/runs/7",
    "since": "2026-11-18T03:17:29Z"
   },
@@ -65,7 +65,7 @@
   {
    "kind": "label",
    "title": "PR #13 is marked blocked",
-   "detail": "Acme/Game \u00b7 status:needs-alex",
+   "detail": "Acme/Game \u00b7 status:needs-you",
    "url": "https://github.com/Acme/Game/pull/13",
    "since": "2026-11-18T04:27:29Z"
   }
@@ -73,7 +73,7 @@
  "machines": [
   {
    "name": "Gaming PC",
-   "host": "ALEX-PC",
+   "host": "MY-PC",
    "online": true,
    "last_report": "2026-11-18T04:32:29Z",
    "busy": true,
@@ -113,7 +113,7 @@
     }
    ],
    "runners": [
-    "ALEX-PC-unreal-pr"
+    "MY-PC-unreal-pr"
    ],
    "version": ""
   },
@@ -170,7 +170,7 @@
  ],
  "runners": [
   {
-   "name": "ALEX-PC-unreal-pr",
+   "name": "MY-PC-unreal-pr",
    "owner": "Acme",
    "labels": [
     "unreal-pr"
@@ -213,7 +213,7 @@
    "created": "2026-11-18T03:12:29Z",
    "started": "2026-11-18T03:12:29Z",
    "updated": "2026-11-18T04:31:29Z",
-   "runner": "ALEX-PC-unreal-pr",
+   "runner": "MY-PC-unreal-pr",
    "job": "Compile and test",
    "step": "Build editor",
    "step_started": "2026-11-18T03:17:29Z",
@@ -276,7 +276,7 @@
    "updated": "2026-11-18T04:27:29Z",
    "created": "",
    "labels": [
-    "status:needs-alex"
+    "status:needs-you"
    ],
    "checks": {
     "state": "failed",

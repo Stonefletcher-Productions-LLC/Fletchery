@@ -1,90 +1,42 @@
-# Contributing to BuildLane
+# Contributing
 
-Create a focused branch and open a pull request. Keep Windows PowerShell 5.1 compatibility; the desktop launcher uses that runtime. Preserve UTF-8 BOMs in scripts containing non-ASCII text, because Windows PowerShell otherwise reads them using the system code page.
+Fletchery is small on purpose: one backend (`fletchery/`, Python standard library), one page (`ui/portal/`, no build
+step) and one window (`shell/Fletchery.cs`). Keep it that way. Before adding a feature, check whether GitHub, the
+runners or an existing control already does it.
 
-## Local checks
+## Before you open a pull request
 
-Run in Windows PowerShell from the repository root:
+1. Run the Python tests: `python -m pytest fletchery/test_*.py` (or each file with `python`). They need no network.
+2. Run the page checks: `npm ci --prefix ui`, then `FLETCHERY_BROWSER=<path to Chromium or Edge> node
+   ui/test-portal.cjs`. They serve the page from `ui/test-live-fixture.json`, never a live backend, and cover phone and
+   desktop layouts, light and dark, every control, folding cards and long lists, offline use and
+   read-only mode.
+3. If the page changed, refresh the pictures: set `FLETCHERY_PORTAL_SHOTS` to a folder, run the page checks again and
+   copy the shots the README uses into `docs/images/fletchery/`.
+4. Update the README and `docs/` in the same pull request when what people see or do changes.
 
-```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneApp.ps1
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneGitHub.ps1
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneOnboarding.ps1
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneMoves.ps1
-```
+## How the code is laid out
 
-Tests use isolated temporary profiles and mocked GitHub responses. The onboarding test drives the actual Save button. The GitHub test catches Windows PowerShell array-enumeration errors across multiple pages.
-
-Optional read-only live test, using your own configured profile and available authentication:
-
-```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneGitHub.ps1 -Live -Profile C:\Profiles\project.json
-```
-
-## Screenshots
-
-The documentation images are rendered from the real Windows Forms interface with synthetic data. No network calls, no
-saved projects: each script builds a temporary profile and throws it away.
-
-```powershell
-# The dashboard (light and dark) and the Releases tab
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\PreviewDocs.ps1 -OutDirectory .\docs\images
-# The first-run screen and the project editor
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\TestLaneOnboarding.ps1 -PreviewDirectory .\docs\images
-```
-
-`PreviewDocs.ps1` writes `overview.png`, `overview-dark.png` and `releases.png`; the onboarding test writes `setup.png`
-and `projects.png`. Both render at the app's normal window size, so a layout change that clips a button shows up in the
-images. Review the results for clipping and accidental personal data before committing them.
-
-## Layout
-
-| Location | Purpose |
-| --- | --- |
-| `app/LaneApp.ps1` | Main dashboard and GitHub mutations |
-| `app/LaneProjectsUi.ps1` | Project editor and first-run setup |
-| `app/LaneMoves.ps1` | Background bulk moves, progress, and partial results |
-| `app/LaneProfiles.ps1` | Profile validation and persistence |
-| `app/LaneRefresh.ps1`, `app/LaneGitHub.ps1` | Background reads and pagination |
-| `app/BuildLaneLauncher.cs` | Console-free Windows launcher |
-| `app/InstallLaneApp.ps1`, `app/BuildLaneInstaller.ps1` | Local installation and MSI packaging |
-| `app/PreviewDocs.ps1` | Renders the documentation screenshots from the real interface with fixture data |
-| `app/BuildLogo.ps1` | Draws the logo and writes `app/BuildLane.ico` plus the README and social-preview images |
-| `docs/`, `examples/` | User guides and sample integrations |
-
-## Logo
-
-The mark is a "B" for BuildLane over a lane stripe that runs from cyan to green, on a deep navy tile. It deliberately
-shares no shape or colour with the LifeShare icon (a coral house with a teal gear): one product built the other, but
-they are separate things.
-
-`app/BuildLogo.ps1` draws every size with the same geometry and writes all of the places the icon lives:
-
-```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\app\BuildLogo.ps1
-```
-
-| Output | Used by |
-| --- | --- |
-| `app/BuildLane.ico` (16–256 px) | Window and taskbar icon, desktop shortcut, compiled launcher |
-| `docs/images/logo.png` (512 px) | The top of this README |
-| `docs/images/social-preview.png` (1280×640) | GitHub's social preview (Settings → Social preview → Upload) |
-
-The launcher embeds the icon at compile time, so `InstallLaneApp.ps1` recompiles it when either
-`BuildLaneLauncher.cs` or `BuildLane.ico` changes.
-
-Update the README and relevant guide when behavior changes. Do not add credentials, personal profiles, generated binaries, or game assets. Signing and production release validation are separate from regression tests.
-
-Preserve UTF-8 BOM encoding in Windows PowerShell 5.1 scripts containing non-ASCII labels. A PowerShell 7 parser can accept BOM-less UTF-8 that Windows PowerShell misreads as ANSI. Parse changed scripts with `powershell.exe`, and use the hosted Windows checks for UI behavior when the local PC is reserved for gameplay.
+- **Controls** are routes in `App.actions()` (`fletchery/app.py`). `fletchery/portal.py` decides who may press them
+  (`can_act()`): the window on `127.0.0.1`, or the phone through Tailscale Serve for the listed accounts. Every action
+  is logged with where it came from.
+- **The Live feed** is `fletchery/devwatch.py`. It reads GitHub with ETags and builds one snapshot; anything stuck is a
+  blocker with a stable key, so a notification goes once.
+- **Build machines** are `fletchery/machines.py` (the queue and the worker API) and `fletchery/node_worker.py` (each
+  machine). A machine only runs recipes from its own list: add a recipe in both places.
+- **The page** is `ui/portal/index.html`, `kit.js` (folding cards and "Show N more"), `portal.js` (Builds, Activity,
+  theme, controls), `live.js` (Live) and `portal.css`. The service worker (`sw.js`) caches the shell: bump `CACHE`
+  when a shell file changes. No inline scripts or styles (strict CSP).
+- **No windows.** Anything the backend starts goes through `fletchery/nowindow.py`, so nothing flashes on the PC.
 
 ## Keep the repository public-safe
 
 This repository is meant to be safe to publish. Before you commit:
 
-- No keys, tokens, passwords or machine keys. API keys live in Windows Credential Manager, node keys in a file only the
-  worker's account can read; neither belongs in a profile or in git.
+- No keys, tokens, passwords or machine keys. Machine keys live in a file only the worker's account can read; none
+  belongs in a profile or in git.
 - No live profile. A project's real profile lives in `%APPDATA%\Fletchery\Projects` (`.gitignore` refuses
   `*.profile.json` outside `examples/`). Examples use placeholders: `100.64.0.10` for a Tailscale address,
   `your-pc.your-tailnet.ts.net`, `you@example.com`, `NODE-01`, `C:\Users\you`.
 - No real tailnet names, private IPs, email addresses or Windows user names in code, tests, docs or screenshots.
-  Screenshots come from the made-up "Harbor" demo (`docs/images/README.md`).
+  Screenshots come from the made-up fixture in `ui/test-live-fixture.json` (`docs/images/README.md`).

@@ -23,7 +23,7 @@ const data = {
     {id: 'b1', version: '0.4.4', state: 'failed', ref: 'main', sha: '99887766aa', at: ago(2000), started: ago(1990), finished: ago(1950), machine: 'NODE-01', job: 3, reason: 'Compile failed in <Game>', publish: '', publish_reason: '', tests: '', repeat: '', links: [{label: 'bad', url: 'javascript:alert(1)'}]},
   ],
   machines: [{name: 'NODE-01', online: true, last_seen: ago(0), labels: ['os:windows', 'role:cook', 'ram:24'], builds: true, paused: [], job: job(7, 'running')},
-             {name: 'ALEX-PC', online: true, last_seen: ago(0), labels: ['os:windows', 'role:cook'], builds: false, paused: ['builds'], job: null}],
+             {name: 'MY-PC', online: true, last_seen: ago(0), labels: ['os:windows', 'role:cook'], builds: false, paused: ['builds'], job: null}],
   jobs: [job(7, 'running'), job(6, 'failed', {recipe: 'checkout-only', finished: ago(40), summary: 'git fetch failed', steps: []})],
   scratch: {checked_at: ago(20), mode: 'trim', freed_gb: 3.2},
   log: [{at: ago(5), line: 'builds: 0.4.6: job 7 queued'}, {at: ago(1), line: '<script>window.hacked = 1</script>'}],
@@ -93,7 +93,7 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
     assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
-    assert.match(await page.textContent('#liveRunners'), /ALEX-PC-unreal-pr[\s\S]*Busy[\s\S]*NODE-unreal-light[\s\S]*Offline/);
+    assert.match(await page.textContent('#liveRunners'), /MY-PC-unreal-pr[\s\S]*Busy[\s\S]*NODE-unreal-light[\s\S]*Offline/);
     assert.match(await page.textContent('#liveRuns'), /PR check · PR #12/);
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
     assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
@@ -157,10 +157,10 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(lastPost(), ['/api/builds/cancel', {id: 'b3'}]);
     // Machines: pause one, pause all, and machine jobs: stop, run again, log.
     assert.deepEqual(await buttons('#buildMachines'), ['Pause', 'Resume']);
-    assert.match(await page.textContent('#buildMachines'), /NODE-01[\s\S]*Building 0\.4\.6[\s\S]*ALEX-PC[\s\S]*Paused/);
+    assert.match(await page.textContent('#buildMachines'), /NODE-01[\s\S]*Building 0\.4\.6[\s\S]*MY-PC[\s\S]*Paused/);
     await page.click('#buildMachines button:has-text("Resume")');
     await page.waitForFunction(() => /takes builds again/.test(document.getElementById('toast').textContent));
-    assert.deepEqual(lastPost(), ['/api/machines/pause', {name: 'ALEX-PC', kind: 'builds', on: false}]);
+    assert.deepEqual(lastPost(), ['/api/machines/pause', {name: 'MY-PC', kind: 'builds', on: false}]);
     assert.equal(await page.isVisible('#holdAll'), true);
     await page.click('#holdAll');
     await page.waitForFunction(() => /All machines paused/.test(document.getElementById('toast').textContent));

@@ -1,6 +1,6 @@
 # Shared local builds and captures
 
-Use `app/Invoke-LaneResource.ps1` around a command that owns a shared output or GPU. All participating chats use the same resource names and reservation directory, independent of their checkout. Defaults are shared across worktrees for the current Windows account, not across accounts or machines. This is opt-in coordination, not a scheduler or a detector of jobs launched elsewhere.
+Use `tools/Invoke-LaneResource.ps1` around a command that owns a shared output or GPU. All participating chats use the same resource names and reservation directory, independent of their checkout. Defaults are shared across worktrees for the current Windows account, not across accounts or machines. This is opt-in coordination, not a scheduler or a detector of jobs launched elsewhere.
 
 Recommended names on the LifeShare workstation:
 
@@ -13,12 +13,12 @@ Use another project/output-specific name for genuinely independent builds. An Un
 
 ```powershell
 # Run from PowerShell. Adjust executable/project paths to the actual installation.
-& .\app\Invoke-LaneResource.ps1 -Resource gpu -Owner 'Hearth validation' `
+& .\tools\Invoke-LaneResource.ps1 -Resource gpu -Owner 'Hearth validation' `
   -Purpose 'Import and capture frozen Desk package' -WaitSeconds 300 `
   -Executable 'E:\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
   -Arguments '"E:\Review\LifeShare.uproject" -run=pythonscript -script="E:\Review\validate.py" -unattended -abslog="E:\Review\validation.log"'
 
-& .\app\Invoke-LaneResource.ps1 -Resource gpu,lifeshare-build -Status |
+& .\tools\Invoke-LaneResource.ps1 -Resource gpu,lifeshare-build -Status |
   ConvertTo-Json -Depth 5
 ```
 
@@ -30,7 +30,7 @@ Multiple names are attempted in sorted order. If one is busy, all partial reserv
 
 Before adoption, coordinate manually with already-running jobs. Installing the tool cannot retroactively reserve an editor. A live reservation does not prove that assets, imports, or captures pass their own acceptance checks.
 
-Validation: `powershell.exe -NoProfile -File app/TestLaneResources.ps1` exercises actual Windows processes, same-resource contention, independent-resource execution, exit codes, owner termination, child/grandchild cleanup and automatic reacquisition in an isolated directory.
+Validation: `powershell.exe -NoProfile -File tools/TestLaneResources.ps1` exercises actual Windows processes, same-resource contention, independent-resource execution, exit codes, owner termination, child/grandchild cleanup and automatic reacquisition in an isolated directory.
 
 ## Who has the PC (dashboard)
 

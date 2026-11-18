@@ -1,138 +1,64 @@
-# Machines: test nodes that take jobs from Fletchery
+# Machines: the build machines Fletchery runs
 
-Fletchery on the PC is the one job queue and history for every build machine. A test node (NODE-01 first) runs
-a small worker, `fletchery/node_worker.py`, that connects **out** to Fletchery over Tailscale, asks for work, runs it
-and reports back. Building → **Machines** shows the PC and each node: online or offline, the job it is running, its
-last result, CPU, free RAM and disk. **Jobs** below it lists the queue and history with each job's log.
+Fletchery on the PC is the one queue and history for every build. Each build machine (a test node such as NODE-01,
+or this PC itself) runs a small worker, `fletchery/node_worker.py`, that connects **out** to Fletchery over Tailscale,
+asks for work, runs it and reports back. The **Builds** tab lists the machines (Offline, Building, Paused or Ready),
+the builds running and coming up, and the finished ones with their downloads and logs. **Live > Building now** shows
+every build on every machine.
 
 ## How it is kept safe
 
-- **Private network only.** The worker API listens on the coordinator's Tailscale address and port
+- **Private network only.** The worker API listens on the PC's Tailscale address and port
   (`workers.machines.listen`, e.g. `100.64.0.10:8771`). Fletchery refuses `0.0.0.0`, `::` and public addresses.
-  The tailnet ACL lets only `tag:node` reach `tag:coordinator:8771`. The dashboard stays on `127.0.0.1:8770`.
-- **One key per node, revocable.** Adding a node prints its key once; Fletchery keeps only its SHA-256 hash.
-  Revoking (dashboard or `machines.py revoke`) stops the key at once and queues the node's running job again.
-  Ten bad sign-ins from one address in a minute are refused for a minute.
-- **Jobs are recipes, not commands.** A job names one of the node's recipes (`node-checks`, `nightly-full`,
-  `checkout-only`, `package`) with checked parameters (`only` is a comma list of check names; `strict_slots` is true or false)
-  and a full commit SHA. The node has its own copy of the recipes and its own allow-list (`recipes` in its config),
-  so a compromised coordinator still cannot make a node run anything else.
-- **Read-only code access.** The node fetches the exact commit with its own read-only deploy key. It holds no GitHub
-  token: Fletchery on the PC posts the commit statuses.
+  The tailnet ACL lets only `tag:node` reach `tag:coordinator:8771`. The window stays on `127.0.0.1:8770`.
+- **One key per machine, revocable.** Adding a machine prints its key once; Fletchery keeps only its SHA-256 hash.
+  Revoking (`machines.py revoke`) stops the key at once and queues the machine's running job again. Ten bad sign-ins
+  from one address in a minute are refused for a minute.
+- **Jobs are recipes, not commands.** A job names one of the machine's recipes (`package`, `checkout-only`) with
+  checked parameters and a full commit SHA. The machine has its own copy of the recipes and its own allow-list
+  (`recipes` in its config), so a compromised PC still cannot make it run anything else.
+- **Read-only code access.** The machine fetches the exact commit with its own read-only deploy key. It holds no
+  GitHub token.
 
-## Jobs and GitHub
+## Jobs
 
-| Recipe | What the node runs (same steps as the Buildlane workflow) | Commit status |
-|---|---|---|
-| `node-checks` | Stop-JobProcesses, ResetContentWorkspace, `NodeTests.ps1 -Engine -ResultJson [-Only] [-StrictSlots]`, then always Stop-JobProcesses, `git checkout -- Content/Sim`, ResetContentWorkspace | `Node checks` |
-| `nightly-full` | the same with `-Set Full` | `Nightly full tests (node)` (what `ci.yml`'s nightly waits for) |
-| `checkout-only` | fetch and check out the commit, print it (a connection test) | none |
-| `pr-check` | the PC check of one worker PR: check out the base branch tip (the job's commit), fetch the PR head, Stop-JobProcesses, ResetContentWorkspace, merge the head (`--no-ff`), `Tools/CI/PrCheck.ps1 -BaseRef <base>`; then always Stop-JobProcesses, `git merge --abort`, ResetContentWorkspace | none: Fletchery labels the PR `ready` or posts the failure (see PR checks) |
-| `package` | a build scheduled on Building → Builds: Stop-JobProcesses, ResetContentWorkspace, `Build.ps1` and `BuildContent.ps1` (or `NodeTests.ps1` Full when "Full tests first" is ticked), `Package.ps1 -Version <v> -Out <buildsDir>\LifeShare-<v>`, then the same clean-up | none |
+| Recipe | What the machine runs |
+|---|---|
+| `package` | a build from Builds: Stop-JobProcesses, ResetContentWorkspace, `Build.ps1` and `BuildContent.ps1` (or `NodeTests.ps1` Full when Full tests is ticked), `Package.ps1 -Version <v> -Out <buildsDir>\<Name>-<v>`, then the same clean-up |
+| `checkout-only` | fetch and check out the commit, print it (a connection test) |
 
-A job needs the labels `os:windows` and `role:tests` and 16 GB of RAM (`checkout-only` needs nothing); a job can ask
-for more labels, such as `unreal:5.8.4`. A node runs one job at a time, oldest first. A job whose node stops
-answering for 3 minutes is queued again once, then marked lost. Logs are kept in `<state>\job-logs` (50 MB per job).
+A `package` job needs the labels `os:windows` and `role:cook`, any in `workers.builds.nodeLabels` (for example
+`["unreal:5.8.4"]`, so a machine with another engine never builds), and 16 GB of RAM; `checkout-only` needs nothing.
+A machine runs one job at a time, oldest first. A job whose machine stops answering for 3 minutes is queued again once,
+then marked lost. **Stop** on a running job ends its whole process tree at the machine's next heartbeat (within a
+minute). Logs are kept in `<state>\job-logs` (50 MB per job); the **Log** link on a build opens it.
 
-**Shadow.** Until cutover, `"shadow": true` (the default) sends the statuses as `shadow/Node checks` and
-`shadow/Nightly full tests (node)`, so nothing that `ci.yml` or `lane.yml` reads changes. Set `"shadow": false` at
-cutover, after the Buildlane node runner is stopped, so the two never both report.
+PR checks, test runs and merges are GitHub Actions jobs on your self-hosted runners now; Fletchery shows them on Live
+but does not run them.
 
-**PR checks** (`nodecheck.py`). With `"prCheck": {"labels": ["unreal:5.8.3"]}` in `workers.machines` (and
-`workers.prCheckCommand` set), Fletchery queues one `pr-check` at a time for a node that is online, not paused and has
-those labels plus `os:windows` and `role:tests`. The extra label keeps PR checks off a node whose engine differs from
-the PC's: a node on 5.8.4 would save content the PC's 5.8.3 can't load. Fletchery reads the finished job: a pass labels
-the PR for merging, a merge conflict or a failing check is posted on the PR (the step's log tail) for its fixer, and
-anything else (exit 2 from PrCheck.ps1, a fetch or worker error, a lost job) records nothing, so it runs again.
-In shadow mode the node checks the same PRs as the PC and only its result is kept (`node_pr_checks` in state.json,
-and a log line comparing it with the PC's); the PC still decides. With shadow off the node's result counts and the PC
-stops starting its own PR checks while a node is eligible, so its idle time goes to merge rounds.
+## Builds
 
-**Nightly.** With `"nightly": {"at": "07:00", "branch": "main"}` (UTC) Fletchery queues `nightly-full` on main's
-head once a day, within three hours of that time. Leave it out until cutover; the Buildlane node runner still runs
-the nightly until then.
-
-## Builds (Building → Builds)
-
-Pick a version (`0.3.9`), a branch (the base branch if left empty), a time (now, at a time, or every day at a time),
-whether to run the Full tests first, and where: **Automatic**, **A test node** or **This PC**. At its time Fletchery
-reads the branch once and builds that commit, whatever lands after. The build then waits for a machine:
-
-- **Automatic** queues a `package` job when a node that can package is online: labels `os:windows` and `role:cook`
-  plus any in `workers.builds.nodeLabels` (use `["unreal:5.8.3"]` until the node's engine matches the PC), at least
-  16 GB of RAM, and not paused. Otherwise it builds on this PC.
-- **This PC** uses the merge checkout, so a running merge round or PC check finishes first; then the build goes
-  before the next round. It waits for the heavy lease like a round, and resets generated Content afterwards so the
-  next round starts clean. Packages go to `workers.builds.outDir` (default `<state dir>\builds`); the log is in
-  `<state dir>\build-logs`.
-- A node that has not added `package` to its config's `recipes` refuses the job; an Automatic build then moves to
-  this PC. The node writes packages to `buildsDir` in its config (default `<workRoot>\builds`).
+**Builds > Start a build**: a version (`0.4.5`) and a branch (the base branch if left empty). Under **Later, daily or
+with Full tests**: a time, every day at that time, and Full tests first. At its time Fletchery reads the branch once
+and builds that commit, whatever lands after, on the first machine that can take it.
 
 A folder that already exists is never overwritten: the commit is added to the name. A daily build starts a one-off
-copy each day; **Stop repeating** ends it. Builds are kept in state.json, so a restart keeps them; a PC build that was
-running when Fletchery stopped is marked failed.
+copy each day; **Stop repeating** ends it. Builds are kept in `builds.json` in the state folder, so a restart keeps
+them.
 
-Profile (optional, `workers` block): `"builds": {"outDir": "E:\\lifeshare-scratch\\LifeShare-builds",
-"engine": "E:\\UE_5.8", "timeoutMinutes": 300, "nodeLabels": ["unreal:5.8.3"]}`.
+Profile (optional, `workers` block): `"builds": {"outDir": "D:\\Builds", "engine": "E:\\UE_5.8", "timeoutMinutes":
+300, "nodeLabels": ["unreal:5.8.4"], "publish": {"to": "github", "keep": 3, "driveRemote": "gdrive:Builds",
+"driveKeep": 2}}`. `publish` uploads each finished build to a pre-release on the project repository (keeping the newest
+`keep`) and, with `driveRemote`, to Google Drive with `rclone` (keeping `driveKeep`).
 
-## A merge round's tests on a node
+## Pausing machines
 
-With `"roundTests": {"labels": ["unreal:5.8.4"]}` inside `workers.machines`, each merge round still builds and imports
-content on this PC, but runs its long test suites on a test node: the merger pushes the candidate to a throwaway
-`fletchery/round-<n>` branch and runs
+**Pause** on a machine's row stops it taking new builds; **Resume** undoes it. **Pause all machines** holds the whole
+queue. Running work always finishes, unless you **Stop** it. Pauses live in `machines.db` and survive restarts.
 
-    python machines.py --state-dir <state> run --recipe node-checks --sha <sha> --only <tests> --requested-by "round <n>"
-
-which queues a `node-checks` job, waits, prints the result and the failing output, and exits 0 passed, 1 failed, 2 no
-result. On 2 (no node free, node paused from Tests, lost, out of memory) the merger runs the tests on this PC as before.
-The labels pick a node whose engine matches this PC. The job shows on the Merging card as the round's.
-
-A round's job goes first in the node queue, and it no longer waits for the job in front of it: when no node that could
-take it is idle, Fletchery stops the most recently started PR check (never a build or another round's job) on one such
-node. The stopped check gives no result and runs again later. On 2026-11-12 round jobs waited up to 9 minutes behind
-PR checks, close to the 10 minutes after which `run` gives up with no result.
-
-### Whole rounds on a node
-
-Add `"whole": true` to `roundTests` and a round leaves this PC's Unreal alone: it doesn't wait for or take the PC heavy
-lease, and the merger only does git here (merging, conflict fixes, pushes). The node builds the editor, runs
-BuildContent and the checks the plan names (strict navigation too) in one `node-checks` job, and the merger lands only
-after a node pass on that exact commit. A batch with a `Lane-Imports:` PR, or a round when no node can take
-`node-checks` (paused, offline, shadow), runs the old way on this PC. The merger agent itself still runs on this PC; it is
-a chat session and git, not Unreal.
-
-### Import rounds on a node
-
-A `Lane-Imports:` batch can run on a node too when `roundTests` has `"imports": true` and a node can push content. That
-node needs a second deploy key with write access (`gitPushKey` in its config; the read-only `gitSshKey` stays for
-fetching) and the label `role:imports`. The merger then adds `--imports <steps> --push-branch fletchery/round-N` to its
-`machines.py run`. The node builds the editor, runs `Tools/CI/RunImports.ps1`, which commits the content and pushes it
-with `PushWithLfs.ps1` to that branch only (the worker accepts no other branch, and PushWithLfs refuses main), then runs
-the build, BuildContent and checks on that commit. The merger fast-forwards to the pushed commit and lands it. Only an
-import job's steps get the write key.
-
-### Two nodes share a round
-
-When `run` finds two or more nodes free for `node-checks` and the merger passes a list of checks (`--only`), it splits
-the list across the nodes (round-robin) and queues one job per node. Each node builds the candidate and runs its half
-at the same time, and `run` waits for all of them: exit 1 if any half failed, 2 if any gave no result, 0 when every
-half passed. A run with `--imports` is never split, because the content is imported and pushed once. With one node
-free it is one job, as before.
-
-The Gaming PC can be the second node: run `node_worker.py` on the PC with its own `workRoot` (not a Fletchery
-worktree), its own machine key, and the same labels as NODE-01. Set `heavyLeaseFile` in its config to the PC's
-heavy lease (`E:\\GitHubRunner\\ResourceLeases\\heavy.json`): the worker then holds that lease for each job and shows as
-paused (takes nothing) while a round, a build or a local editor run holds it, so a node job and other Unreal work on
-the PC never run at the same time. Pause it from Machines (Tests, PR checks, Builds) when the PC is needed.
-
-A node without `heavyLeaseFile` (NODE-01) still watches the default lease that local runs take there
-(`E:\\GitHubRunner\\ResourceLeases\\heavy.json`; worker 10, Fletchery #208). While a local run holds it, the node
-shows as "busy with a local run: <what>" on Machines and takes no PR check, test run or build: before this it looked
-free and took checks that each ended "no result" in under a minute. A merge round's job is the exception: the node
-still takes it, the round counts the node as available (so it does not fall back to the PC), and the job waits up to
-30 minutes for the local run while the round marker keeps new local runs from starting. A PR check that ends with
-"no result" is not queued again for the same PR and head for 10 minutes. Set `"heavyLeaseFile": ""` to switch the
-watching off.
+A machine that also runs other heavy work watches its heavy lease (`heavyLeaseFile` in its config, or LaneGuard's
+default lease): while a local run holds it, the machine shows "busy with a local run: <what>" and takes no build.
+`"yieldTo": ["Wow.exe"]` makes it take nothing while one of those programs runs.
 
 ## Asset folders every node mirrors
 
@@ -142,33 +68,30 @@ not have them fails mid-import (LifeShare #1681). So the PC shares those folders
 API, on the same Tailscale address and with the same per-node keys. There is no SMB share or firewall rule.
 
 - **Profile:** `"assetRoots": ["E:\\lifeshare-scratch\\meshy_export"]` inside `workers.machines`. Fletchery copies the
-  list to `<state>\\asset_roots.json` so a round's `machines.py run` sees it, and logs a line at start for any folder
+  list to `<state>\\asset_roots.json` and logs a line at start for any folder
   that is missing or empty.
 - **API:** `/v1/assets/list` gives each folder's files with their size and SHA-256 (hashes are cached by size and
   modified time). `/v1/assets/read` gives one 4 MiB chunk of one file. It only serves files inside a shared folder,
   with no `..` and no other paths.
 - **Worker:** `node_worker.py` (version 2) mirrors each shared folder to the **same path** on the node, or to a path set
-  with `assetMap` in its config. It runs first in every import job, as the step "Mirror the PC's asset folders". It
-  also runs when the worker starts and every 15 minutes while it is idle (checking in every 30 s while it copies, so the node never looks offline), so a newly added node fills itself before
+  with `assetMap` in its config. It runs first in
+  every job that needs it, as the step "Mirror the PC's asset folders", and also when the worker starts and every 15 minutes while it is idle (checking in every 30 s while it copies, so the node never looks offline), so a newly added node fills itself before
   its first import. Only missing or changed files are copied. Each file goes to `<name>.fletchery-part`, has its SHA-256
   checked, and then replaces the old copy. Nothing on the node is deleted. A worker running on the PC itself skips this.
   `python node_worker.py sync --config <file>` mirrors on demand.
 - **Always used:** the worker reports the label `cap:asset-sync`. When `assetRoots` is set, every import job needs that
-  label, so an older worker never gets an import. `machines.py run --imports ...` refuses before it queues anything if a
-  shared folder is missing or empty on the PC (exit 2, "missing or empty on this PC"). If the mirror fails, the job
-  fails before importing, with "Asset folders not mirrored, imports not started: <reason>".
-- **New asset folder:** add it to `assetRoots` (with Alex's OK for the live profile). Nodes pick it up within 15
+  label, so an older worker never gets an import. If the mirror fails, the job fails before importing, with "Asset
+  folders not mirrored, imports not started: <reason>".
+- **New asset folder:** add it to `assetRoots` . Nodes pick it up within 15
   minutes, or at their next import.
-
 ## Builds come back to the PC
 
 After a `package` job passes, the node zips the build and sends it to Fletchery in 4 MiB chunks over the worker API
 (`/v1/upload`, only for the node's own package job). Fletchery checks the SHA-256, keeps `<state>\\builds\\<Name>-<version>.zip`
-and unpacks it beside it, and the Builds card points at that folder. If the copy fails, the build stays on the node and
+and unpacks it beside it, and the Builds tab points at that folder. If the copy fails, the build stays on the node and
 the job still passes. `"uploadBuilds": false` in a node's config turns it off. For a build packaged before this existed:
 `python node_worker.py upload --config <file> --job <package job id> --folder <build folder>`.
-
-## Keeping a node's disk free
+## Keeping a machine's disk free
 
 A node has no Fletchery backend, so nothing cleaned the worktrees that sessions left on it (2026-11-16: SF-NODE-01's
 work drive reached 0 GB). Worker version 8 runs the same scratch retention as the PC (`scratch.py`, README "Session
@@ -197,31 +120,16 @@ the store only grew (81 GB here, 103 GB in a CI checkout, 2026-11-16). Every six
 a session could be writing to it), the worker removes `tmp_pack_*` files older than a
 day and the `.keep` markers of fetches that are no longer running, then runs `git gc --prune=now` at below-normal
 priority. Other `.keep` files, LFS storage and worktrees are never touched.
-
-## Pausing one machine from one kind of work
-
-Building → Machines shows a "Takes:" row of switches under each machine. Click one to stop that machine from that kind
-of work; click again to resume. Running work always finishes.
-
-- **This PC:** Coding (no new worker sessions), Merging (the same as Pause on the Merge page), PR checks (no PC checks),
-  Builds (no scheduled builds start here).
-- **A node:** PR checks, Tests (node-checks, nightly, checkout-only) and Builds (`package`). A paused node claims no job
-  of that kind and is not counted as eligible, so PR checks go back to the PC and Automatic builds pick another machine
-  or the PC. A queued PR check that no node can take any more is cancelled so the PC can check that PR.
-
-Node pauses live in `machines.db` (meta `paused:<name>`); PC pauses in `state.json` (`pc_paused`). Both survive restarts.
-The Overview's machine strip lists what is paused.
-
 ## Setting it up
 
-1. **Profile** (live profile, `workers` block; needs Alex's OK):
+1. **Profile** (`workers` block):
 
    ```json
-   "machines": {"listen": "100.64.0.10:8771", "shadow": true}
+   "machines": {"listen": "100.64.0.10:8771"}
    ```
 
    Fletchery restarts with it; the log says `machines: worker API on 100.64.0.10:8771`.
-2. **Add the node** in Building → Machines → *Add or revoke a machine*, or on the PC:
+2. **Add the node** on the PC:
    `python <install>\fletchery\machines.py --state-dir <state> add NODE-01`. Copy the key it prints.
 3. **On the node**, put the key in a file only the worker's account can read (e.g. `C:\FletcheryNode\keys\fletchery_node_key`),
    copy `fletchery\node_worker.py` anywhere, and write its config:
@@ -235,17 +143,16 @@ The Overview's machine strip lists what is paused.
     "gitSshKey": "C:\\FletcheryNode\\keys\\lifeshare_deploy",
     "engine": "E:\\UE_5.8",
     "pauseFile": "E:\\GitHubRunner\\PAUSED-NODE",
-    "recipes": ["node-checks", "nightly-full", "checkout-only", "pr-check", "package"]}
+    "recipes": ["checkout-only", "package"]}
    ```
 
-   The checkout is `<workRoot>\fletchery\LifeShare` (its own, so it never fights the Buildlane runner's checkout).
+   The checkout is `<workRoot>\fletchery\LifeShare` (its own, so it never fights a GitHub runner's checkout).
    `python node_worker.py check --config <file>` signs in once and prints what the coordinator answers.
    `python node_worker.py install --config <file>` adds the logon task **Fletchery node worker** (current user,
    limited rights, below-normal priority); `schtasks /Run /TN "Fletchery node worker"` starts it now.
    The worker's own log is `<workRoot>\fletchery\worker.log`.
-4. **Shadow run:** queue a `checkout-only`, then a `node-checks` job from the dashboard and compare with the
-   Buildlane runner's result for the same commit.
-5. **Cutover:** stop the Buildlane node runner, set `"shadow": false` and add `"nightly"`.
+4. **First job:** queue a `checkout-only` (or start a build on Builds) and watch the machine on the Builds tab and on
+   Live. Then install `reporter.py` on it too ([PORTAL.md](PORTAL.md#the-live-tab)).
 
 While `pauseFile` exists the node still checks in (it shows "paused on the node") but takes no new job.
 
@@ -255,11 +162,8 @@ While `pauseFile` exists the node still checks in (it shows "paused on the node"
 python machines.py --state-dir <state> add <name>       # prints the key once
 python machines.py --state-dir <state> revoke <name>
 python machines.py --state-dir <state> list
-python machines.py --state-dir <state> enqueue --recipe node-checks --sha <40 hex> [--only A,B] [--strict-slots] [--pr N]
 python machines.py --state-dir <state> cancel <id>
 ```
-
-A job queued from the command line gets its commit status from the backend within 10 seconds.
 
 ## The worker API
 
@@ -272,5 +176,6 @@ A job queued from the command line gets its commit status from the backend withi
 | `/v1/heartbeat` | `job_id, stats` (every 30 s) | `cancel` |
 | `/v1/log` | `job_id, text` (every 5 s) | `ok` |
 | `/v1/result` | `job_id, exit_code, summary, result` (the result JSON) | `ok` |
-
-Later (step 5): merge rounds split their checks across machines.
+| `/v1/upload` | a finished build, in 4 MiB chunks (only for the machine's own `package` job) | `ok` |
+| `/v1/assets/list`, `/v1/assets/read` | the shared asset folders (above) | files, or one chunk |
+| `/v1/report` | what the machine is doing, from `reporter.py` | `ok` |
