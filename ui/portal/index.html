@@ -35,6 +35,12 @@
   <p class="fresh" id="fresh" role="status" aria-live="polite"><span class="dot" id="dot" aria-hidden="true"></span><span id="freshText">Connecting…</span></p>
 </header>
 
+<nav class="tabs" aria-label="Sections">
+  <button type="button" id="tab-live" data-tab="live" aria-current="page"><span class="glyph" aria-hidden="true">◉</span>Live<span class="badge" id="b-live" hidden></span></button>
+  <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds<span class="badge" id="b-builds" hidden></span></button>
+  <button type="button" id="tab-activity" data-tab="activity"><span class="glyph" aria-hidden="true">◷</span>Activity<span class="badge" id="b-activity" hidden></span></button>
+</nav>
+
 <main id="main">
   <div id="alerts"></div>
 
@@ -42,37 +48,43 @@
     <div class="alert bad" id="liveStale" role="alert" hidden></div>
     <div class="stats" id="liveStats"></div>
     <div class="filters" id="liveRepos" role="group" aria-label="Show one project" hidden></div>
+    <section class="card" id="liveBuildingCard" aria-labelledby="h-lbuild"><h2 id="h-lbuild">Building now <span class="count" id="n-lbuild"></span></h2><ul class="rows acts" id="liveBuilding"></ul></section>
     <section class="card" id="liveBlockersCard" aria-labelledby="h-lblock"><h2 id="h-lblock">Stuck or blocked <span class="count" id="n-lblock"></span></h2><ul class="rows" id="liveBlockers"></ul></section>
-    <section class="card" aria-labelledby="h-lmach"><h2 id="h-lmach">Machines</h2><ul class="rows" id="liveMachines"></ul></section>
-    <section class="card" aria-labelledby="h-lrun"><h2 id="h-lrun">Runners <span class="count" id="n-lrun"></span></h2><p class="sub" id="liveRunnerNote" hidden></p><ul class="rows" id="liveRunners"></ul></section>
-    <section class="card" aria-labelledby="h-lact"><h2 id="h-lact">GitHub Actions</h2><ul class="rows" id="liveRuns"></ul></section>
-    <section class="card" aria-labelledby="h-lpr"><h2 id="h-lpr">Open pull requests <span class="count" id="n-lpr"></span></h2><ul class="rows" id="livePrs"></ul></section>
-    <section class="card" aria-labelledby="h-liss"><h2 id="h-liss">Tasks and issues <span class="count" id="n-liss"></span></h2><ul class="rows" id="liveIssues"></ul></section>
+    <section class="card" id="liveMachinesCard" aria-labelledby="h-lmach"><h2 id="h-lmach">Machines</h2><ul class="rows" id="liveMachines"></ul></section>
+    <section class="card" id="liveRunnersCard" aria-labelledby="h-lrun"><h2 id="h-lrun">Runners <span class="count" id="n-lrun"></span></h2><p class="sub" id="liveRunnerNote" hidden></p><ul class="rows" id="liveRunners"></ul></section>
+    <section class="card" id="liveRunsCard" aria-labelledby="h-lact"><h2 id="h-lact">GitHub Actions</h2><ul class="rows" id="liveRuns"></ul></section>
+    <section class="card" id="livePrsCard" aria-labelledby="h-lpr"><h2 id="h-lpr">Open pull requests <span class="count" id="n-lpr"></span></h2><ul class="rows" id="livePrs"></ul></section>
+    <section class="card" id="liveIssuesCard" aria-labelledby="h-liss"><h2 id="h-liss">Tasks and issues <span class="count" id="n-liss"></span></h2><ul class="rows" id="liveIssues"></ul></section>
     <p class="fine" id="liveFoot"></p>
   </section>
 
   <section class="view" id="view-builds" aria-labelledby="tab-builds" hidden>
-    <section class="card desk" id="newBuildCard" aria-labelledby="h-newbuild" hidden>
-      <h2 id="h-newbuild">Queue a build</h2>
+    <section class="card" id="buildsOpenCard" aria-labelledby="h-bnow"><h2 id="h-bnow">Running and coming up <span class="count" id="n-bnow"></span></h2><ul class="rows" id="buildsOpen"></ul></section>
+    <section class="card ctrl" id="newBuildCard" aria-labelledby="h-newbuild" hidden>
+      <h2 id="h-newbuild">Start a build</h2>
       <form id="newBuild" class="form">
-        <label>Version <input name="version" id="bVersion" required pattern="\d+\.\d+\.\d+" placeholder="0.4.5" autocomplete="off" inputmode="decimal"></label>
-        <label>Branch or commit <input name="ref" id="bRef" autocomplete="off" spellcheck="false"></label>
-        <label>When <input name="at" id="bAt" type="datetime-local"></label>
-        <label class="check"><input type="checkbox" name="daily" id="bDaily"> Every day</label>
-        <label class="check"><input type="checkbox" name="tests" id="bTests"> Run the Full tests first</label>
-        <div class="actions"><button type="submit" class="primary">Queue build</button><span class="msg" id="bMsg" role="status" aria-live="polite"></span></div>
+        <div class="form-row">
+          <label>Version <input name="version" id="bVersion" required pattern="\d+\.\d+\.\d+" placeholder="0.4.5" autocomplete="off" inputmode="decimal"></label>
+          <label>Branch or commit <input name="ref" id="bRef" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <details class="more"><summary>Later, daily or with Full tests</summary>
+          <label>When (empty = now) <input name="at" id="bAt" type="datetime-local"></label>
+          <label class="check"><input type="checkbox" name="daily" id="bDaily"> Every day</label>
+          <label class="check"><input type="checkbox" name="tests" id="bTests"> Run the Full tests first</label>
+        </details>
+        <div class="actions"><button type="submit" class="primary">Start build</button><span class="msg" id="bMsg" role="status" aria-live="polite"></span></div>
       </form>
     </section>
-    <section class="card" aria-labelledby="h-builds"><h2 id="h-builds">Builds</h2><ul class="rows" id="builds"></ul></section>
-    <section class="card" aria-labelledby="h-bmach"><h2 id="h-bmach">Build machines</h2>
-      <div class="alert" id="heldNote" role="status" hidden><strong>All machines paused</strong>Running jobs finish; nothing new starts until you resume.</div>
-      <div class="toolbar ctrl" hidden><button type="button" class="small" id="holdAll">Pause all machines</button></div>
-      <ul class="rows" id="buildMachines"></ul></section>
-    <section class="card" aria-labelledby="h-jobs"><h2 id="h-jobs">Machine jobs</h2><ul class="rows" id="jobs"></ul></section>
+    <section class="card" id="buildsDoneCard" aria-labelledby="h-bdone"><h2 id="h-bdone">Finished builds <span class="count" id="n-bdone"></span></h2><ul class="rows" id="buildsDone"></ul></section>
+    <section class="card" id="buildMachinesCard" aria-labelledby="h-bmach"><h2 id="h-bmach">Build machines</h2>
+      <div class="alert" id="heldNote" role="status" hidden><strong>All machines paused</strong>Running builds finish; nothing new starts until you resume.</div>
+      <ul class="rows" id="buildMachines"></ul>
+      <div class="toolbar ctrl" hidden><button type="button" class="small" id="holdAll">Pause all machines</button></div></section>
+    <section class="card" id="otherJobsCard" aria-labelledby="h-jobs" hidden><h2 id="h-jobs">Other machine jobs</h2><ul class="rows" id="jobs"></ul></section>
   </section>
 
   <section class="view" id="view-activity" aria-labelledby="tab-activity" hidden>
-    <section class="card" aria-labelledby="h-health"><h2 id="h-health">Fletchery</h2><ul class="rows" id="health"></ul>
+    <section class="card" id="healthCard" aria-labelledby="h-health"><h2 id="h-health">Fletchery</h2><ul class="rows" id="health"></ul>
       <div class="toolbar">
         <button type="button" class="small" id="reload">Reload the page</button>
         <button type="button" class="small ctrl" id="checkNow" hidden>Check GitHub now</button>
@@ -80,17 +92,12 @@
         <span class="msg" id="rMsg" role="status" aria-live="polite"></span>
       </div>
     </section>
-    <section class="card" aria-labelledby="h-log"><h2 id="h-log">Activity</h2><ol class="log" id="log"></ol></section>
+    <section class="card" id="logCard" aria-labelledby="h-log"><h2 id="h-log">Activity</h2><ol class="log" id="log"></ol></section>
   </section>
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-<nav class="tabs" aria-label="Sections">
-  <button type="button" id="tab-live" data-tab="live" aria-current="page"><span class="glyph" aria-hidden="true">◉</span>Live<span class="badge" id="b-live" hidden></span></button>
-  <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds<span class="badge" id="b-builds" hidden></span></button>
-  <button type="button" id="tab-activity" data-tab="activity"><span class="glyph" aria-hidden="true">◷</span>Activity<span class="badge" id="b-activity" hidden></span></button>
-</nav>
 
 <dialog id="notify" aria-labelledby="h-notify">
   <h2 id="h-notify">Notifications</h2>
@@ -110,6 +117,7 @@
   <p class="fine">On the phone, Fletchery is read-only: builds are queued from the window on the PC.</p>
 </dialog>
 
+<script src="kit.js"></script>
 <script src="portal.js"></script>
 <script src="live.js"></script>
 </body>

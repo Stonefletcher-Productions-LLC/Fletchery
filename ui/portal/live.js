@@ -25,9 +25,12 @@
   }
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
+  // How many rows each list shows before "Show N more" (kit.js).
+  const CAP = {liveBuilding: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
   function fill(node, rows, empty, more) {
     const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
     node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
+    if (CAP[node.id] && window.fletcheryKit) window.fletcheryKit.cap(node, CAP[node.id]);
   }
   function span(seconds) {
     const s = Math.max(0, Math.round(seconds));
@@ -66,8 +69,9 @@
   }
   function blockerRow(b) {
     const label = {feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked'}[b.kind] || 'Look';
-    return el('li', {class: 'blk'}, el('span', {class: 'chip needs', text: label}), a(b.url, 'title', b.title),
-      b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null);
+    return el('li', {class: 'blk'}, el('span', {class: 'chip needs', text: label}),
+      el('div', {class: 'what'}, a(b.url, 't', b.title),
+        b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null));
   }
   function actRow(x) {
     const k = KIND[x.kind] ? x.kind : 'working';
@@ -181,6 +185,10 @@
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';
     fill($('liveBlockers'), blk.map(blockerRow), 'Nothing stuck. Everything is moving or idle.');
+    const building = full.building || [];
+    $('n-lbuild').textContent = building.length ? '(' + building.length + ')' : '';
+    $('liveBuildingCard').classList.toggle('calm', !building.length);
+    fill($('liveBuilding'), building.map(x => actRow({...x, detail: join(x.machine, x.detail).join(' · ')})), 'Nothing is building right now.');
     fill($('liveMachines'), (d.machines || []).map(machineRow), 'No machine has reported yet, and no runner is registered.');
     const note = (d.fresh || {}).runner_note;
     $('liveRunnerNote').hidden = !note; $('liveRunnerNote').textContent = note || '';

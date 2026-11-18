@@ -2,9 +2,9 @@
 // saved on the phone (Tailscale still connecting, PC asleep), and shows notifications. Network first since 2026-11-18:
 // cache first kept phones on an old page for several opens after an update. Status is never saved here:
 // the page asks the PC for it after it has opened.
-const CACHE = 'fletchery-portal-v7';
+const CACHE = 'fletchery-portal-v8';
 const NET_MS = 4000;
-const SHELL = ['/', '/portal.css', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
+const SHELL = ['/', '/portal.css', '/kit.js', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()).catch(() => self.skipWaiting()));

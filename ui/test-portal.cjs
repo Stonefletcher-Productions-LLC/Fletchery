@@ -48,7 +48,7 @@ const server = http.createServer((req, res) => {
       const parsed = JSON.parse(body || '{}');
       if (url.startsWith('/api/push')) return send(200, '{}', 'application/json');
       posts.push([url, parsed]);
-      if (mode === 'readonly' || (mode === 'phone' && url === '/api/builds/add')) return send(403, JSON.stringify({error: 'Do this in the Fletchery window on the PC.'}), 'application/json');
+      if (mode === 'readonly') return send(403, JSON.stringify({error: 'Do this in the Fletchery window on the PC.'}), 'application/json');
       if (parsed.id === 'nope') return send(400, JSON.stringify({error: 'Build not found.'}), 'application/json');
       send(200, JSON.stringify(url === '/api/builds/add' ? {...parsed, id: 'b9'} : {ok: true}), 'application/json');
     });
@@ -101,7 +101,19 @@ const server = http.createServer((req, res) => {
     for (const box of await page.$$eval('.tabs button, #bell, #refreshTop', list => list.map(b => b.getBoundingClientRect().toJSON()))) {
       assert.ok(box.width >= 44 && box.height >= 44, 'touch target ' + JSON.stringify(box));
     }
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png'), fullPage: true});
+    // Every card folds from its heading, and the page remembers it; long lists show a few and "Show N more".
+    assert.equal(await page.getAttribute('#h-liss .fold', 'aria-expanded'), 'false', 'issues start folded');
+    await page.click('#h-lblock .fold');
+    assert.equal(await page.isVisible('#liveBlockers'), false);
+    assert.ok(await page.evaluate(() => JSON.parse(localStorage.getItem('fletchery-folded')).includes('h-lblock')));
+    await page.click('#h-lblock .fold');
+    assert.equal(await page.isVisible('#liveBlockers'), true);
+    assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 4);
+    assert.match(await page.textContent('#liveBlockers .more-btn'), /Show 2 more/);
+    await page.click('#liveBlockers .more-btn');
+    assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 6);
+    await page.click('#liveBlockers .more-btn');
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png')});
 
     // GitHub Actions controls on Live: cancel a run that is going, after a confirm.
     await page.waitForSelector('#liveRuns button:has-text("Cancel run")');
@@ -117,39 +129,49 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveStale'), /has not had fresh data for 5 min/);
     liveAt = new Date().toISOString();
 
-    // Builds on the phone: every control but a new build.
+    // Live shows every build going on, on any machine, at the top.
+    assert.match(await page.textContent('#liveBuilding'), /PR check · PR #12[\s\S]*Gaming PC/);
+
+    // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');
-    await page.waitForSelector('#builds .title');
+    await page.waitForSelector('#buildsOpen .title');
     assert.equal(await page.textContent('#project'), 'Harbor');
-    assert.equal(await page.isVisible('#newBuildCard'), false, 'a new build is queued in the window');
-    assert.deepEqual(await page.$$eval('#builds .links a', l => l.map(a => a.textContent + ' ' + a.href)),
+    assert.match(await page.textContent('#buildsOpen'), /0\.4\.6[\s\S]*Building[\s\S]*Package 0\.4\.6[\s\S]*0\.4\.7[\s\S]*Scheduled/);
+    assert.equal(await page.isVisible('#newBuildCard'), true);
+    assert.equal(await page.isVisible('#bAt'), false, 'later, daily and tests fold away');
+    assert.deepEqual(await page.$$eval('#buildsDone .links a', l => l.map(a => a.textContent + ' ' + a.href)),
       ['GitHub download ' + gh + '/releases/tag/build-0.4.5', 'Google Drive https://drive.google.com/file/d/example']);
-    assert.match(await page.textContent('#builds'), /0\.4\.4[\s\S]*Failed[\s\S]*Compile failed in <Game>/);
+    assert.match(await page.textContent('#buildsDone'), /0\.4\.4[\s\S]*Failed[\s\S]*Compile failed in <Game>/);
     const buttons = sel => page.$$eval(sel + ' button', l => l.map(b => b.textContent));
-    assert.deepEqual(await buttons('#builds'), ['Stop', 'Run once now', 'Stop repeating', 'Build again']);
-    await page.click('#builds button:has-text("Build again")');
+    assert.deepEqual(await buttons('#buildsOpen'), ['Stop', 'Run once now', 'Stop repeating']);
+    assert.deepEqual(await buttons('#buildsDone'), ['Build again']);
+    await page.fill('#bVersion', '0.4.9');
+    await page.click('#newBuild button[type=submit]');
+    await page.waitForFunction(() => /0\.4\.9 started/.test(document.getElementById('bMsg').textContent));
+    assert.deepEqual(lastPost(), ['/api/builds/add', {version: '0.4.9', ref: '', at: '', repeat: '', tests: ''}]);
+    await page.click('#buildsDone button:has-text("Build again")');
     await page.waitForFunction(() => /queued again/.test(document.getElementById('toast').textContent));
     assert.deepEqual(lastPost(), ['/api/builds/retry', {id: 'b1'}]);
-    await page.click('#builds button:has-text("Stop") >> nth=0');
-    await page.waitForFunction(n => window.__posts !== n, 0).catch(() => {});
+    await page.click('#buildsOpen button:has-text("Stop") >> nth=0');
+    await page.waitForFunction(() => /Done/.test(document.getElementById('toast').textContent));
     assert.deepEqual(lastPost(), ['/api/builds/cancel', {id: 'b3'}]);
     // Machines: pause one, pause all, and machine jobs: stop, run again, log.
-    assert.deepEqual(await buttons('#buildMachines'), ['Pause builds', 'Resume builds']);
-    assert.match(await page.textContent('#buildMachines'), /ALEX-PC[\s\S]*Builds paused/);
-    await page.click('#buildMachines button:has-text("Resume builds")');
+    assert.deepEqual(await buttons('#buildMachines'), ['Pause', 'Resume']);
+    assert.match(await page.textContent('#buildMachines'), /NODE-01[\s\S]*Building 0\.4\.6[\s\S]*ALEX-PC[\s\S]*Paused/);
+    await page.click('#buildMachines button:has-text("Resume")');
     await page.waitForFunction(() => /takes builds again/.test(document.getElementById('toast').textContent));
     assert.deepEqual(lastPost(), ['/api/machines/pause', {name: 'ALEX-PC', kind: 'builds', on: false}]);
     assert.equal(await page.isVisible('#holdAll'), true);
     await page.click('#holdAll');
     await page.waitForFunction(() => /All machines paused/.test(document.getElementById('toast').textContent));
     assert.deepEqual(lastPost(), ['/api/machines/hold', {on: true}]);
-    assert.deepEqual(await buttons('#jobs'), ['Stop', 'Run again']);
-    assert.equal(await page.getAttribute('#jobs a.small-link', 'href'), '/api/jobs/log?id=7');
-    await page.click('#jobs button:has-text("Stop")');
-    await page.waitForFunction(() => /next check-in/.test(document.getElementById('toast').textContent));
-    assert.deepEqual(lastPost(), ['/api/jobs/cancel', {id: 7}]);
+    assert.equal(await page.getAttribute('#buildsOpen a.small-link', 'href'), '/api/jobs/log?id=7');
+    assert.deepEqual(await buttons('#jobs'), ['Run again']);   // only jobs that are not builds have their own list
+    await page.click('#jobs button:has-text("Run again")');
+    await page.waitForFunction(() => /Queued again/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/jobs/retry', {id: 6}]);
     assert.ok(await fits(), 'Builds fits the phone');
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-builds.png'), fullPage: true});
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-builds.png')});
 
     // A control that fails says why, in red.
     await page.evaluate(() => window.fletcheryAct('/api/builds/now', {id: 'nope'}, 'x'));
@@ -170,7 +192,7 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => /Restarting/.test(document.getElementById('rMsg').textContent));
     assert.deepEqual(lastPost(), ['/api/restart', {}]);
     assert.ok(await fits(), 'Activity fits the phone');
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-activity.png'), fullPage: true});
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-activity.png')});
 
     // A reload on a tab comes back to that tab.
     await page.reload();
@@ -189,7 +211,7 @@ const server = http.createServer((req, res) => {
     await page.click('#tab-builds');
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
-    assert.match(await page.textContent('#builds'), /0\.4\.6/);
+    assert.match(await page.textContent('#buildsOpen'), /0\.4\.6/);
 
     // Opening with the PC out of reach (Tailscale still connecting): the page comes from the copy saved on the phone
     // at once, with what it last showed, and says it cannot reach the PC.
@@ -201,7 +223,7 @@ const server = http.createServer((req, res) => {
     off = true;
     await page.reload();
     assert.match(await page.textContent('#freshText'), /Showing what it said/);
-    assert.match(await page.textContent('#builds'), /0\.4\.6/);
+    assert.match(await page.textContent('#buildsOpen'), /0\.4\.6/);
     await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
     off = false;
     down = false;
@@ -212,8 +234,9 @@ const server = http.createServer((req, res) => {
     const ro = await context.newPage();
     watch(ro);
     await ro.goto(base + '/#builds');
-    await ro.waitForSelector('#builds .title');
-    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent).length), 0);
+    await ro.waitForSelector('#buildsOpen .title');
+    assert.equal(await ro.isVisible('#newBuildCard'), false);
+    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent && !b.classList.contains('fold')).length), 0);
     await ro.click('#tab-activity');
     assert.equal(await ro.isVisible('#restart'), false);
     assert.equal(await ro.isVisible('#reload'), true);
@@ -230,13 +253,13 @@ const server = http.createServer((req, res) => {
     const tab = await safari.newPage();
     watch(tab);
     await tab.goto(base + '/#builds');
-    await tab.waitForSelector('#builds .title');
+    await tab.waitForSelector('#buildsOpen .title');
     await tab.click('#bell');
     await tab.waitForSelector('#installSteps:not([hidden])');
     assert.match(await tab.textContent('#installSteps'), /Add to Home Screen/);
     if (shots) { await tab.click('#notifyClose'); await tab.click('#tab-live'); await tab.waitForSelector('#liveMachines .m-name'); await tab.screenshot({path: path.join(shots, 'portal-live-dark.png')}); }
 
-    // The desktop window: wide layout, tabs on top, and the form for a new build.
+    // The desktop window: one row of tabs at the top, never the phone's bar at the bottom, at any width.
     mode = 'desktop';
     const desk = await browser.newContext({viewport: {width: 1400, height: 1000}, deviceScaleFactor: shots ? 2 : 1, colorScheme: 'light'});
     const win = await desk.newPage();
@@ -245,14 +268,20 @@ const server = http.createServer((req, res) => {
     await win.waitForSelector('#newBuildCard:not([hidden])');
     assert.equal(await win.evaluate(() => document.body.classList.contains('desktop')), true);
     assert.equal(await win.isVisible('#bell'), false);
+    const tabsTop = () => win.evaluate(() => { const r = document.querySelector('.tabs').getBoundingClientRect(); return r.top < 200 && r.bottom < innerHeight - 100; });
+    assert.ok(await tabsTop(), 'tabs at the top');
+    await win.setViewportSize({width: 700, height: 900});
+    assert.ok(await tabsTop(), 'tabs at the top when narrow too');
+    await win.setViewportSize({width: 1400, height: 1000});
     await win.fill('#bVersion', '0.4.8');
+    await win.click('#newBuild summary');
     await win.check('#bDaily');
     await win.click('#newBuild button[type=submit]');
-    await win.waitForFunction(() => /0\.4\.8 queued/.test(document.getElementById('bMsg').textContent));
+    await win.waitForFunction(() => /0\.4\.8 started/.test(document.getElementById('bMsg').textContent));
     assert.deepEqual(lastPost(), ['/api/builds/add', {version: '0.4.8', ref: '', at: '', repeat: 'daily', tests: ''}]);
     if (shots) {
       await win.reload();
-      await win.waitForSelector('#builds .title');
+      await win.waitForSelector('#buildsOpen .title');
       await win.screenshot({path: path.join(shots, 'desktop-builds.png')});
       await win.click('#tab-live');
       await win.waitForSelector('#liveMachines .m-name');

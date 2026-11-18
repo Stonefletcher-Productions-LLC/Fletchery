@@ -3,9 +3,9 @@
   - The desktop window (Fletchery.exe) opens http://127.0.0.1:<dashboardPort>. Only this PC can reach it. It has every
     control: queue, start, stop and re-run builds and machine jobs, pause one machine or all of them, cancel or re-run
     GitHub Actions runs, check GitHub now, restart the backend.
-  - The phone opens the portal port through Tailscale Serve. It shows the same tabs and has the same controls, except
-    queueing a new build, for the accounts in `users` only (`"controls": false` makes it read-only). No file path from
-    this PC is in what it serves.
+  - The phone opens the portal port through Tailscale Serve. It shows the same tabs and has the same controls, starting
+    builds included, for the accounts in `users` only (`"controls": false` makes it read-only). No file path from this
+    PC is in what it serves.
 
 How the phone reaches it. The portal listens on this machine only (127.0.0.1). Tailscale Serve puts it on the private
 network with a real HTTPS certificate:
@@ -43,12 +43,12 @@ HERE = Path(__file__).parent
 UI = HERE.parent / "ui" / "portal"
 MAX_BODY = 8 * 1024
 DEFAULT_PORT = 8772
-DESKTOP_ONLY = ("/api/builds/add",)   # what the phone never does, even with controls on
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/index.html": ("index.html", "text/html; charset=utf-8"),
           "/portal.css": ("portal.css", "text/css; charset=utf-8"),
           "/portal.js": ("portal.js", "text/javascript; charset=utf-8"),
           "/live.js": ("live.js", "text/javascript; charset=utf-8"),
+          "/kit.js": ("kit.js", "text/javascript; charset=utf-8"),
           "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
           "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
           "/icon-180.png": ("icon-180.png", "image/png"),
@@ -177,7 +177,7 @@ def _scrub(v) -> str:
 class Portal:
     """`status_fn` is the backend's status (app.py App.status). `desktop_port` (0 = none) serves the same page to the
     desktop window on 127.0.0.1, where `actions` ({path: fn(data) -> dict}) may be posted; `conf["port"]` (0 = none)
-    is the phone's portal, which may post them too unless `conf["controls"]` is false (never DESKTOP_ONLY ones). Each
+    is the phone's portal, which may post them too unless `conf["controls"]` is false. Each
     action gets `_from` in its data: "the window" or "the phone (<login>)", for the activity log."""
 
     def __init__(self, status_fn, conf: dict, state_dir=None, log=None, repo: str = "", host: str = "127.0.0.1",
@@ -271,8 +271,6 @@ class Portal:
         if self.is_desktop(headers, port):
             return True, "the window"
         if port != self.port or not self.controls:
-            return False, ""
-        if path in DESKTOP_ONLY:
             return False, ""
         login = (headers.get("Tailscale-User-Login") or "").strip().lower()
         return True, f"the phone ({login})" if login else "the portal on this PC"
