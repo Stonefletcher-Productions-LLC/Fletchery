@@ -47,7 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-import presence  # beside this file, like every Fletchery module
+import pipeline  # beside this file, like every Fletchery module
+import presence
 
 API = "https://api.github.com"
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
@@ -350,7 +351,7 @@ def _runner_job(run: dict) -> dict:
     """What a runner is doing, from its run row: enough to see a step that runs too long or a run nobody needs."""
     return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
             "step": run["step"], "step_started": run["step_started"], "url": run["url"], "started": run["started"],
-            "status": run["status"], "pr_closed": bool(run.get("pr_closed"))}
+            "status": run["status"], "pr_closed": bool(run.get("pr_closed")), "pr": run["pr"]}
 
 
 class DevWatch:
@@ -411,6 +412,11 @@ class DevWatch:
                 self.agent_issues[str(repo).lower()] = number
             else:
                 self.log(f"live: agentIssues entry {str(repo)[:80]!r} ignored: give \"Owner/Repo\": <issue number>")
+        # Where each change is in the whole process, and how long its steps usually take (pipeline.py).
+        self.rules = pipeline.Rules(conf.get("pipeline"))
+        self.history = pipeline.History(Path(state_dir) / "step-times.json" if state_dir else None, log=self.log)
+        self.merged: dict[str, list] = {}           # repo -> PRs merged in the last day (followed through staging)
+        self.releases: dict[str, list] = {}         # repo -> its latest releases
         self.presence = presence.Presence(Path(state_dir) / "agent-presence.json" if state_dir else None, clean=_scrub,
                                           active_seconds=self.agent_active, log=self.log)
 
@@ -466,17 +472,21 @@ class DevWatch:
             # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
             places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
-        runs, jobs, prs, checks, issues, pushes, closed = {}, {}, {}, {}, {}, {}, {}
+        runs, jobs, prs, checks, issues, pushes, closed, merged, releases = {}, {}, {}, {}, {}, {}, {}, {}, {}
         errors = [g["error"] for g in got.values() if g.get("error")]
         for repo, g in got.items():
             runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
-            closed[repo] = g.get("closed") or []
+            closed[repo], merged[repo], releases[repo] = g.get("closed") or [], g.get("merged") or [], g.get("releases") or []
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
-            self.closed = closed
+            self.closed, self.merged, self.releases = closed, merged, releases
             self.runners = {k: v for k, v in found.items() if v is not None}
+        try:
+            self._learn()
+        except Exception as e:      # step times are a nicety: never lose the feed over them
+            self.log(f"live: step times: {type(e).__name__}: {e}")
         busy = any(r.get("status") in ACTIVE for rs in runs.values() for r in rs) or any(
             (rep["data"] or {}).get("busy") for rep in list(self.reports.values()))
         self.interval = self.fast if busy else self.slow
@@ -534,13 +544,14 @@ class DevWatch:
             with self._lock:
                 old = {"runs": self.runs.get(repo, []), "prs": self.prs.get(repo, []), "issues": self.issues.get(repo, []),
                        "pushes": self.pushes.get(repo, []), "closed": self.closed.get(repo, []),
+                       "merged": self.merged.get(repo, []), "releases": self.releases.get(repo, []),
                        "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
                        "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
             old["error"] = f"{repo}: {e}"
             return old
 
     def _read_repo(self, repo: str) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": []}
+        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
         out["runs"] = runs
         for run in runs:
@@ -582,6 +593,12 @@ class DevWatch:
             branch = str((p.get("head") or {}).get("ref") or "")
             if isinstance(p, dict) and p.get("closed_at") and _agent_of(branch, ""):
                 out["closed"].append({"branch": _text(branch, 120), "at": _text(p.get("closed_at"), 30), "number": p.get("number")})
+            if isinstance(p, dict) and p.get("merged_at") and _age(p["merged_at"]) < pipeline.MERGED_HOURS * 3600:
+                out["merged"].append({k: p.get(k) for k in ("number", "title", "html_url", "merged_at", "base", "head", "labels")})
+        # Releases: the last step of a change's road. One call, ETag; only asked while something merged recently.
+        if out["merged"]:
+            out["releases"] = [r for r in self._try(f"repos/{repo}/releases?per_page=5") or []
+                               if isinstance(r, dict) and not r.get("draft")]
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
         self._read_status_issue(repo)
@@ -804,6 +821,8 @@ class DevWatch:
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
         agents = self._agents(at, prs_out, runs_out, issues_out)
+        changes = self._changes(at, prs_by, checks_by, runs_by, jobs_by)
+        self._link_activities(machines_out, changes)
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
         # Everything building, checking, testing, merging or importing right now, on any machine, in one list.
         building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a["kind"] in BUILD_KINDS]
@@ -816,12 +835,80 @@ class DevWatch:
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building),
-                       "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"])},
+                       "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
+                       "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
+            "changes": changes[:60],
             "building": building[:30],
             "blockers": blockers[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
+
+    def _runner_machine(self, runner_name: str) -> str:
+        return self.display(self.machine_of(runner_name)) if runner_name else ""
+
+    def _learn(self) -> None:
+        """Add what finished since the last poll to the step times (pipeline.History), then save them."""
+        with self._lock:
+            prs_by, checks_by, runs_by, jobs_by, merged_by = self.prs, self.checks, self.runs, self.jobs, self.merged
+        jobs = {j.get("id"): j for js in jobs_by.values() for j in js if isinstance(j, dict)}
+        for repo, prs in prs_by.items():
+            for p in prs:
+                sha = (p.get("head") or {}).get("sha")
+                cr = _latest_checks(checks_by.get((repo, sha)) or [])
+                if not cr:
+                    continue
+                kind = self.rules.kind(p.get("title"), [x.get("name") for x in p.get("labels") or [] if isinstance(x, dict)],
+                                       (p.get("head") or {}).get("ref"))
+                pipeline.learn_checks(self.history, repo, kind, sha, [c for c in cr if self.rules.is_quick(c.get("name"))],
+                                      [c for c in cr if not self.rules.is_quick(c.get("name"))], jobs, self._runner_machine)
+            bases = {str((p.get("base") or {}).get("ref") or "") for p in list(prs) + list(merged_by.get(repo, []))} - {""}
+            for r in runs_by.get(repo, []):
+                if r.get("event") == "push" and r.get("head_branch") in bases:
+                    pipeline.learn_staging(self.history, repo, r, jobs_by.get(r.get("id")) or [])
+        self.history.save()
+
+    def _changes(self, at: float, prs_by: dict, checks_by: dict, runs_by: dict, jobs_by: dict) -> list:
+        """Every open PR, and every PR merged in the last day until its staging build and release, with its step."""
+        with self._lock:
+            merged_by, releases_by = self.merged, self.releases
+        jobs = {j.get("id"): j for js in jobs_by.values() for j in js if isinstance(j, dict)}
+        out = []
+        for repo, prs in prs_by.items():
+            for p in prs:
+                cr = _latest_checks(checks_by.get((repo, (p.get("head") or {}).get("sha"))) or [])
+                out.append(pipeline.open_change(self.history, self.rules, repo, p, cr, jobs, self._runner_machine, at))
+        for repo, ms in merged_by.items():
+            for p in ms:
+                c = pipeline.merged_change(self.history, self.rules, repo, p, runs_by.get(repo, []), jobs_by,
+                                           releases_by.get(repo, []), self._runner_machine, at)
+                if c:
+                    out.append(c)
+        order = {"failed": 0, "rerun": 1, "running": 2, "queued": 3, "waiting": 4, "done": 5}
+        out.sort(key=lambda c: (order.get(c["status"], 4), c["stage"] == "written", -_ts(c["updated"])))
+        return out
+
+    @staticmethod
+    def _link_activities(machines: list, changes: list) -> None:
+        """Tie what a machine does to the change it is for: its runner's PR or staging run, or "#123" in a lease's name."""
+        by_key = {c["key"]: c for c in changes}
+        by_run = {c["run"]: c for c in changes if c.get("run")}
+        by_num: dict = {}
+        for c in changes:
+            by_num.setdefault(c["number"], []).append(c)
+        for m in machines:
+            for a in m["activities"]:
+                c = None
+                if a.get("repo") and a.get("pr"):
+                    c = by_key.get(f"{a['repo']}#{a['pr']}")
+                if c is None and a.get("run"):
+                    c = by_run.get(a["run"])
+                if c is None and a.get("kind") != "queued":
+                    found = re.search(r"#(\d{1,9})\b", a.get("title") or "")
+                    hits = by_num.get(int(found.group(1)), []) if found else []
+                    c = hits[0] if len(hits) == 1 else None
+                if c is not None:
+                    a["change"] = c["key"]
 
     def _agents(self, at: float, prs: list, runs: list, issues: list = ()) -> list:
         """The coding agents (Claude, Codex), one row each, newest first; `active` marks those working now.
@@ -1029,7 +1116,8 @@ class DevWatch:
                     m["activities"].insert(0, {"kind": "check" if "check" in r["job"]["title"].lower() else "working",
                                                "title": r["job"]["title"], "since": r["job"]["started"],
                                                "detail": (f"step: {r['job']['step']} · " if r["job"]["step"] else "") + r["job"]["repo"],
-                                               "url": r["job"]["url"]})
+                                               "url": r["job"]["url"], "repo": r["job"]["repo"], "pr": r["job"]["pr"],
+                                               "run": r["job"]["id"]})
         if self.own_builds is not None:
             try:
                 own = list(self.own_builds() or [])

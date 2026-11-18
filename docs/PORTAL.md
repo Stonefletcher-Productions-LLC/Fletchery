@@ -128,7 +128,20 @@ Settings, all optional, under `workers.portal`:
 `owners` are the organisations and users whose repositories are watched (every repository pushed in the last
 `activeDays`); `exclude` drops some. `names` gives machines friendly names. `diskFreeGb` flags a machine with less free
 disk. `agentIssues` names each repository's status issue for cloud agents and `agentActiveMinutes` (15) how
-recent a heartbeat must be for the Agents card: see [AGENT-PRESENCE.md](AGENT-PRESENCE.md). `"live": false` turns it off. Runners are listed for each organisation and for each repository. Listing an
+recent a heartbeat must be for the Agents card: see [AGENT-PRESENCE.md](AGENT-PRESENCE.md).
+`pipeline` sets up the **Changes** card: `{"quick": ["^cheap", "lint"], "kinds": {"Town change": ["town", "road"]}}`
+(regular expressions for the quick checks; words in a PR's title, labels or branch that make it a kind of change with
+its own step times). `"live": false` turns it off.
+
+**Changes** shows every open PR, and every PR merged in the last day, on the same six steps: Written, Quick checks,
+Build & test, Into <base branch>, Staging build (the first push run on the base branch after the merge) and In a
+release. Each has badges (step, state, time left, kind), an **Overall** bar from the first check to a green staging
+build and a **This step** bar, both from how long those steps took before: the last 20 successful runs of each step,
+per repository, kind of change and machine, kept in `<state dir>/step-times.json`. Until a step has run a few times
+the card says it is still learning rather than guessing. A step past 1.5 times its usual time is flagged "Taking
+longer than usual". On the **Machines** card, work Fletchery can tie to a change (its runner's PR or staging run, or
+`#123` in a lease's name) is said in plain words ("Testing #12 Bus lines before it can merge") with the job's own
+steps as a segmented bar and a line on why that step exists. Code: `fletchery/pipeline.py`. Runners are listed for each organisation and for each repository. Listing an
 organisation's runners needs the `admin:org` scope on the PC's `gh` sign-in (`gh auth refresh -h github.com -s
 admin:org`); without it they still show through their jobs, and the list is asked again every hour.
 

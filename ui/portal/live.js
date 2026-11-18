@@ -26,7 +26,7 @@
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
   // How many rows each list shows before "Show N more" (kit.js).
-  const CAP = {liveBuilding: 6, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
+  const CAP = {liveBuilding: 6, liveChanges: 5, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
   function fill(node, rows, empty, more) {
     const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
     node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
@@ -102,6 +102,88 @@
         el('p', {class: 'sub'}, ...sep(join(said ? x.where : '', repo, said && CHECKS[x.checks] ? CHECKS[x.checks] : '',
           x.last ? [said ? 'checked in ' : 'active ', ago(x.last)] : '')))));
   }
+  // ---- where a change is in the whole process (pipeline.py) ----
+  const STATUS = {running: ['run', 'Running'], queued: ['wait', 'Queued'], waiting: ['wait', 'Waiting'], failed: ['bad', 'Failed'],
+                  rerun: ['needs', 'Needs re-run'], done: ['run', 'Done']};
+  // Widths through the style object: the page's CSP refuses style="" attributes.
+  const widthOf = (node, pct) => { node.style.width = pct + '%'; return node; };
+  const mins = s => s == null ? '' : s < 90 ? Math.max(1, Math.round(s / 60)) + ' min' : span(s);
+  const dotMark = {done: '✓', skipped: '–', failed: '!'};
+  function stepper(c) {
+    return el('ol', {class: 'stepper', 'aria-label': 'Steps'}, c.stages.map((st, i) =>
+      el('li', {class: 'st ' + st.state, 'aria-current': st.state === 'now' || st.state === 'failed' ? 'step' : null},
+        el('i', {'aria-hidden': 'true', text: dotMark[st.state] || String(i + 1)}), el('span', {text: st.label}))));
+  }
+  function stageLabel(c) { return (c.stages.find(st => st.id === c.stage) || {}).label || ''; }
+  function badges(c, opts) {
+    const st = STATUS[c.status] || ['', c.status], step = c.step || {};
+    const left = step.late ? null : step.left != null ? step.left : null;
+    return el('div', {class: 'badges'},
+      opts && opts.noStage ? null : el('span', {class: 'chip ' + st[0], text: stageLabel(c)}),
+      el('span', {class: 'chip ' + st[0], text: st[1]}),
+      step.late ? el('span', {class: 'chip needs', text: 'Taking longer than usual'}) : null,
+      c.status === 'running' || c.status === 'queued' ? (left != null ? el('span', {class: 'chip eta', text: '~' + mins(left) + ' left'}) : null) : null,
+      c.kind && c.kind !== 'Change' ? el('span', {class: 'chip kind', text: c.kind}) : null);
+  }
+  function meter(label, pct, value, cls) {
+    return el('div', {class: 'pb'}, el('span', {class: 'lbl', text: label}), el('b', {text: value}),
+      el('span', {class: 'meter ' + (cls || ''), role: 'progressbar', 'aria-label': label, 'aria-valuemin': '0', 'aria-valuemax': '100',
+                  'aria-valuenow': pct == null ? null : String(pct)},
+        widthOf(el('span'), pct == null ? 0 : Math.max(2, pct))));
+  }
+  function bars(c) {
+    const o = c.overall || {}, step = c.step;
+    const end = c.merged ? 'to the end of its staging build' : 'to a staging build';
+    const overall = o.pct != null
+      ? meter('Overall', o.pct, o.pct + '%' + (o.left ? ' · ~' + mins(o.left) + ' ' + end : ''), c.status === 'failed' ? 'bad' : '')
+      : el('p', {class: 'sub', text: 'Overall: still learning how long each step takes here.'});
+    let here = null;
+    if (step && step.avg) {
+      const cls = c.status === 'failed' ? 'bad' : step.late ? 'late' : 'step';
+      here = meter('This step', step.late ? 100 : step.pct, mins(step.elapsed) + ' of ~' + mins(step.avg), cls);
+    } else if (step && step.elapsed) {
+      here = el('p', {class: 'sub', text: 'This step: ' + mins(step.elapsed) + ' so far (no usual time yet)'});
+    }
+    return [overall, here];
+  }
+  function basis(c, onMachine) {
+    const step = c.step || {}, parts = step.parts || [], part = parts[step.part];
+    return el('p', {class: 'basis'}, ...sep(join(
+      onMachine ? '' : step.machine || '',
+      part && !onMachine ? 'now: ' + part.name + ' (' + (step.part + 1) + ' of ' + parts.length + ')' : '',
+      step.avg ? 'usually ' + mins(step.avg) + (c.kind && c.kind !== 'Change' && c.stage !== 'staging' ? ' for a ' + c.kind.toLowerCase() : '') + ' (' + step.samples + ' run' + (step.samples > 1 ? 's' : '') + ')' : '',
+      c.note || '')));
+  }
+  function changeRow(c) {
+    return el('li', {class: 'chg'},
+      a(c.url, 't', el('span', {class: 'num', text: '#' + c.number}), c.title),
+      stepper(c), badges(c), ...bars(c), basis(c));
+  }
+  // B: a machine's activity in plain words, when Fletchery knows which change it is for.
+  function sentence(c) {
+    const what = '#' + c.number + ' ' + c.title;
+    if (c.stage === 'staging') return ['Building ', el('b', {text: c.base}), ' with ', el('b', {text: what}), ' and everything merged before it'];
+    if (c.stage === 'quick') return ['Quick checks on ', el('b', {text: what})];
+    return ['Testing ', el('b', {text: what}), ' before it can merge'];
+  }
+  function partsBar(step) {
+    const parts = step.parts || [];
+    if (!parts.length) return null;
+    return el('div', {class: 'parts'},
+      el('div', {class: 'seg', 'aria-hidden': 'true'}, parts.map((p, i) => {
+        const pct = i === step.part && p.state === 'now' && p.avg && step.part_elapsed != null ? Math.min(100, Math.round(100 * step.part_elapsed / p.avg)) : 50;
+        return el('span', {class: p.state}, p.state === 'now' ? widthOf(el('i'), pct) : null);
+      })),
+      el('div', {class: 'legend'}, parts.map((p, i) => el('span', {class: i === step.part ? 'on' : '', text: p.name}))));
+  }
+  function machineAct(x, c) {
+    return el('li', {class: 'mact'},
+      el('p', {class: 'say'}, ...sentence(c)),
+      c.step ? partsBar(c.step) : null,
+      badges(c), ...bars(c), basis(c, true),
+      c.why ? el('p', {class: 'why', text: 'Why: ' + c.why}) : null);
+  }
+  let changeByKey = {};
   function machineRow(m) {
     const st = m.stats || {}, g = m.disk_guard;
     const bits = join(
@@ -116,7 +198,7 @@
         el('span', {class: 'm-stats', text: bits.join(' · ')})),
       g ? diskRow(g) : null,
       !m.online ? el('p', {class: 'sub'}, m.last_report ? ['Last report ', ago(m.last_report)] : 'No reporter on this machine yet') : null,
-      m.activities && m.activities.length ? el('ul', {class: 'acts'}, m.activities.map(actRow)) :
+      m.activities && m.activities.length ? el('ul', {class: 'acts'}, (seen => m.activities.map(x => { const c = changeByKey[x.change]; if (c && seen.has(c.key)) return null; if (c) seen.add(c.key); return c ? machineAct(x, c) : actRow(x); }))(new Set())) :
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
       tools.length ? el('p', {class: 'sub', text: 'Running: ' + tools.join(', ')}) : null,
       m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null);
@@ -218,6 +300,11 @@
     $('n-lbuild').textContent = building.length ? '(' + building.length + ')' : '';
     $('liveBuildingCard').classList.toggle('calm', !building.length);
     fill($('liveBuilding'), building.map(x => actRow({...x, detail: join(x.machine, x.detail).join(' · ')})), 'Nothing is building right now.');
+    changeByKey = Object.fromEntries((full.changes || []).map(c => [c.key, c]));
+    const changes = (full.changes || []).filter(mine);
+    $('n-lchg').textContent = changes.length ? '(' + changes.length + ')' : '';
+    $('liveChangesCard').classList.toggle('calm', !changes.length);
+    fill($('liveChanges'), changes.map(changeRow), 'No open or recently merged changes.');
     const agents = (full.agents || []).filter(x => !repo || x.repo === repo);
     $('n-lagents').textContent = agents.length ? '(' + agents.length + ')' : '';
     $('liveAgentsCard').classList.toggle('calm', !agents.length);
