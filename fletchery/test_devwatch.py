@@ -145,6 +145,14 @@ class Feed(unittest.TestCase):
                      "its process is gone"):
             self.assertIn(want, titles)
 
+    def test_runner_without_labels_joins_its_machine(self):
+        w = self.watch(**{f"orgs/{ORG}/actions/runners": {"runners": [{"id": 9, "name": "ALEX_GAMING_PC-unreal-pr", "status": "online", "busy": False, "labels": []}]}})
+        w.report("GAMING-PC", {"host": "Alex_Gaming_PC"})
+        s = w.snapshot()
+        pc = next(m for m in s["machines"] if m["host"] == "Alex_Gaming_PC")
+        self.assertIn("ALEX_GAMING_PC-unreal-pr", pc["runners"])
+        self.assertEqual(next(r for r in s["runners"] if r["name"] == "ALEX_GAMING_PC-unreal-pr")["machine"], "Alex_Gaming_PC")
+
     def test_bounds(self):
         w = devwatch.DevWatch({}, github=FakeGitHub({}))
         with self.assertRaises(ValueError):

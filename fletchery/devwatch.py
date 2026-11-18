@@ -648,7 +648,12 @@ class DevWatch:
                                 "runners": [], "version": _text(d.get("version"), 20)}
         for r in runners:
             key = r["machine"].lower()
-            m = next((v for k, v in by.items() if k == key or v["name"].lower() == key), None)
+            # A runner belongs to the reporting machine whose name it starts with (<COMPUTERNAME>-<label>), even when
+            # GitHub did not list the label that would have told us where the machine name ends.
+            m = next((v for k, v in by.items() if k == key or v["name"].lower() == key), None) or next(
+                (v for k, v in sorted(by.items(), key=lambda kv: -len(kv[0])) if r["name"].lower().startswith(k + "-")), None)
+            if m is not None and r["machine"].lower() not in (m["host"].lower(), m["name"].lower()):
+                r["machine"] = m["name"]
             if m is None:
                 m = by.setdefault(key, {"name": r["machine"], "host": r["machine"], "online": r["online"], "last_report": "",
                                         "busy": False, "stats": {}, "disks": [], "procs": {}, "activities": [], "runners": [], "version": ""})
