@@ -1,8 +1,14 @@
 name: Windows checks
+# Runs only when started by hand (Actions > Windows checks > Run workflow), since 2026-11-18. On GitHub's Windows
+# machines every push and PR cost double minutes: this workflow used $21.65 of the organisation's $18 of included
+# compute in November, and the $0 budget then blocked every Actions run in the organisation, LifeShare's PR checks
+# included. Fletchery's coder agents and merge rounds are retired (LifeShare Docs/BuildMachines.md, "Every PR is
+# checked on push"), so its code changes rarely. To turn the automatic checks back on, restore the two lines below.
+#   push:
+#     branches: [main, 'codex/**']
+#   pull_request:
 on:
-  push:
-    branches: [main, 'codex/**']
-  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
