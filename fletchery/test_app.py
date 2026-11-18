@@ -131,8 +131,12 @@ class AppTests(unittest.TestCase):
                 self.acts["/api/actions/cancel"](bad)
         self.acts["/api/actions/rerun"]({"repo": "example/harbor", "id": 5, "failed": True})
         self.acts["/api/actions/cancel"]({"repo": "example/harbor", "id": 6})
+        self.acts["/api/actions/rerun-job"]({"repo": "example/harbor", "id": 77})
+        with self.assertRaises(ValueError):
+            self.acts["/api/actions/rerun-job"]({"repo": "someone/else", "id": 77})
         self.assertEqual([p[0] for p in posted], ["repos/example/harbor/actions/runs/5/rerun-failed-jobs",
-                                                  "repos/example/harbor/actions/runs/6/cancel"])
+                                                  "repos/example/harbor/actions/runs/6/cancel",
+                                                  "repos/example/harbor/actions/jobs/77/rerun"])
 
     def test_a_new_build_ignores_who_sent_it(self):
         with self.assertRaises(ValueError):   # no build machines: refused, and `_from` never reaches the row
