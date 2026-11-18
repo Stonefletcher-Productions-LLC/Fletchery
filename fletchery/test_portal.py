@@ -1,5 +1,5 @@
-"""The phone portal (portal.py) and its notifications (push.py): what it shows, who may ask, and that it can change
-nothing."""
+"""The page's server (portal.py) and the phone's notifications (push.py): what it shows, who may ask, and who may use
+the controls (the desktop window always; the phone's listed accounts unless controls are off; nobody else)."""
 import json
 import sys
 import tempfile
@@ -16,37 +16,25 @@ from config import Config  # noqa: E402
 HOSTNAME = "your-pc.your-tailnet.ts.net"
 USER = "you@example.com"
 STATUS = {
-    "project": "Harbor", "repo": "example/harbor", "repo_url": "https://github.com/example/harbor",
-    "last_pass": "2026-11-16T04:00:00+00:00", "next_pass_at": "2026-11-16T04:10:00+00:00", "passing": False,
-    "max_parallel": 4, "spent_today": 12.5, "daily_budget": 60, "auth": "subscription", "held": True,
-    "signed_out": "Run claude, then /login.", "limit_until": "", "restarting": "", "sync_error": r"gh failed in E:\scratch\foreman",
-    "page_id": "secret-page", "agents": {"keys": [{"name": "ANTHROPIC_API_KEY", "tail": "abcd"}], "list": [{"name": "opus"}]},
-    "storage": {"report": {"root": r"E:\lifeshare-scratch"}}, "worker_ranks": {"scores": {"opus": 91}},
-    "tasks": [
-        {"number": 1, "title": "Blocked one", "status": "blocked", "why": "needs a decision", "url": "https://github.com/example/harbor/issues/1"},
-        {"number": 2, "title": "Dead end", "status": "queued", "needs_person": True, "why": "Needs you: pick A or B", "url": "javascript:alert(1)"},
-        {"number": 3, "title": "Writing", "status": "running", "agent": "opus", "branch": "task/3"},
-        {"number": 4, "title": "Queued", "status": "queued", "why": "waits for #3", "depends": [3]},
-        {"number": 5, "title": "Has PR", "status": "pr", "pr": 50, "pr_url": "https://github.com/example/harbor/pull/50"},
-    ],
-    "live": [{"task": 3, "title": "Writing", "agent": "opus", "stage": "Writing", "since": "2026-11-16T03:50:00+00:00",
-              "last": "Edit src/app.py", "last_at": "2026-11-16T03:59:00+00:00", "emergency": False}],
-    "merge": [{"pr": 50, "task": 5, "title": "Has PR", "pr_url": "https://github.com/example/harbor/pull/50", "ready": True, "flags": ["strict NavCheck"]}],
-    "merge_view": {"round": 16, "state": "running", "active": True, "headline": "Game tests running", "prs": [50], "pc_text": "the PC is free",
-                   "steps": [{"name": "Compile", "state": "done", "duration_seconds": 372, "files": [{"url": "/api/merge/log?round=16"}]},
-                             {"name": "Game tests", "state": "running", "message": "Verify the rebuilt game."}],
-                   "previous": {"round": "15", "result": "landed 4 PRs", "ended": "2026-11-16T01:00:00+00:00"}},
-    "merge_auto": {"on": True, "held": False, "running": {"agent": "opus"}, "backlog": {"count": 3}, "why": ""},
-    "builds": {"out_dir": r"E:\lifeshare-scratch\builds", "builds": [
+    "project": "Harbor", "repo": "example/harbor", "pid": 4242, "started": "2026-11-16T03:00:00+00:00", "version": "abc12345",
+    "errors": {"machines": r"Build machines not started: OSError in E:\scratch\foreman"}, "restarting": "",
+    "secret": "page-secret", "keys": [{"name": "ANTHROPIC_API_KEY", "tail": "abcd"}],
+    "builds": {"base": "Test-Staging", "nodes": ["NODE-01"], "out_dir": r"E:\lifeshare-scratch\builds", "builds": [
         {"id": "b1", "version": "0.4.5", "state": "done", "ref": "Test-Staging", "sha": "326ed7bfd3aa", "finished": "2026-11-16T02:00:00+00:00",
-         "route": "pc", "output": r"E:\builds\LifeShare-0.4.5", "publish": "published",
+         "route": "node", "machine": "NODE-01", "output": r"E:\builds\LifeShare-0.4.5", "publish": "published",
          "download": "https://github.com/example/harbor/releases/tag/build-0.4.5",
-         "drive": "https://drive.google.com/file/d/one https://drive.google.com/file/d/two", "reason": r"Packaged to E:\builds\LifeShare-0.4.5"},
+         "drive": "https://drive.google.com/file/d/one https://drive.google.com/file/d/two javascript:alert(1)",
+         "reason": r"Packaged to E:\builds\LifeShare-0.4.5"},
         {"id": "b2", "version": "0.4.6", "state": "scheduled", "at": "2026-11-17T02:00:00+00:00", "ref": "main"}]},
-    "machines": {"listen": "100.64.0.10:8771", "machines": [
-        {"name": "NODE-01", "online": True, "last_seen": "2026-11-16T04:00:00+00:00", "job": {"recipe": "package", "ref": "main"}, "paused_work": []},
-        {"name": "old", "revoked": True}]},
-    "log": [{"at": "2026-11-16T04:00:00+00:00", "line": r"round 16 uses C:\Users\you\wt\round-16"}],
+    "machines": {"listen": "100.64.0.10:8771", "held": True, "machines": [
+        {"name": "NODE-01", "online": True, "last_seen": "2026-11-16T04:00:00+00:00", "labels": ["os:windows", "role:cook"],
+         "job": {"id": 7, "recipe": "package", "ref": "main", "state": "running", "steps": [{"name": "Build the editor", "state": "running"}]},
+         "paused_work": []},
+        {"name": "old", "revoked": True}],
+        "jobs": [{"id": 7, "recipe": "package", "state": "running", "machine": "NODE-01", "params": {"version": "0.4.6", "cmd": "x"},
+                  "requested_by": r"build 0.4.6 in C:\Users\you", "log_bytes": 10}]},
+    "scratch": {"checked_at": "2026-11-16T03:30:00+00:00", "mode": "trim", "freed_gb": 3, "roots": [r"E:\lifeshare-scratch"]},
+    "log": [{"at": "2026-11-16T04:00:00+00:00", "line": r"job 7 uses C:\Users\you\wt\slot-1"}],
 }
 
 
@@ -54,37 +42,32 @@ class Summary(unittest.TestCase):
     def setUp(self):
         self.s = portal.summary(STATUS)
 
-    def test_groups_tasks_like_the_app(self):
-        self.assertEqual([t["number"] for t in self.s["needs"]], [1, 2])
-        self.assertEqual([t["number"] for t in self.s["running"]], [3])
-        self.assertEqual([t["number"] for t in self.s["queued"]], [4])
-        self.assertEqual([t["number"] for t in self.s["in_pr"]], [5])
-        self.assertEqual(self.s["workers"][0]["stage"], "Writing")
-
-    def test_merge_and_builds(self):
-        m = self.s["merge"]
-        self.assertTrue(m["active"])
-        self.assertEqual([x["name"] for x in m["steps"]], ["Compile", "Game tests"])
-        self.assertEqual(m["previous"]["round"], "15")
-        self.assertEqual(m["waiting"][0]["pr"], 50)
+    def test_builds_machines_and_jobs(self):
         done = next(b for b in self.s["builds"] if b["version"] == "0.4.5")
         self.assertEqual([l["label"] for l in done["links"]], ["GitHub download", "Google Drive", "Google Drive part 2"])
-        self.assertEqual(done["machine"], "this PC")
+        self.assertEqual(done["machine"], "NODE-01")
         self.assertEqual([m["name"] for m in self.s["machines"]], ["NODE-01"])
+        self.assertTrue(self.s["machines"][0]["builds"])
+        self.assertEqual(self.s["machines"][0]["job"]["steps"][0]["name"], "Build the editor")
+        self.assertEqual((self.s["jobs"][0]["id"], self.s["jobs"][0]["version"]), (7, "0.4.6"))
+        self.assertEqual((self.s["held"], self.s["base"], self.s["build_machines"]), (True, "Test-Staging", ["NODE-01"]))
 
-    def test_pauses(self):
-        self.assertEqual([p["kind"] for p in self.s["pauses"]], ["signed_out", "held", "sync"])
+    def test_the_app_itself(self):
+        self.assertEqual((self.s["started"], self.s["version"]), ("2026-11-16T03:00:00+00:00", "abc12345"))
+        self.assertEqual(len(self.s["errors"]), 1)
+        self.assertEqual(self.s["scratch"]["freed_gb"], 3)
+        self.assertNotIn("roots", self.s["scratch"])
 
     def test_nothing_private_leaves_the_pc(self):
         text = json.dumps(self.s)
-        for secret in ("ANTHROPIC", "abcd", "secret-page", "lifeshare-scratch", "E:\\\\", "C:\\\\", "100.64.0.10",
-                       "javascript:", "/api/merge/log", "out_dir", "worker_ranks"):
+        for secret in ("ANTHROPIC", "abcd", "page-secret", "lifeshare-scratch", "E:\\\\", "C:\\\\", "100.64.0.10",
+                       "javascript:", "out_dir", "4242", '"cmd"'):
             self.assertNotIn(secret, text)
         self.assertIn("[a folder on the PC]", text)
 
     def test_empty_status(self):
         s = portal.summary({})
-        self.assertEqual((s["needs"], s["builds"], s["merge"]["active"]), ([], [], False))
+        self.assertEqual((s["builds"], s["machines"], s["jobs"], s["held"], s["machines_on"]), ([], [], [], False, False))
 
 
 class Settings(unittest.TestCase):
@@ -92,12 +75,12 @@ class Settings(unittest.TestCase):
         self.assertIsNone(portal.settings(None))
         self.assertIsNone(portal.settings({"enabled": False, "port": 8772}))
         self.assertEqual(portal.settings({"hosts": ["Your-PC.Your-Tailnet.ts.net."], "users": ["You@Example.com"]}),
-                         {"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": None, "live": {}})
+                         {"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": None, "live": {}, "controls": True})
         self.assertIsNone(portal.settings({"live": False})["live"])
 
     def test_bad_blocks(self):
         for bad in ("yes", {"port": 80}, {"port": "x"}, {"hosts": "a.ts.net"}, {"hosts": ["https://a.ts.net"]},
-                    {"hosts": ["a.ts.net:8443"]}, {"push": "on"}):
+                    {"hosts": ["a.ts.net:8443"]}, {"push": "on"}, {"controls": "yes"}):
             with self.assertRaises(ValueError):
                 portal.settings(bad)
 
@@ -109,14 +92,31 @@ class Settings(unittest.TestCase):
 
 
 class Served(unittest.TestCase):
+    extra: dict = {}
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        conf = portal.settings({"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": {"contact": "mailto:a@example.com"}})
+        conf = portal.settings({"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": {"contact": "mailto:a@example.com"},
+                                **self.extra})
         import socket
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            conf["port"] = s.getsockname()[1]
-        self.p = portal.Portal(lambda: STATUS, conf, self.tmp.name)
+        ports = []
+        for _ in range(2):
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                ports.append(s.getsockname()[1])
+        conf["port"], self.desk = ports
+        self.calls = []
+
+        def action(name):
+            def run(d):
+                self.calls.append((name, dict(d)))
+                if d.get("bad"):
+                    raise ValueError("Build not found.")
+                return {"message": "ok"}
+            return run
+        acts = {p: action(p) for p in ("/api/builds/add", "/api/builds/cancel", "/api/jobs/cancel", "/api/machines/hold", "/api/restart")}
+        self.p = portal.Portal(lambda: STATUS, conf, self.tmp.name, desktop_port=self.desk, actions=acts,
+                               job_log=lambda job: f"job {job} ran in E:\\lifeshare-scratch\\slot-1")
         self.p.push.start = lambda: None
         self.p.live.start = lambda: None      # never reads the real GitHub in tests (test_devwatch.py fakes it)
         self.p.start()
@@ -126,8 +126,8 @@ class Served(unittest.TestCase):
         self.p.stop()
         self.tmp.cleanup()
 
-    def ask(self, path, headers=None, data=None, method=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", headers=headers or {}, data=data, method=method)
+    def ask(self, path, headers=None, data=None, method=None, port=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{port or self.port}{path}", headers=headers or {}, data=data, method=method)
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read(), dict(r.headers)
@@ -181,13 +181,58 @@ class Served(unittest.TestCase):
         self.assertIn("eve@example.com", json.loads(body)["error"])
         self.assertNotIn("Harbor", body.decode())
 
-    def test_it_can_change_nothing(self):
-        for path in ("/api/pause", "/api/task", "/api/settings/save", "/api/keys/set", "/api/merge/now", "/api/restart", "/api/summary"):
-            origin = {"Origin": f"http://127.0.0.1:{self.port}", "Content-Type": "application/json"}
-            self.assertEqual(self.ask(path, origin, b"{}", "POST")[0], 404, path)
+    def phone_post(self, path, body=b"{}", **extra):
+        return self.ask(path, self.remote(**{"Origin": f"https://{HOSTNAME}", "Content-Type": "application/json", **extra}), body, "POST")
+
+    def desk_post(self, path, body=b"{}", **extra):
+        h = {"Host": f"127.0.0.1:{self.desk}", "Origin": f"http://127.0.0.1:{self.desk}", "Content-Type": "application/json", **extra}
+        return self.ask(path, h, body, "POST", port=self.desk)
+
+    def test_the_window_has_every_control(self):
+        for path in ("/api/builds/add", "/api/builds/cancel", "/api/jobs/cancel", "/api/machines/hold", "/api/restart"):
+            self.assertEqual(self.desk_post(path)[0], 200, path)
+        self.assertEqual(self.calls[-1], ("/api/restart", {"_from": "the window"}))
+        code, body, _ = self.desk_post("/api/builds/cancel", b'{"bad": 1}')
+        self.assertEqual((code, json.loads(body)["error"]), (400, "Build not found."))
+        h = {"Host": f"127.0.0.1:{self.desk}"}
+        s = json.loads(self.ask("/api/summary", h, port=self.desk)[1])
+        self.assertEqual((s["desktop"], s["controls"]), (True, True))
+        self.assertEqual(self.ask("/api/status", h, port=self.desk)[0], 200)
+        log = self.ask("/api/jobs/log?id=7", h, port=self.desk)[1].decode()
+        self.assertIn("lifeshare-scratch", log)   # the window is on this PC: paths as they are
+
+    def test_the_window_port_answers_only_this_pc(self):
+        for headers in ({"Host": f"127.0.0.1:{self.desk}", "X-Forwarded-For": "100.64.0.9"},
+                        {"Host": "evil.example.com"}, {"Host": f"127.0.0.1:{self.desk}", "Tailscale-User-Login": USER}):
+            self.assertEqual(self.ask("/api/summary", headers, port=self.desk)[0], 403, headers)
+        self.assertEqual(self.desk_post("/api/restart", Origin="https://evil.example.com")[0], 403)
+        self.assertEqual(self.desk_post("/api/restart", **{"Sec-Fetch-Site": "cross-site"})[0], 403)
+        self.assertEqual(self.calls, [])
+
+    def test_the_phone_has_the_controls_but_not_a_new_build(self):
+        s = json.loads(self.ask("/api/summary", self.remote())[1])
+        self.assertEqual((s["desktop"], s["controls"]), (False, True))
+        self.assertEqual(self.phone_post("/api/restart")[0], 200)
+        self.assertEqual(self.calls, [("/api/restart", {"_from": f"the phone ({USER})"})])
+        self.assertEqual(self.phone_post("/api/builds/add", b'{"version": "1.0.0"}')[0], 403)
+        self.assertEqual(len(self.calls), 1)
+        log = self.ask("/api/jobs/log?id=7", self.remote())[1].decode()
+        self.assertIn("job 7 ran in [a folder on the PC]", log)
+
+    def test_strangers_and_other_pages_cannot_use_the_controls(self):
+        self.assertEqual(self.phone_post("/api/restart", **{"Tailscale-User-Login": "eve@example.com"})[0], 403)
+        self.assertEqual(self.phone_post("/api/restart", Origin="https://evil.example.com")[0], 403)
+        self.assertEqual(self.phone_post("/api/restart", **{"Sec-Fetch-Site": "cross-site"})[0], 403)
+        self.assertEqual(self.ask("/api/restart", {"Content-Type": "application/json"}, b"{}", "POST")[0], 403)   # no Origin
+        self.assertEqual(self.ask("/api/jobs/log?id=7", self.remote(**{"Tailscale-User-Login": "eve@example.com"}))[0], 403)
+        self.assertEqual(self.calls, [])
+
+    def test_nothing_else_is_served(self):
+        for path in ("/api/pause", "/api/task", "/api/settings/save", "/api/merge/now", "/api/summary"):
+            self.assertEqual(self.phone_post(path)[0], 404, path)
         for method in ("PUT", "DELETE", "PATCH"):
             self.assertEqual(self.ask("/api/summary", method=method)[0], 501)
-        for path in ("/api/status", "/api/jobs/log?id=1", "/api/merge/log", "/../fletchery/config.py", "/portal.js/../../index.html"):
+        for path in ("/api/status", "/api/merge/log", "/../fletchery/config.py", "/portal.js/../../index.html"):
             self.assertEqual(self.ask(path)[0], 404, path)
 
     def test_posts_need_the_portals_own_page(self):
@@ -198,6 +243,23 @@ class Served(unittest.TestCase):
         self.assertEqual(self.ask("/api/push/unsubscribe", self.remote(Origin=f"https://{HOSTNAME}"), body, "POST")[0], 200)
         big = b"{" + b" " * portal.MAX_BODY + b"}"
         self.assertEqual(self.ask("/api/push/unsubscribe", self.remote(Origin=f"https://{HOSTNAME}"), big, "POST")[0], 413)
+
+
+class ReadOnlyPhone(Served):
+    extra = {"controls": False}
+
+    def test_the_phone_is_read_only_when_controls_are_off(self):
+        s = json.loads(self.ask("/api/summary", self.remote())[1])
+        self.assertFalse(s["controls"])
+        code, body, _ = self.phone_post("/api/restart")
+        self.assertEqual(code, 403)
+        self.assertIn("read-only", json.loads(body)["error"])
+        self.assertEqual(self.ask("/api/jobs/log?id=7", self.remote())[0], 404)
+        self.assertEqual(self.desk_post("/api/restart")[0], 200)   # the window still can
+
+    # the inherited tests below assume phone controls; they run in Served
+    test_the_phone_has_the_controls_but_not_a_new_build = None
+    test_strangers_and_other_pages_cannot_use_the_controls = None
 
 
 @unittest.skipUnless(push.crypto_ready(), "the cryptography package is not installed")
@@ -237,7 +299,6 @@ class Notifications(unittest.TestCase):
             push.decrypt(body, self.phone, b"f" * 16)
 
     def test_signed_as_this_install(self):
-        import base64
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
@@ -265,13 +326,11 @@ class Notifications(unittest.TestCase):
         self.assertEqual(self.push.check(), [])
         self.assertEqual(self.sent, [])
         status = json.loads(json.dumps(STATUS))
-        status["tasks"].append({"number": 9, "title": "New question", "status": "blocked"})
-        status["merge_view"]["previous"] = {"round": "16", "result": "landed 2 PRs"}
         status["builds"]["builds"][1].update(state="done", publish="published", download="https://github.com/example/harbor/releases/tag/b2")
-        status["signed_out"] = ""
         self.view = portal.summary(status)
-        self.assertEqual(sorted(self.push.check()), ["build:b2:links", "merge:16", "needs:9"])
-        self.assertEqual(sorted(n["title"] for n in self.notes()), ["Build 0.4.6 is ready to download", "Merge round 16 finished", "Needs you"])
+        self.view["live_blockers"] = [{"kind": "check", "key": "check:pr:9", "title": "PR #9: compile failed", "detail": "", "since": ""}]
+        self.assertEqual(sorted(self.push.check()), ["build:b2:links", "stuck:check:pr:9"])
+        self.assertEqual(sorted(n["title"] for n in self.notes()), ["Build 0.4.6 is ready to download", "Check failed"])
         self.assertEqual(self.push.check(), [])
         self.assertEqual(self.make().check(), [], "a restart announces nothing again")
         self.assertEqual(self.sent[0][2]["Content-Encoding"], "aes128gcm")
@@ -293,9 +352,7 @@ class Notifications(unittest.TestCase):
         p = self.make({"contact": "mailto:a@example.com", "events": ["build"]})
         p.subscribe({"subscription": self.sub})
         p.check()
-        status = json.loads(json.dumps(STATUS))
-        status["tasks"].append({"number": 9, "title": "New question", "status": "blocked"})
-        self.view = portal.summary(status)
+        self.view = dict(self.view, live_blockers=[{"kind": "check", "key": "check:pr:9", "title": "PR #9", "since": ""}])
         self.assertEqual(p.check(), [])
 
     def test_a_gone_phone_is_forgotten(self):

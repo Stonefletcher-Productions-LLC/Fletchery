@@ -1,11 +1,14 @@
-"""The phone portal: a second, read-only web server for following Fletchery away from the PC.
+"""The app's web server: the same page (ui/portal/) for the desktop window and the phone.
 
-It is a small installable web app (ui/portal/): workers, tasks, what needs you, merge rounds, builds with their download
-links, machines and the activity log. It can change nothing: there is no pause, no settings, no keys, no token for the
-dashboard's own POSTs, and no file path from this PC in what it serves.
+  - The desktop window (Fletchery.exe) opens http://127.0.0.1:<dashboardPort>. Only this PC can reach it. It has every
+    control: queue, start, stop and re-run builds and machine jobs, pause one machine or all of them, cancel or re-run
+    GitHub Actions runs, check GitHub now, restart the backend.
+  - The phone opens the portal port through Tailscale Serve. It shows the same tabs and has the same controls, except
+    queueing a new build, for the accounts in `users` only (`"controls": false` makes it read-only). No file path from
+    this PC is in what it serves.
 
-How it is reached. The portal listens on this machine only (127.0.0.1). Tailscale Serve puts it on the private network
-with a real HTTPS certificate:
+How the phone reaches it. The portal listens on this machine only (127.0.0.1). Tailscale Serve puts it on the private
+network with a real HTTPS certificate:
 
     tailscale serve --bg --https=443 http://127.0.0.1:8772
 
@@ -16,16 +19,15 @@ Nothing is opened to the internet and no router port is forwarded. Serve adds `T
   - a request that came through a proxy must carry a Tailscale login listed in `users`. Tailscale Funnel (public) traffic
     and tagged devices carry none, so they are refused;
   - a request with no proxy headers is this PC itself, and is allowed;
-  - the few POSTs (push subscriptions) must come from the portal's own page (Origin).
+  - every POST must come from the app's own page (Origin and Sec-Fetch-Site).
 
 Profile, under `workers`:
 
     "portal": {"port": 8772, "hosts": ["your-pc.your-tailnet.ts.net"], "users": ["you@example.com"],
-               "push": {"contact": "mailto:you@example.com"}}
+               "controls": true, "push": {"contact": "mailto:you@example.com"}, "live": {...}}
 
-`live` is optional (devwatch.py): the Live tab, on unless `"live": false`; its own settings go in that object.
-`push` is optional (push.py): notifications on the phone for what needs you, finished rounds and finished builds.
-See docs/PORTAL.md."""
+`live` is the Live tab (devwatch.py), on unless `"live": false`. `push` is optional (push.py): notifications on the
+phone for finished builds and anything Live lists as stuck. See docs/PORTAL.md."""
 from __future__ import annotations
 
 import gzip
@@ -35,12 +37,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).parent
 UI = HERE.parent / "ui" / "portal"
 MAX_BODY = 8 * 1024
 DEFAULT_PORT = 8772
+DESKTOP_ONLY = ("/api/builds/add",)   # what the phone never does, even with controls on
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/index.html": ("index.html", "text/html; charset=utf-8"),
           "/portal.css": ("portal.css", "text/css; charset=utf-8"),
@@ -84,8 +87,11 @@ def settings(conf) -> dict | None:
     live = conf.get("live", {})
     if live is not False and not isinstance(live, dict):
         raise ValueError("workers.portal.live must be an object or false (see devwatch.py)")
+    controls = conf.get("controls", True)
+    if not isinstance(controls, bool):
+        raise ValueError("workers.portal.controls is true or false")
     return {"port": port, "hosts": hosts, "users": users, "push": ({} if push is True else push) or None,
-            "live": None if live is False else live}
+            "live": None if live is False else live, "controls": controls}
 
 
 # ---- what the phone may see ----
@@ -108,85 +114,56 @@ def _links(row: dict) -> list:
     return out
 
 
+def _job(j: dict) -> dict:
+    params = j.get("params") or {}
+    return {"id": j.get("id"), "recipe": _text(j.get("recipe"), 30), "state": _text(j.get("state"), 20),
+            "machine": _text(j.get("machine"), 60), "ref": _text(j.get("ref"), 80), "sha": _text(j.get("sha"), 10),
+            "version": _text(params.get("version"), 20), "requested_by": _text(_scrub(j.get("requested_by")), 120),
+            "created": _text(j.get("created"), 40), "started": _text(j.get("started"), 40),
+            "finished": _text(j.get("finished"), 40), "summary": _text(_scrub(j.get("summary")), 300),
+            "cancel": bool(j.get("cancel")), "log_bytes": int(j.get("log_bytes") or 0),
+            "steps": [{"name": _text(x.get("name"), 80), "state": _text(x.get("state"), 20),
+                       "start": _text(x.get("start"), 40), "end": _text(x.get("end"), 40)}
+                      for x in (j.get("steps") or [])[:40] if isinstance(x, dict)]}
+
+
 def summary(status: dict) -> dict:
-    """The dashboard's status, cut down to what the read-only portal shows. Built field by field so that nothing new in
-    the status (keys, settings, paths) reaches the phone unless it is added here on purpose."""
+    """The backend's status, cut down to what the page shows. Built field by field so that nothing new in the status
+    (keys, settings, paths) reaches the phone unless it is added here on purpose."""
     s = status or {}
-    live_tasks = {r.get("task") for r in s.get("live") or []}
-    needs, queued, running, in_pr = [], [], [], []
-    for t in s.get("tasks") or []:
-        row = {"number": t.get("number"), "title": _text(t.get("title"), 200), "why": _text(t.get("why"), 300),
-               "url": _web(t.get("url")), "pr": t.get("pr") or 0, "pr_url": _web(t.get("pr_url")),
-               "agent": _text(t.get("agent"), 40), "depends": list(t.get("depends") or [])[:20]}
-        st = t.get("status")
-        if st == "blocked" or t.get("needs_person"):
-            needs.append(row)
-        elif t.get("number") in live_tasks and st != "pr" or st == "running":
-            running.append(row)
-        elif st == "pr":
-            in_pr.append(row)
-        elif st == "queued":
-            queued.append(row)
-    workers = [{"task": r.get("task"), "title": _text(r.get("title"), 200), "agent": _text(r.get("agent"), 40),
-                "stage": _text(r.get("stage"), 80), "since": _text(r.get("since"), 40), "last": _text(r.get("last"), 200),
-                "last_at": _text(r.get("last_at"), 40), "emergency": bool(r.get("emergency"))}
-               for r in s.get("live") or []]
-    mv, auto = s.get("merge_view") or {}, s.get("merge_auto") or {}
-    prev = mv.get("previous") or {}
-    merge = {"on": bool(auto.get("on")), "held": bool(auto.get("held")), "active": bool(mv.get("active")),
-             "state": _text(mv.get("state"), 40), "round": _text(mv.get("round"), 40), "headline": _text(mv.get("headline")),
-             "why": _text(auto.get("why")), "started": _text(mv.get("started"), 40), "updated": _text(mv.get("updated"), 40),
-             "stale": bool(mv.get("stale")), "prs": [n for n in mv.get("prs") or [] if isinstance(n, int)][:50],
-             "agent": _text((auto.get("running") or {}).get("agent"), 40),
-             "steps": [{"name": _text(x.get("name"), 80), "state": _text(x.get("state"), 20),
-                        "message": _text(x.get("message"), 200), "seconds": x.get("duration_seconds")}
-                       for x in (mv.get("steps") or [])[:64] if isinstance(x, dict)],
-             "previous": {"round": _text(prev.get("round"), 40), "result": _text(prev.get("result"), 120),
-                          "ended": _text(prev.get("ended"), 40)} if prev else None,
-             "backlog": int((auto.get("backlog") or {}).get("count") or 0),
-             "waiting": [{"pr": m.get("pr"), "title": _text(m.get("title"), 200), "url": _web(m.get("pr_url")),
-                          "ready": bool(m.get("ready")), "flags": [_text(f, 120) for f in (m.get("flags") or [])[:6]]}
-                         for m in (s.get("merge") or [])[:100]]}
-    builds = [{"id": _text(b.get("id"), 40), "version": _text(b.get("version"), 40), "state": _text(b.get("state"), 20),
-               "ref": _text(b.get("ref"), 80), "sha": _text(b.get("sha"), 10), "at": _text(b.get("at"), 40),
-               "started": _text(b.get("started"), 40), "finished": _text(b.get("finished"), 40),
-               "machine": _text(b.get("machine") or ("this PC" if b.get("route") == "pc" else ""), 60),
-               "reason": _text(_scrub(b.get("reason"))), "publish": _text(b.get("publish"), 20),
-               "tests": _text(b.get("tests"), 10), "repeat": _text(b.get("repeat"), 10), "links": _links(b)}
-              for b in ((s.get("builds") or {}).get("builds") or [])[-30:]]
-    builds.sort(key=lambda b: b["finished"] or b["started"] or b["at"], reverse=True)
+    b = s.get("builds") or {}
+    builds = [{"id": _text(x.get("id"), 40), "version": _text(x.get("version"), 40), "state": _text(x.get("state"), 20),
+               "ref": _text(x.get("ref"), 80), "sha": _text(x.get("sha"), 10), "at": _text(x.get("at"), 40),
+               "repeat": _text(x.get("repeat"), 10), "tests": _text(x.get("tests"), 10),
+               "started": _text(x.get("started"), 40), "finished": _text(x.get("finished"), 40),
+               "machine": _text(x.get("machine"), 60), "job": int(x.get("job") or 0),
+               "reason": _text(_scrub(x.get("reason"))), "publish": _text(x.get("publish"), 20),
+               "publish_reason": _text(_scrub(x.get("publish_reason")), 200), "links": _links(x)}
+              for x in (b.get("builds") or [])[-40:]]
+    builds.sort(key=lambda r: r["finished"] or r["started"] or r["at"], reverse=True)
+    m = s.get("machines") or {}
     machines = []
-    for m in ((s.get("machines") or {}).get("machines") or []):
-        if m.get("revoked"):
+    for x in m.get("machines") or []:
+        if x.get("revoked"):
             continue
-        job = m.get("job") or {}
-        machines.append({"name": _text(m.get("name"), 60), "online": bool(m.get("online")),
-                         "last_seen": _text(m.get("last_seen"), 40),
-                         "job": _text(job.get("recipe"), 40), "job_ref": _text(job.get("ref"), 80),
-                         "paused": [_text(k, 20) for k in (m.get("paused_work") or [])[:8]]})
-    pc = s.get("pc") or {}
-    pauses = []
-    if s.get("signed_out"):
-        pauses.append({"kind": "signed_out", "text": "A coding agent needs signing in again on the PC. " + _text(s["signed_out"], 200)})
-    if s.get("held"):
-        pauses.append({"kind": "held", "text": "Paused from the app: running work finishes, nothing new starts."})
-    if s.get("limit_until"):
-        pauses.append({"kind": "limit", "text": f"Usage limit: paused until {_text(s['limit_until'], 40)}. " + _text(s.get("limit_reason"), 200)})
-    if s.get("restarting"):
-        pauses.append({"kind": "restarting", "text": _text(s["restarting"], 200)})
-    if s.get("sync_error"):
-        pauses.append({"kind": "sync", "text": "GitHub could not be read: " + _text(_scrub(s["sync_error"]), 200)})
-    return {"project": _text(s.get("project"), 80), "repo": _text(s.get("repo"), 140), "repo_url": _web(s.get("repo_url")),
-            "at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
-            "last_pass": _text(s.get("last_pass"), 40), "next_pass_at": _text(s.get("next_pass_at"), 40),
-            "passing": bool(s.get("passing")), "pauses": pauses, "workers_enabled": s.get("workers_enabled", True) is not False,
-            "max_parallel": s.get("max_parallel") or 0, "spent_today": s.get("spent_today") or 0,
-            "daily_budget": s.get("daily_budget") or 0, "auth": _text(s.get("auth"), 20),
-            "pc": _text(_scrub(pc.get("text") or mv.get("pc_text")), 200),
-            "needs": needs, "workers": workers, "running": running, "queued": queued, "in_pr": in_pr,
-            "merge": merge, "builds": builds, "machines": machines,
+        machines.append({"name": _text(x.get("name"), 60), "online": bool(x.get("online")),
+                         "last_seen": _text(x.get("last_seen"), 40), "labels": [_text(v, 40) for v in (x.get("labels") or [])[:12]],
+                         "builds": "builds" not in (x.get("paused_work") or []) and "role:cook" in (x.get("labels") or []),
+                         "paused": [_text(k, 20) for k in (x.get("paused_work") or [])[:8]],
+                         "job": _job(x["job"]) if x.get("job") else None})
+    jobs = [_job(j) for j in (m.get("jobs") or [])[:40]]
+    return {"project": _text(s.get("project"), 80), "repo": _text(s.get("repo"), 140),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), "started": _text(s.get("started"), 40),
+            "version": _text(s.get("version"), 20),
+            "base": _text(b.get("base"), 80), "build_machines": [_text(n, 60) for n in (b.get("nodes") or [])[:20]],
+            "machines_on": bool(s.get("machines")), "held": bool(m.get("held")),
+            "errors": [_text(_scrub(v), 300) for v in (s.get("errors") or {}).values()][:10],
+            "restarting": _text(s.get("restarting"), 200),
+            "builds": builds, "machines": machines, "jobs": jobs,
+            "scratch": {k: (_text(_scrub(v), 200) if isinstance(v, str) else v) for k, v in (s.get("scratch") or {}).items()
+                        if k in ("checked_at", "mode", "error", "freed_gb", "trimmed", "quarantined", "removed")},
             "log": [{"at": _text(r.get("at"), 40), "line": _text(_scrub(r.get("line")), 300)}
-                    for r in (s.get("log") or [])[-40:] if isinstance(r, dict)]}
+                    for r in (s.get("log") or [])[-120:] if isinstance(r, dict)]}
 
 
 PATHS = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>|]*")
@@ -198,13 +175,24 @@ def _scrub(v) -> str:
 
 
 class Portal:
-    def __init__(self, status_fn, conf: dict, state_dir=None, log=None, repo: str = "", host: str = "127.0.0.1"):
+    """`status_fn` is the backend's status (app.py App.status). `desktop_port` (0 = none) serves the same page to the
+    desktop window on 127.0.0.1, where `actions` ({path: fn(data) -> dict}) may be posted; `conf["port"]` (0 = none)
+    is the phone's portal, which may post them too unless `conf["controls"]` is false (never DESKTOP_ONLY ones). Each
+    action gets `_from` in its data: "the window" or "the phone (<login>)", for the activity log."""
+
+    def __init__(self, status_fn, conf: dict, state_dir=None, log=None, repo: str = "", host: str = "127.0.0.1",
+                 desktop_port: int = 0, actions: dict | None = None, job_log=None):
         self.status_fn = status_fn
         self.conf = conf
-        self.port = conf["port"]
+        self.port = int(conf.get("port") or 0)
+        self.controls = bool(conf.get("controls", True))
+        self.desktop_port = int(desktop_port or 0)
+        self.actions = dict(actions or {})
+        self.job_log = job_log
         self.host = host
         self.log = log or (lambda line: None)
-        self.server: ThreadingHTTPServer | None = None
+        self.servers: list[ThreadingHTTPServer] = []
+        self.errors: dict[str, str] = {}
         self._cache: tuple[float, bytes] = (0.0, b"")
         self._lock = threading.Lock()
         self._live_cache: tuple[float, bytes] = (0.0, b"")
@@ -228,10 +216,10 @@ class Portal:
         return out
 
     def summary_bytes(self) -> bytes:
-        """One read of the engine serves every phone that asks within three seconds."""
+        """One read serves every screen that asks within two seconds."""
         with self._lock:
             at, body = self._cache
-            if time.monotonic() - at > 3 or not body:
+            if time.monotonic() - at > 2 or not body:
                 body = json.dumps(self.summary()).encode("utf-8")
                 self._cache = (time.monotonic(), body)
             return body
@@ -245,13 +233,23 @@ class Portal:
             return body
 
     # ---- who may ask ----
-    def _local(self, host: str) -> bool:
-        return host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}")
+    def _local(self, host: str, port: int | None = None) -> bool:
+        port = self.port if port is None else port
+        return bool(port) and host in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}")
 
-    def allowed(self, headers) -> tuple[bool, str]:
-        """(ok, why not). `headers` is any mapping with .get()."""
+    def is_desktop(self, headers, port: int) -> bool:
+        """The desktop window: this PC, on the desktop port, with no proxy in between."""
         raw = (headers.get("Host") or "").strip().lower()
-        local = self._local(raw)
+        proxied = any(headers.get(h) for h in ("Tailscale-User-Login", "X-Forwarded-For", "X-Forwarded-Host", "Forwarded"))
+        return bool(self.desktop_port) and port == self.desktop_port and self._local(raw, port) and not proxied
+
+    def allowed(self, headers, port: int | None = None) -> tuple[bool, str]:
+        """(ok, why not). `headers` is any mapping with .get(); `port` is the server the request came to."""
+        port = self.port if port is None else port
+        if port == self.desktop_port and self.desktop_port:
+            return (True, "") if self.is_desktop(headers, port) else (False, "The desktop page answers this PC only.")
+        raw = (headers.get("Host") or "").strip().lower()
+        local = self._local(raw, port)
         name = raw.rsplit(":", 1)[0] if re.search(r":\d+$", raw) else raw
         if not local and name.rstrip(".") not in self.conf["hosts"]:
             return False, "This address is not one of the portal's hosts (workers.portal.hosts)."
@@ -268,6 +266,17 @@ class Portal:
                            "Add it to workers.portal.users in the Fletchery profile, then restart Fletchery.")
         return True, ""
 
+    def can_act(self, headers, port: int, path: str) -> tuple[bool, str]:
+        """May this request run a control? Called after allowed() and same_origin()."""
+        if self.is_desktop(headers, port):
+            return True, "the window"
+        if port != self.port or not self.controls:
+            return False, ""
+        if path in DESKTOP_ONLY:
+            return False, ""
+        login = (headers.get("Tailscale-User-Login") or "").strip().lower()
+        return True, f"the phone ({login})" if login else "the portal on this PC"
+
     def same_origin(self, headers) -> bool:
         origin = (headers.get("Origin") or "").strip().lower()
         host = (headers.get("Host") or "").strip().lower()
@@ -280,24 +289,25 @@ class Portal:
         return parts.netloc == host or (parts.hostname or "").rstrip(".") in self.conf["hosts"]
 
     # ---- server ----
-    def start(self) -> None:
+    def _handler(self, port: int):
         portal = self
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "Fletchery"
             sys_version = ""
+            timeout = 30   # a client that opens a connection and sends nothing does not hold a thread forever
 
             def handle(self):
                 try:
                     super().handle()
-                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                     self.close_connection = True
 
             def log_message(self, *a):
                 pass
 
             def _send(self, code: int, body: bytes, ctype: str = "application/json", cache: str = "no-store") -> None:
-                # Phones often reach the PC through a slow Tailscale relay, so text is sent compressed when the phone takes it.
+                # Phones often reach the PC through a slow Tailscale relay, so text is sent compressed when asked.
                 squeeze = (len(body) > 1024 and not ctype.startswith("image/")
                            and "gzip" in (self.headers.get("Accept-Encoding") or "").lower())
                 if squeeze:
@@ -310,9 +320,7 @@ class Portal:
                 self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
-                # The desktop window (server.py, this PC only) shows the Live tab in a frame; nothing else may frame it.
-                local = portal._local((self.headers.get("Host") or "").strip().lower()) and not self.headers.get("Tailscale-User-Login")
-                self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors http://127.0.0.1:* http://localhost:*") if local else CSP)
+                self.send_header("Content-Security-Policy", CSP)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if self.command != "HEAD":
@@ -322,36 +330,52 @@ class Portal:
                 self._send(code, json.dumps(obj).encode("utf-8"))
 
             def _gate(self) -> bool:
-                ok, why = portal.allowed(self.headers)
+                ok, why = portal.allowed(self.headers, port)
                 if not ok:
                     self._json(403, {"error": why})
                 return ok
 
             def do_GET(self):
-                path = self.path.split("?", 1)[0].split("#", 1)[0]
+                parts = urlsplit(self.path)
+                path = parts.path
                 if not self._gate():
                     return
+                desktop = portal.is_desktop(self.headers, port)
                 if path in STATIC:
                     name, ctype = STATIC[path]
                     try:
                         return self._send(200, (UI / name).read_bytes(), ctype, "no-cache")
                     except OSError:
                         return self._json(404, {"error": "not found"})
+                if path == "/api/status" and desktop:   # the window's "is the backend up?"; nothing more
+                    return self._json(200, {"ok": True, "desktop": True, "port": portal.port})
                 if path == "/api/summary":
                     try:
-                        return self._send(200, portal.summary_bytes())
+                        body = json.loads(portal.summary_bytes())
+                        body["desktop"] = desktop
+                        body["controls"] = desktop or (port == portal.port and portal.controls)
+                        return self._json(200, body)
                     except Exception as e:
                         return self._json(503, {"error": f"Fletchery could not report its status ({type(e).__name__})."})
                 if path == "/api/live":
                     if portal.live is None:
-                        return portal_off(self)
+                        return self._json(404, {"error": "The Live tab is off (workers.portal.live is false)."})
                     try:
                         return self._send(200, portal.live_bytes())
                     except Exception as e:
                         return self._json(503, {"error": f"The Live feed could not be read ({type(e).__name__})."})
+                if path == "/api/jobs/log" and (desktop or portal.controls) and portal.job_log is not None:
+                    try:
+                        job = int((parse_qs(parts.query).get("id") or ["0"])[0])
+                    except ValueError:
+                        return self._json(400, {"error": "id is a number"})
+                    text = portal.job_log(job) or ""
+                    if not desktop:
+                        text = _scrub(text)   # folder paths stay on this PC
+                    return self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
                 if path == "/api/push":
                     return self._json(200, portal.push.info() if portal.push else
-                                      {"available": False, "why": "Notifications are off for this portal (workers.portal.push)."})
+                                      {"available": False, "why": "Notifications are off (workers.portal.push)."})
                 return self._json(404, {"error": "not found"})
 
             do_HEAD = do_GET
@@ -360,7 +384,7 @@ class Portal:
                 if not self._gate():
                     return
                 if not portal.same_origin(self.headers):
-                    return self._json(403, {"error": "This request did not come from the portal's own page."})
+                    return self._json(403, {"error": "This request did not come from the app's own page."})
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -373,24 +397,47 @@ class Portal:
                         raise ValueError
                 except ValueError:
                     return self._json(400, {"error": "bad JSON"})
-                routes = {"/api/push/subscribe": "subscribe", "/api/push/unsubscribe": "unsubscribe", "/api/push/test": "test"}
-                if self.path not in routes:
-                    return self._json(404, {"error": "not found"})
-                if not portal.push:
-                    return self._json(400, {"error": "Notifications are off for this portal (workers.portal.push)."})
-                try:
-                    return self._json(200, getattr(portal.push, routes[self.path])(data))
-                except ValueError as e:
-                    return self._json(400, {"error": str(e)})
-                except Exception as e:
-                    return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
+                pushes = {"/api/push/subscribe": "subscribe", "/api/push/unsubscribe": "unsubscribe", "/api/push/test": "test"}
+                if self.path in pushes:
+                    if not portal.push:
+                        return self._json(400, {"error": "Notifications are off (workers.portal.push)."})
+                    try:
+                        return self._json(200, getattr(portal.push, pushes[self.path])(data))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                    except Exception as e:
+                        return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
+                if self.path in portal.actions:
+                    ok, who = portal.can_act(self.headers, port, self.path)
+                    if not ok:
+                        return self._json(403, {"error": "Do this in the Fletchery window on the PC." if portal.controls
+                                                else "The phone is read-only (workers.portal.controls is false)."})
+                    data["_from"] = who
+                    try:
+                        out = portal.actions[self.path](data)
+                        with portal._lock:
+                            portal._cache = (0.0, b"")   # the next read shows the change
+                        return self._json(200, out if isinstance(out, dict) else {"ok": True})
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                    except Exception as e:
+                        return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
+                return self._json(404, {"error": "not found"})
 
-        def portal_off(h):
-            return h._json(404, {"error": "The Live tab is off for this portal (workers.portal.live is false)."})
+        return Handler
 
-        self.server = ThreadingHTTPServer((self.host, self.port), Handler)
-        self.server.daemon_threads = True
-        threading.Thread(target=self.server.serve_forever, name="fletchery-portal", daemon=True).start()
+    def start(self) -> None:
+        for name, port in (("desktop", self.desktop_port), ("portal", self.port)):
+            if not port:
+                continue
+            try:
+                server = ThreadingHTTPServer((self.host, port), self._handler(port))
+            except OSError as e:
+                self.errors[name] = f"The {name} page could not use port {port}: {e}"
+                continue
+            server.daemon_threads = True
+            self.servers.append(server)
+            threading.Thread(target=server.serve_forever, name=f"fletchery-{name}", daemon=True).start()
         if self.live is not None:
             self.live.start()
         if self.push:
@@ -401,6 +448,6 @@ class Portal:
             self.live.stop()
         if self.push:
             self.push.stop()
-        if self.server:
-            self.server.shutdown()
-            self.server.server_close()
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()

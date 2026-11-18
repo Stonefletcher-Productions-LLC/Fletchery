@@ -2,7 +2,7 @@
 // saved on the phone (Tailscale still connecting, PC asleep), and shows notifications. Network first since 2026-11-18:
 // cache first kept phones on an old page for several opens after an update. Status is never saved here:
 // the page asks the PC for it after it has opened.
-const CACHE = 'fletchery-portal-v4';
+const CACHE = 'fletchery-portal-v6';
 const NET_MS = 4000;
 const SHELL = ['/', '/portal.css', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 

@@ -1,12 +1,15 @@
-// Fletchery's phone portal: reads /api/summary and draws it. It never sends anything that changes Fletchery.
+// Fletchery's page, on the phone and in the desktop window: reads /api/summary and draws Builds and Activity (live.js
+// draws Live). Controls (start, stop, pause, re-run, restart) show when the backend says this screen may use them: the
+// desktop window always, the phone unless workers.portal.controls is false. Queueing a new build is the window's only.
 (function () {
   'use strict';
-  const POLL_MS = 10000;
+  const POLL_MS = 5000;      // while Builds or Activity is open
+  const QUIET_MS = 60000;    // on Live (live.js reads its own feed): just the badges
   const RETRY_MS = 3000;     // ask again sooner while the PC cannot be reached (Tailscale may still be connecting)
   const WAIT_MS = 12000;     // give up on one read after this long
   const KEEP = 'fletchery-portal-last';
   const KEEP_MS = 24 * 3600 * 1000;
-  const TABS = ['live', 'now', 'tasks', 'merges', 'builds'];
+  const TABS = ['live', 'builds', 'activity'];
   const $ = id => document.getElementById(id);
   let last = null;        // the newest summary
   let lastOk = 0;         // when it arrived (ms)
@@ -65,113 +68,141 @@
   const num = n => el('span', {class: 'num', text: '#' + n});
 
   // ---- drawing ----
-  function taskRow(t, chip) {
-    return el('li', null,
-      link(t.url, 'title', num(t.number), t.title),
-      chip,
-      t.why && t.why !== 'ready' ? el('p', {class: 'sub', text: t.why}) : null,
-      t.pr ? el('p', {class: 'sub'}, 'Pull request ', web(t.pr_url) ? el('a', {href: t.pr_url, target: '_blank', rel: 'noopener noreferrer', text: '#' + t.pr}) : '#' + t.pr) : null);
-  }
-  function workerRow(w) {
-    return el('li', null,
-      el('div', {class: 'title'}, num(w.task), w.title),
-      el('span', {class: 'chip run', text: w.stage || 'Working'}),
-      w.agent ? el('span', {class: 'chip', text: w.agent}) : null,
-      w.emergency ? el('span', {class: 'chip hold', text: 'Repair'}) : null,
-      w.since ? el('span', {class: 'chip', text: lasted(w.since)}) : null,
-      w.last ? el('p', {class: 'sub mono', text: w.last + (w.last_at ? '  · ' + ago(w.last_at) : '')}) : null);
-  }
-  const STEP_MARK = {done: '✓', running: '▶', failed: '✗', waiting: '…', todo: '○'};
-  const STEP_WORD = {done: 'done', running: 'running now', failed: 'failed', waiting: 'waiting', todo: 'not started'};
-  function mergeBlock(m, full) {
-    const out = [];
-    const chips = [];
-    if (m.active) chips.push(el('span', {class: 'chip run', text: 'Round ' + m.round + ' running'}));
-    else if (!m.on) chips.push(el('span', {class: 'chip', text: 'Merge rounds are off'}));
-    else if (m.held) chips.push(el('span', {class: 'chip hold', text: 'Merging paused'}));
-    else chips.push(el('span', {class: 'chip', text: 'No round running'}));
-    if (m.stale) chips.push(el('span', {class: 'chip hold', text: 'No update for a while'}));
-    if (m.backlog) chips.push(el('span', {class: 'chip wait', text: m.backlog + ' waiting'}));
-    if (m.agent && m.active) chips.push(el('span', {class: 'chip', text: m.agent}));
-    out.push(el('p', {class: 'headline', text: m.headline || (m.active ? 'A merge round is running.' : 'Nothing is merging.')}), el('div', null, chips));
-    if (m.why && (!m.active || full)) out.push(el('p', {class: 'sub', text: m.why}));
-    const steps = full ? m.steps : m.steps.filter(s => s.state === 'running' || s.state === 'failed');
-    if (m.active && steps.length) {
-      out.push(el('ol', {class: 'steps'}, steps.map(s => el('li', {class: s.state},
-        el('span', {class: 'mark', 'aria-hidden': 'true', text: STEP_MARK[s.state] || '○'}),
-        el('span', {class: 'name'}, s.name, el('span', {class: 'sr', text: ', ' + (STEP_WORD[s.state] || s.state)}),
-          full && s.message && s.state !== 'done' ? el('p', {class: 'sub', text: s.message}) : null),
-        s.seconds ? el('span', {class: 'took', text: took(s.seconds)}) : null))));
-    }
-    if (m.active && full && m.prs.length) out.push(el('p', {class: 'sub', text: 'In this round: ' + m.prs.map(n => '#' + n).join(', ')}));
-    if (m.active && m.started) out.push(el('p', {class: 'sub', text: 'Started ' + ago(m.started) + (m.updated ? ', last update ' + ago(m.updated) : '')}));
-    if (m.previous && (full || !m.active)) {
-      out.push(el('p', {class: 'sub', text: 'Last round ' + m.previous.round + ': ' + (m.previous.result || 'ended') + (m.previous.ended ? ' (' + ago(m.previous.ended) + ')' : '')}));
-    }
-    return out;
-  }
+  let desktop = false, can = false;
   const BUILD = {scheduled: ['Scheduled', 'wait'], waiting: ['Waiting', 'wait'], queued: ['Queued', 'wait'], running: ['Building', 'run'],
     done: ['Finished', 'run'], failed: ['Failed', 'bad'], cancelled: ['Cancelled', '']};
+  // Every control says what happened: a short note at the bottom of the screen. `ask` is a confirm for the ones that stop
+  // or throw away work.
+  let toastTimer = 0;
+  function toast(text, bad) {
+    const t = $('toast');
+    t.textContent = text;
+    t.className = 'toast' + (bad ? ' bad' : '');
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, bad ? 9000 : 4000);
+  }
+  window.fletcheryToast = toast;
+  async function act(path, body, done, ask) {
+    if (ask && !confirm(ask)) return false;
+    try {
+      const out = await post(path, body);
+      toast(out.message || done);
+      refresh();
+      return true;
+    } catch (e) { toast(String(e.message || e), true); return false; }
+  }
+  window.fletcheryAct = act;
+  function button(text, path, body, done, ask) {
+    const b = el('button', {type: 'button', class: 'small', text});
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      await act(path, body, done, ask);
+      b.disabled = false;
+    });
+    return b;
+  }
   function buildRow(b) {
     const [word, cls] = BUILD[b.state] || [b.state, ''];
-    const time = b.finished ? 'Finished ' + when(b.finished) : b.started ? 'Started ' + when(b.started) : b.at ? 'Planned for ' + when(b.at) : '';
-    const publish = {uploading: 'Uploading the download', failed: 'Upload failed', skipped: 'Not uploaded'}[b.publish];
+    const time = b.finished ? 'Finished ' + when(b.finished) : b.started ? 'Started ' + when(b.started) + ' (' + lasted(b.started) + ')' : b.at ? 'Planned for ' + when(b.at) : '';
+    const publish = {zipping: 'Zipping the download', uploading: 'Uploading the download', failed: 'Upload failed', skipped: 'Not uploaded'}[b.publish];
+    const open = !['done', 'failed', 'cancelled'].includes(b.state);
     return el('li', null,
       el('div', {class: 'title', text: 'Build ' + b.version}),
       el('span', {class: 'chip ' + cls, text: word}),
       publish ? el('span', {class: 'chip ' + (b.publish === 'failed' ? 'bad' : 'wait'), text: publish}) : null,
       b.tests === 'full' ? el('span', {class: 'chip', text: 'Full tests'}) : null,
       b.repeat === 'daily' ? el('span', {class: 'chip', text: 'Daily'}) : null,
+      can && b.state === 'scheduled' && !b.repeat ? button('Start now', '/api/builds/now', {id: b.id}, 'Starting ' + b.version + ' now.') : null,
+      can && b.state === 'scheduled' && b.repeat ? button('Run once now', '/api/builds/now', {id: b.id}, 'Starting ' + b.version + ' now.') : null,
+      can && open ? button(b.repeat ? 'Stop repeating' : b.state === 'running' ? 'Stop' : 'Cancel', '/api/builds/cancel', {id: b.id}, 'Done.',
+        b.state === 'running' ? 'Stop build ' + b.version + '? The machine stops it and the work so far is lost.' : b.repeat ? 'Stop the daily ' + b.version + ' build?' : '') : null,
+      can && ['failed', 'cancelled'].includes(b.state) ? button('Build again', '/api/builds/retry', {id: b.id}, 'Build ' + b.version + ' queued again.') : null,
       el('p', {class: 'sub', text: [time, b.machine && 'on ' + b.machine, b.ref && 'from ' + b.ref + (b.sha ? ' (' + b.sha + ')' : '')].filter(Boolean).join(' · ')}),
       b.reason && !(b.state === 'done' && b.links.length) ? el('p', {class: 'sub', text: b.reason}) : null,
+      b.publish_reason && b.publish === 'failed' ? el('p', {class: 'sub', text: b.publish_reason}) : null,
       b.links.length ? el('div', {class: 'links'}, b.links.filter(l => web(l.url)).map(l =>
         el('a', {href: l.url, target: '_blank', rel: 'noopener noreferrer', text: l.label}))) : null);
   }
+  const JOB = {queued: ['Queued', 'wait'], running: ['Running', 'run'], passed: ['Passed', 'run'], failed: ['Failed', 'bad'],
+    cancelled: ['Cancelled', ''], lost: ['Lost', 'bad']};
+  function steps(j) {
+    if (!j.steps || !j.steps.length) return null;
+    return el('ol', {class: 'steps'}, j.steps.map(s => el('li', {class: s.state === 'passed' ? 'done' : s.state},
+      el('span', {class: 'mark', 'aria-hidden': 'true', text: {passed: '✓', running: '▶', failed: '✗'}[s.state] || '○'}),
+      el('span', {class: 'name', text: s.name}),
+      s.start ? el('span', {class: 'took', text: s.end ? took((Date.parse(s.end) - Date.parse(s.start)) / 1000) : lasted(s.start)}) : null)));
+  }
+  function jobRow(j) {
+    const [word, cls] = JOB[j.state] || [j.state, ''];
+    const what = j.recipe === 'package' ? 'Build ' + (j.version || '') : j.recipe;
+    return el('li', null,
+      el('div', {class: 'title'}, el('span', {class: 'num', text: '#' + j.id}), what),
+      el('span', {class: 'chip ' + cls, text: word + (j.cancel && j.state === 'running' ? ' (stopping)' : '')}),
+      can && ['queued', 'running'].includes(j.state) && !j.cancel ? button(j.state === 'running' ? 'Stop' : 'Cancel', '/api/jobs/cancel', {id: j.id},
+        j.state === 'running' ? 'The machine stops job #' + j.id + ' at its next check-in (within a minute).' : 'Job #' + j.id + ' cancelled.',
+        j.state === 'running' ? 'Stop job #' + j.id + ' now? Its processes on ' + (j.machine || 'the machine') + ' are ended.' : '') : null,
+      can && ['failed', 'cancelled', 'lost'].includes(j.state) && j.recipe !== 'package' ? button('Run again', '/api/jobs/retry', {id: j.id}, 'Queued again.') : null,
+      can && j.log_bytes ? el('a', {class: 'small-link', href: '/api/jobs/log?id=' + j.id, target: '_blank', rel: 'noopener', text: 'Log'}) : null,
+      el('p', {class: 'sub', text: [j.machine && 'on ' + j.machine, j.started ? 'started ' + when(j.started) : 'queued ' + ago(j.created),
+        j.finished ? 'finished ' + when(j.finished) : j.started ? 'running ' + lasted(j.started) : '',
+        j.ref && 'from ' + j.ref + (j.sha ? ' (' + j.sha + ')' : '')].filter(Boolean).join(' · ')}),
+      j.summary ? el('p', {class: 'sub', text: j.summary}) : null,
+      j.state === 'running' ? steps(j) : null);
+  }
   function machineRow(m) {
+    const off = m.paused.includes('builds');
     return el('li', null,
       el('div', {class: 'title', text: m.name}),
-      el('span', {class: 'chip ' + (m.online ? 'run' : 'bad'), text: m.online ? 'Online' : 'Offline'}),
-      m.job ? el('span', {class: 'chip wait', text: 'Running: ' + m.job}) : m.online ? el('span', {class: 'chip', text: 'Idle'}) : null,
-      m.paused.length ? el('span', {class: 'chip hold', text: 'Paused: ' + m.paused.join(', ')}) : null,
-      !m.online && m.last_seen ? el('p', {class: 'sub', text: 'Last seen ' + ago(m.last_seen)}) : null);
+      el('span', {class: 'chip ' + (m.online ? 'run' : 'bad'), text: m.online ? 'Worker online' : 'Worker offline'}),
+      m.job ? el('span', {class: 'chip wait', text: 'Running job #' + m.job.id}) : m.online ? el('span', {class: 'chip', text: 'Idle'}) : null,
+      off ? el('span', {class: 'chip hold', text: 'Builds paused'}) : null,
+      can ? button(off ? 'Resume builds' : 'Pause builds', '/api/machines/pause', {name: m.name, kind: 'builds', on: !off},
+        off ? m.name + ' takes builds again.' : m.name + ' takes no new builds. A running one finishes.') : null,
+      !m.online && m.last_seen ? el('p', {class: 'sub', text: 'Last called in ' + ago(m.last_seen)}) : null,
+      el('p', {class: 'sub', text: m.labels.join(' · ')}));
   }
 
   function draw(d) {
-    // The coder agents and merge rounds are switched off in most profiles now: their tabs show only while they run.
-    const engine = d.workers_enabled !== false;
-    for (const t of ['now', 'tasks', 'merges']) $('tab-' + t).hidden = !engine;
-    if (!engine && ['now', 'tasks', 'merges'].includes(location.hash.slice(1))) show('live');
+    desktop = d.desktop === true;
+    can = d.controls === true;
+    document.body.classList.toggle('desktop', desktop);
+    document.body.classList.toggle('controls', can);
+    for (const n of document.querySelectorAll('.desk')) n.hidden = !desktop || (n.id === 'newBuildCard' && !d.machines_on);
+    for (const n of document.querySelectorAll('.ctrl')) n.hidden = !can;
     $('project').textContent = d.project && d.project !== 'project' ? d.project : 'Fletchery';
-    document.title = (d.needs.length ? '(' + d.needs.length + ') ' : '') + 'Fletchery';
-    $('alerts').replaceChildren(...d.pauses.map(p => el('div', {class: 'alert' + (p.kind === 'signed_out' || p.kind === 'sync' ? ' bad' : ''), role: 'status'},
-      el('strong', {text: {signed_out: 'Sign-in needed', held: 'Paused', limit: 'Usage limit', restarting: 'Restarting', sync: 'GitHub trouble'}[p.kind] || 'Note'}), p.text)));
-    const stat = (n, label, hot) => el('div', {class: 'stat' + (hot && n ? ' hot' : '')}, el('b', {text: String(n)}), el('span', {text: label}));
-    $('stats').replaceChildren(stat(d.needs.length, 'Needs you', true), stat(d.workers.length, 'Working'), stat(d.queued.length, 'Queued'), stat(d.merge.waiting.length, 'To merge'));
-    const badge = $('b-now');
-    badge.hidden = !d.needs.length;
-    badge.textContent = d.needs.length;
-    badge.setAttribute('aria-label', d.needs.length + ' need you');
-
-    const needs = () => d.needs.map(t => taskRow(t, el('span', {class: 'chip needs', text: 'Needs you'})));
-    fill($('needs'), needs(), 'Nothing needs you.');
-    fill($('workers'), d.workers.map(workerRow), 'No worker is running right now.');
-    $('mergeMini').replaceChildren(...mergeBlock(d.merge, false));
-    $('machinesCard').hidden = !d.machines.length;
-    fill($('machines'), d.machines.map(machineRow), '');
+    const alerts = d.errors.map(t => el('div', {class: 'alert bad', role: 'status'}, el('strong', {text: 'Problem'}), t));
+    if (d.restarting) alerts.unshift(el('div', {class: 'alert', role: 'status'}, el('strong', {text: 'Restarting'}), d.restarting));
+    $('alerts').replaceChildren(...alerts);
+    const open = d.builds.filter(b => !['done', 'failed', 'cancelled'].includes(b.state)).length;
+    const badge = $('b-builds');
+    badge.hidden = !open;
+    badge.textContent = open;
+    badge.setAttribute('aria-label', open + ' builds scheduled or running');
+    const ab = $('b-activity');
+    ab.hidden = !d.errors.length;
+    ab.textContent = d.errors.length ? '!' : '';
+    if (!$('bRef').value && !$('bRef').dataset.touched) $('bRef').placeholder = d.base || 'main';
+    fill($('builds'), d.builds.map(buildRow), d.machines_on ? 'No builds yet.' + (desktop ? '' : ' Queue one in the Fletchery window on the PC; Build again works here.') : 'No build machines are set up (workers.machines in the profile).');
+    fill($('buildMachines'), d.machines.map(machineRow), 'No build machines are registered.');
+    $('heldNote').hidden = !d.held;
+    $('holdAll').textContent = d.held ? 'Resume all machines' : 'Pause all machines';
+    $('holdAll').dataset.on = d.held ? '' : '1';
+    fill($('jobs'), d.jobs.slice(0, 25).map(jobRow), 'No machine jobs yet.');
+    const sc = d.scratch || {};
+    fill($('health'), [
+      el('li', null, el('div', {class: 'title', text: 'Backend'}), el('span', {class: 'chip run', text: 'Running'}),
+        el('p', {class: 'sub', text: 'Up ' + lasted(d.started) + ', since ' + when(d.started) + (d.version ? ' · code ' + d.version : '') +
+          (d.repo ? ' · builds from ' + d.repo : '')})),
+      d.machines_on ? el('li', null, el('div', {class: 'title', text: 'Build machines'}),
+        el('span', {class: 'chip ' + (d.held ? 'hold' : 'run'), text: d.held ? 'All paused' : 'Taking jobs'}),
+        el('p', {class: 'sub', text: d.machines.filter(m => m.online).length + ' of ' + d.machines.length + ' online · ' +
+          d.jobs.filter(j => j.state === 'running').length + ' running, ' + d.jobs.filter(j => j.state === 'queued').length + ' queued'})) : null,
+      sc.checked_at ? el('li', null, el('div', {class: 'title', text: 'Scratch clean-up'}),
+        el('span', {class: 'chip ' + (sc.error ? 'bad' : ''), text: sc.error ? 'Stopped' : sc.mode || 'on'}),
+        el('p', {class: 'sub', text: sc.error || ('Last ran ' + ago(sc.checked_at) + (sc.freed_gb ? ', freed ' + sc.freed_gb + ' GB' : ''))})) : null,
+      ...d.errors.map(t => el('li', null, el('div', {class: 'title', text: 'Problem'}), el('p', {class: 'sub', text: t})))].filter(Boolean), '');
     fill($('log'), d.log.slice().reverse().map(r => el('li', null, el('time', {text: when(r.at)}), r.line)), 'Nothing yet.');
-
-    fill($('t-needs'), needs(), 'Nothing needs you.');
-    fill($('t-running'), d.running.map(t => taskRow(t, t.agent ? el('span', {class: 'chip run', text: t.agent}) : el('span', {class: 'chip run', text: 'Working'}))), 'Nothing is being worked on.');
-    fill($('t-queued'), d.queued.map(t => taskRow(t, el('span', {class: 'chip wait', text: t.why === 'ready' || !t.why ? 'Ready' : 'Waiting'}))), 'The queue is empty.');
-    fill($('t-pr'), d.in_pr.map(t => taskRow(t, null)), 'No open pull requests from workers.');
-    for (const [id, list] of [['n-needs', d.needs], ['n-running', d.running], ['n-queued', d.queued], ['n-pr', d.in_pr], ['n-waiting', d.merge.waiting]]) $(id).textContent = list.length ? '(' + list.length + ')' : '';
-
-    $('mergeFull').replaceChildren(...mergeBlock(d.merge, true));
-    fill($('waiting'), d.merge.waiting.map(p => el('li', null,
-      link(p.url, 'title', num(p.pr), p.title),
-      el('span', {class: 'chip ' + (p.ready ? 'run' : 'wait'), text: p.ready ? 'Ready for the next round' : 'Not ready yet'}),
-      p.flags.map(f => el('span', {class: 'chip hold', text: f})))), 'No pull request is waiting to merge.');
-    fill($('builds'), d.builds.map(buildRow), 'No builds yet. Schedule one in Fletchery on the PC.');
   }
 
   function freshness() {
@@ -187,8 +218,7 @@
       return;
     }
     dot.className = 'dot ok';
-    const pass = last.passing ? 'checking GitHub now' : last.last_pass ? 'last check ' + ago(last.last_pass) : '';
-    text.textContent = 'Live' + (pass ? ' · ' + pass : '') + (last.daily_budget ? ' · $' + Number(last.spent_today).toFixed(0) + ' today' : '');
+    text.textContent = 'Connected · updated ' + ago(new Date(lastOk).toISOString());
   }
 
   // The last answer is kept on this phone only so the page has something to show the moment it opens.
@@ -218,11 +248,12 @@
       remember(body);
       $('dot').classList.add('pulse');
     } catch (e) {
-      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? 'Can’t reach the PC. Is Tailscale on, and is the PC awake?' : String(e.message || e);
+      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? (desktop ? 'The Fletchery backend is not answering.' : 'Can’t reach the PC. Is Tailscale on, and is the PC awake?') : String(e.message || e);
     }
     clearTimeout(giveUp);
     freshness();
-    if (!document.hidden) timer = setTimeout(refresh, failed ? RETRY_MS : POLL_MS);
+    const open = (location.hash.slice(1) || 'live') !== 'live';
+    if (!document.hidden) timer = setTimeout(refresh, failed ? RETRY_MS : open ? POLL_MS : QUIET_MS);
   }
 
   // ---- tabs ----
@@ -234,6 +265,7 @@
     }
     if (!quiet) { history.replaceState(null, '', '#' + tab); window.scrollTo(0, 0); }
     document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: tab}));
+    if (tab !== 'live' && !quiet) refresh();
   }
   document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) show(b.dataset.tab); });
   window.addEventListener('hashchange', () => show(location.hash.slice(1), true));
@@ -241,7 +273,40 @@
 
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); else clearTimeout(timer); });
   window.addEventListener('online', refresh);
-  setInterval(freshness, 15000);
+  setInterval(freshness, 5000);
+
+  // ---- the desktop window's form ----
+  $('bRef').addEventListener('input', () => { $('bRef').dataset.touched = '1'; });
+  $('newBuild').addEventListener('submit', async e => {
+    e.preventDefault();
+    const msg = $('bMsg');
+    msg.textContent = ''; msg.className = 'msg';
+    const at = $('bAt').value ? new Date($('bAt').value).toISOString() : '';
+    try {
+      const row = await post('/api/builds/add', {version: $('bVersion').value.trim(), ref: $('bRef').value.trim(), at,
+        repeat: $('bDaily').checked ? 'daily' : '', tests: $('bTests').checked ? 'full' : ''});
+      msg.textContent = 'Build ' + row.version + ' queued.';
+      $('newBuild').reset(); delete $('bRef').dataset.touched;
+      refresh();
+    } catch (err) { msg.textContent = String(err.message || err); msg.className = 'msg bad'; }
+  });
+  $('holdAll').addEventListener('click', () => {
+    const on = !!$('holdAll').dataset.on;
+    act('/api/machines/hold', {on}, on ? 'All machines paused. Running jobs finish; nothing new starts.' : 'Machines take jobs again.',
+      on ? 'Pause all build machines? Running jobs finish; nothing new starts until you resume.' : '');
+  });
+  $('reload').addEventListener('click', () => location.reload());
+  $('refreshTop').addEventListener('click', () => {
+    if (can) post('/api/live/refresh', {}).catch(() => {});
+    refresh();
+    document.dispatchEvent(new CustomEvent('fletchery-refresh'));
+    toast('Refreshing.');
+  });
+  $('checkNow').addEventListener('click', () => act('/api/live/refresh', {}, 'Reading GitHub now. Live updates in a few seconds.'));
+  $('restart').addEventListener('click', async () => {
+    if (await act('/api/restart', {}, 'Restarting. Back in a few seconds.',
+      'Restart the Fletchery backend? It is back in a few seconds; builds on the machines carry on.')) $('rMsg').textContent = 'Restarting…';
+  });
   recall();
   refresh();
 
@@ -261,6 +326,7 @@
     const pad = text + '='.repeat((4 - text.length % 4) % 4);
     return Uint8Array.from(atob(pad.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
   }
+  window.fletcheryPost = (path, body) => post(path, body);
   async function post(path, body) {
     const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const out = await r.json().catch(() => ({}));
@@ -300,10 +366,10 @@
     }
     const sub = await subscription();
     if (sub) {
-      text.textContent = 'On for this phone. You hear about tasks that need you, finished merge rounds and finished builds.';
+      text.textContent = 'On for this phone. You hear when something gets stuck or blocked, and when a build is ready.';
       $('notifyTest').hidden = false; $('notifyOff').hidden = false;
     } else {
-      text.textContent = 'Get a notification when a task needs you, a merge round finishes or a build is ready. Messages are encrypted for this phone.';
+      text.textContent = 'Get a notification when something gets stuck or blocked, or a build is ready. Messages are encrypted for this phone.';
       $('notifyOn').hidden = false;
       $('notifyOn').dataset.key = info.key;
     }
