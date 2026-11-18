@@ -187,8 +187,12 @@ button.small:disabled { opacity: .5; }
 
 /* The desktop window: wider, tabs across the top instead of at the bottom */
 @media (min-width: 900px) {
-  body.desktop { padding-bottom: 0; }
-  body.desktop .top { position: static; }
+  /* <nav class="tabs"> comes after <main> in the page (the phone's bar sits at the bottom): reorder so it is under
+     the header, once, and sticks there while the page scrolls */
+  body.desktop { padding-bottom: 0; display: flex; flex-direction: column; min-height: 100vh; }
+  body.desktop .top { position: static; order: 0; }
+  body.desktop .tabs { order: 1; }
+  body.desktop main { order: 2; width: 100%; box-sizing: border-box; }
   body.desktop .tabs { position: sticky; top: 0; bottom: auto; border-top: 0; border-bottom: 1px solid var(--rule);
     grid-auto-columns: max-content; justify-content: center; gap: 4px; padding: 0; }
   body.desktop .tabs button { flex-direction: row; gap: 7px; height: 46px; padding: 0 22px; font-size: 14px; }
