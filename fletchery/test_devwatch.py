@@ -118,6 +118,39 @@ class Feed(unittest.TestCase):
         self.assertIn("admin:org", s["fresh"]["runner_note"])
         self.assertEqual([r["name"] for r in s["runners"]], ["ALEX-PC-unreal-pr"])
 
+    def test_runners_added_to_a_repository_are_listed_without_admin_org(self):
+        """LifeShare's four runners are registered on the repository, not the organisation (2026-11-18: Live showed one)."""
+        repo_runners = {"runners": [
+            {"id": 11, "name": f"{pc}-{lab}", "status": "online", "busy": pc == "ALEX-PC" and lab == "unreal-pr",
+             "labels": [{"name": "self-hosted", "type": "read-only"}, {"name": lab, "type": "custom"}]}
+            for pc in ("ALEX-PC", "SF-NODE-01") for lab in ("unreal-light", "unreal-pr")]}
+        for i, r in enumerate(repo_runners["runners"]):
+            r["id"] = 100 + i
+        w = self.watch(**{f"orgs/{ORG}/actions/runners": devwatch.GitHubError(403, "Must have admin rights"),
+                          f"repos/{REPO}/actions/runners": repo_runners})
+        s = w.snapshot()
+        self.assertEqual(sorted(r["name"] for r in s["runners"]),
+                         ["ALEX-PC-unreal-light", "ALEX-PC-unreal-pr", "SF-NODE-01-unreal-light", "SF-NODE-01-unreal-pr"])
+        busy = next(r for r in s["runners"] if r["name"] == "ALEX-PC-unreal-pr")
+        self.assertEqual((busy["job"]["id"], busy["job"]["step"]), (7, "Build editor"))
+
+    def test_a_refused_runner_list_is_asked_again_after_an_hour(self):
+        w = self.watch(**{f"orgs/{ORG}/actions/runners": devwatch.GitHubError(403, "Must have admin rights")})
+        path = f"orgs/{ORG}/actions/runners?per_page=100"
+        self.assertAlmostEqual(w.skip[path] - time.time(), devwatch.RUNNER_REFUSED_RETRY, delta=5)
+        self.assertEqual(devwatch.RUNNER_REFUSED_RETRY, 3600)
+
+    def test_a_run_for_a_closed_pull_request_is_flagged(self):
+        w = self.watch()
+        w.gh.answers[f"repos/{REPO}/pulls"] = [p for p in w.gh.answers[f"repos/{REPO}/pulls"] if p["number"] != 12]
+        w.poll()
+        s = w.snapshot()
+        self.assertTrue(next(r for r in s["runs"] if r["id"] == 7)["pr_closed"])
+        self.assertIn("PR check · PR #12 is still running, but its pull request is closed", [b["title"] for b in s["blockers"]])
+        pc = next(r for r in s["runners"] if r["name"] == "ALEX-PC-unreal-pr")
+        self.assertTrue(pc["job"]["pr_closed"])
+        self.assertFalse(next(r for r in self.watch().snapshot()["runs"] if r["id"] == 7)["pr_closed"])
+
     def test_finished_checks_are_not_asked_again(self):
         w = self.watch()
         w.gh.asked.clear()
@@ -152,6 +185,10 @@ class Feed(unittest.TestCase):
         pc = next(m for m in s["machines"] if m["host"] == "Alex_Gaming_PC")
         self.assertIn("ALEX_GAMING_PC-unreal-pr", pc["runners"])
         self.assertEqual(next(r for r in s["runners"] if r["name"] == "ALEX_GAMING_PC-unreal-pr")["machine"], "Alex_Gaming_PC")
+
+    def test_runner_seen_without_reporter_or_labels_is_named_by_its_computer(self):
+        w = self.watch(**{f"orgs/{ORG}/actions/runners": {"runners": [{"id": 9, "name": "SF-NODE-01-unreal-light", "status": "online", "busy": False, "labels": []}]}})
+        self.assertEqual(next(r for r in w.snapshot()["runners"] if r["name"] == "SF-NODE-01-unreal-light")["machine"], "SF-NODE-01")
 
     def test_bounds(self):
         w = devwatch.DevWatch({}, github=FakeGitHub({}))

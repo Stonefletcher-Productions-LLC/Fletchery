@@ -1,7 +1,5 @@
 """Asset folders the PC shares with nodes (workers.machines.assetRoots): the coordinator lists and serves them, the
 worker mirrors them before imports, and a round refuses an import when a folder is missing (Alex, 2026-11-13)."""
-import base64
-import io
 import json
 import sys
 import tempfile
@@ -131,7 +129,7 @@ class AssetSyncTests(unittest.TestCase):
         self.assertEqual(node_worker.sync_assets(Old(self.m, self.key), {}, log=lambda *a: None)["copied"], 0)
 
 
-class RoundGateTests(unittest.TestCase):
+class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.m = Machines(self.tmp.name, "owner/repo")
@@ -139,31 +137,10 @@ class RoundGateTests(unittest.TestCase):
         (self.root / "r9").mkdir(parents=True)
         (self.root / "r9" / "a.fbx").write_text("x")
         self.m.set_asset_roots([str(self.root)])
-        self.params = {"only": "RunSpecs", "imports": "ImportMeshyFolk", "push_branch": "fletchery/round-9"}
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_quick(self):
-        out = io.StringIO()
-        code = machines.run_job(self.m, "node-checks", SHA, dict(self.params), labels=["role:imports"],
-                                out=lambda s: out.write(s + "\n"), clock=lambda: 10**9, sleep=lambda s: None)
-        return code, out.getvalue()
-
-    def test_missing_folder_stops_an_import_before_it_is_queued(self):
-        (self.root / "r9" / "a.fbx").unlink()
-        (self.root / "r9").rmdir()
-        code, text = self.run_quick()
-        self.assertEqual(code, 2)
-        self.assertIn("missing or empty on this PC", text)
-        self.assertEqual(self.m.view().get("jobs", []) if isinstance(self.m.view(), dict) else [], [])
-
-    def test_an_old_worker_cannot_take_imports(self):
-        self.m.add_machine("NODE-01")
-        self.m.seen("NODE-01", "1.2.3.4", NODE, 24, "1", {})   # no cap:asset-sync
-        code, text = self.run_quick()
-        self.assertEqual(code, 2)
-        self.assertIn("cap:asset-sync", text)
 
     def test_hello_says_the_worker_mirrors(self):
         seen = {}

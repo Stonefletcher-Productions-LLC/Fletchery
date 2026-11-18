@@ -1,8 +1,8 @@
 """Notifications on the phone for the portal (portal.py): Web Push, which iOS 16.4+ delivers to a web app that was added
 to the Home Screen.
 
-What is sent: a task that needs you, a merge round that finished, a build that finished (with where to download it),
-and an agent that needs signing in again. Each message is encrypted for that one phone (RFC 8291, aes128gcm), so the
+What is sent: a build that finished (with where to download it), and anything the Live tab lists as stuck or
+blocked (a failed check, an offline runner, a silent machine, a run that waits too long). Each message is encrypted for that one phone (RFC 8291, aes128gcm), so the
 push service (Apple, Google, Mozilla) relays it without being able to read it, and signed with this install's own key
 (VAPID, RFC 8292) so nobody else can send to the phone. The phone does not need to be on the private network to get one.
 
@@ -11,7 +11,7 @@ notifications are unavailable. State (the key, the subscribed phones, what was a
 the state folder; it never leaves this PC.
 
     "push": {"contact": "mailto:you@example.com",   # who the push service may contact about this sender (required by Apple)
-             "events": ["needs", "merge", "build", "signin", "stuck"]}   # default: all five"""
+             "events": ["build", "stuck"]}   # default: both"""
 from __future__ import annotations
 
 import base64
@@ -25,7 +25,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-EVENTS = ("needs", "merge", "build", "signin", "stuck")
+EVENTS = ("build", "stuck")
 SETTLE = 180   # a lost feed or a silent machine is announced only once it has lasted this long (no blips)
 # Only real push services are ever contacted: a subscription cannot point Fletchery at another address.
 SERVICES = (".push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", ".notify.windows.com")
@@ -151,13 +151,6 @@ def _seconds_ago(iso):
 def marks(view: dict) -> dict:
     """What the portal's summary says now, as {key: notification}. A key that was not there at the last look is news."""
     out = {}
-    for t in view.get("needs") or []:
-        out[f"needs:{t.get('number')}"] = {"event": "needs", "title": "Needs you", "tab": "now",
-                                           "body": f"#{t.get('number')} {t.get('title') or ''}".strip()}
-    prev = (view.get("merge") or {}).get("previous") or {}
-    if prev.get("round"):
-        out[f"merge:{prev['round']}"] = {"event": "merge", "title": f"Merge round {prev['round']} finished", "tab": "merges",
-                                         "body": str(prev.get("result") or "It ended.")}
     for b in view.get("builds") or []:
         if b.get("state") not in BUILD_DONE:
             continue
@@ -175,9 +168,6 @@ def marks(view: dict) -> dict:
         what = {"label": "Blocked", "check": "Check failed", "runner": "Runner offline"}.get(b.get("kind"), "Stuck")
         out[f"stuck:{b.get('key') or b.get('title')}"] = {"event": "stuck", "tab": "live", "title": what,
                                                            "body": " · ".join(x for x in (str(b.get("title") or ""), str(b.get("detail") or "")) if x)[:160]}
-    for p in view.get("pauses") or []:
-        if p.get("kind") == "signed_out":
-            out["signin"] = {"event": "signin", "title": "An agent needs signing in", "tab": "now", "body": str(p.get("text") or "")[:160]}
     return out
 
 
@@ -282,7 +272,7 @@ class Push:
             subs = [s for s in self.state["subscriptions"] if s["endpoint"] == endpoint]
         if not subs:
             raise ValueError("This phone is not subscribed yet.")
-        sent = self.deliver({"title": "Fletchery", "body": "Notifications work on this phone.", "tab": "now", "tag": "test"}, subs)
+        sent = self.deliver({"title": "Fletchery", "body": "Notifications work on this phone.", "tab": "live", "tag": "test"}, subs)
         if not sent:
             raise ValueError("The push service did not accept the test. Turn notifications off and on again.")
         return {"sent": sent}
@@ -328,9 +318,9 @@ class Push:
             first = seen is None
             seen = set(seen or [])
             news = [(k, n) for k, n in now.items() if k not in seen]
-            # Keep what is still showing, plus merge and build marks (a finished round must not be announced again
-            # when a newer one replaces it and then the list is trimmed).
-            kept = [k for k in seen if k in now or k.startswith(("merge:", "build:"))][-400:]
+            # Keep what is still showing, plus build marks (a finished build must not be announced again when it
+            # drops off the list).
+            kept = [k for k in seen if k in now or k.startswith("build:")][-400:]
             fresh = kept + [k for k, _ in news]
             if first or news or len(fresh) != len(seen):
                 self.state["seen"] = fresh

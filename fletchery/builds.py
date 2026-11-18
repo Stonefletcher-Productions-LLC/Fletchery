@@ -1,38 +1,31 @@
 """Scheduled builds: pick a version and a time, and Fletchery packages whatever is on the branch at that time.
 
-Building -> Builds adds a row: version (0.3.9), branch (the base branch unless you name another), when (now or a time),
-once or every day, with or without the Full tests first, and where it runs (automatic, the node, or this PC). Rows live
-in state.json (`builds`), so a restart keeps them.
+Builds adds a row: version (0.3.9), branch (the base branch unless you name another), when (now or a time),
+once or every day, with or without the Full tests first. Rows live in <state dir>/builds.json, so a restart keeps them.
 
 What happens to a row:
 
     scheduled  waiting for its time. A daily row stays here: at its time it starts a one-off copy and moves on a day.
-    waiting    its time came: the branch was read once (`sha` is what gets built, whatever later lands) and the build
-               waits for a machine. Automatic sends it to a test node when one that can package (labels os:windows and
-               role:cook) is online, otherwise to this PC.
-    queued     a node job is queued (machines.py `package` recipe); it starts when the node is free.
-    running    a node or this PC is building it.
+    queued     its time came: the branch was read once (`sha` is what gets built, whatever lands later) and a
+               `package` job waits for a machine that can package (machines.py: labels os:windows and role:cook).
+               Every build machine runs node_worker.py, this PC included, so there is one way to build.
+    running    a machine is building it.
     done / failed / cancelled
 
-On this PC a build uses the same checkout as merge rounds and PC checks (incremental builds), so it takes the merge slot:
-a running round or check finishes first, then the build starts before the next one. It also waits for the PC's heavy
-lease, like a round. Afterwards it resets generated Content so the next round starts clean. Packages go to
-`workers.builds.outDir` (default <state dir>\\builds), as <Name>-<version>, with the commit added when that folder
-already exists. A node writes to its own `buildsDir`.
+Packages go to the machine's own `buildsDir` and are copied back to this PC (`workers.builds.outDir`, default
+<state dir>\builds).
 
 Profile (all optional), in `workers`:
     "builds": {"outDir": "E:\\\\lifeshare-scratch\\\\LifeShare-builds", "engine": "E:\\\\UE_5.8", "timeoutMinutes": 300,
                "nodeLabels": ["unreal:5.8.3"]}
-`nodeLabels` are extra labels a node needs to take a build (for example a matching engine version).
+`nodeLabels` are extra labels a machine needs to take a build (for example a matching engine version).
 `"publish": {"to": "github", "keep": 3}` also uploads each finished build to a private pre-release on the project
 repository and keeps the newest three, so it can be downloaded from any computer (publish.py).
 """
 from __future__ import annotations
 
-import os
 import re
 import subprocess
-import sys
 import threading
 import uuid
 from copy import deepcopy
@@ -42,10 +35,8 @@ from pathlib import Path, PureWindowsPath
 VERSION = re.compile(r"^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$")
 REF = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-WHERE = ("auto", "node", "pc")
 TERMINAL = ("done", "failed", "cancelled")
 KEEP_FINISHED = 30          # finished rows kept for the list; older ones are dropped
-NOT_ON_NODE = "This node does not run"
 
 
 def utc(value: str = "") -> datetime:
@@ -69,33 +60,27 @@ class Builds:
         self.engine = engine
         self.lock = threading.RLock()
         self._publishing: threading.Thread | None = None
-        # A PC build that was running when Fletchery stopped did not finish: say so instead of showing it running.
         for row in self.rows:
-            if row["state"] == "running" and row.get("route") == "pc":
-                row.update(state="failed", finished=iso(utc()),
-                           reason="Fletchery restarted while this build ran on this PC. Queue it again.")
+            if row["state"] in ("waiting", "running", "queued") and row.get("route") == "pc":   # the retired PC route
+                row.update(state="failed", finished=iso(utc()), reason="Builds now run on a build machine. Queue it again.")
             if row.get("publish") in ("zipping", "uploading", "failed"):  # cut off by a restart, or failed: try again
                 row["publish"] = ""
 
     # ---- state ----
     @property
     def rows(self) -> list:
-        st = self.engine.state
-        if not isinstance(getattr(st, "builds", None), list):
-            st.builds = []
-        return st.builds
+        return self.engine.state.builds
 
     @property
     def conf(self) -> dict:
         return getattr(self.engine.cfg, "builds", None) or {}
 
     def save(self) -> None:
-        if not self.engine.dry_run:
-            self.engine.state.save(self.engine.state_dir / "state.json")
+        self.engine.state.save()
 
     def _log(self, text: str) -> None:
         try:
-            self.engine.ctx.log("builds: " + text)
+            self.engine.log("builds: " + text)
         except Exception:
             pass
 
@@ -113,8 +98,7 @@ class Builds:
                 nodes = coord.machines.eligible(self.node_labels(), self._node_ram(), "package")
             except Exception:
                 nodes = []
-        return {"builds": rows, "base": self.engine.cfg.base_branch, "nodes": nodes,
-                "machines": coord is not None, "out_dir": str(self.out_dir())}
+        return {"builds": rows, "base": self.engine.cfg.base_branch, "nodes": nodes, "machines": coord is not None}
 
     def node_labels(self) -> list:
         import machines
@@ -140,22 +124,19 @@ class Builds:
         repeat = str(data.get("repeat") or "")
         if repeat not in ("", "daily"):
             raise ValueError("A build runs once or every day.")
-        where = str(data.get("where") or "auto")
-        if where not in WHERE:
-            raise ValueError("Run it automatically, on a node, or on this PC.")
-        if where == "node" and getattr(self.engine, "machines", None) is None:
-            raise ValueError("No test nodes are set up (workers.machines); choose this PC or automatic.")
+        if getattr(self.engine, "machines", None) is None:
+            raise ValueError("No build machines are set up (workers.machines in the profile).")
         tests = "full" if data.get("tests") in ("full", True) else ""
         row = {"id": uuid.uuid4().hex[:12], "version": version, "ref": ref, "at": iso(at), "repeat": repeat,
-               "tests": tests, "where": where, "state": "scheduled", "created": iso(utc()), "sha": "", "route": "",
+               "tests": tests, "state": "scheduled", "created": iso(utc()), "sha": "", "route": "",
                "job": 0, "machine": "", "reason": "", "output": "", "started": "", "finished": "", "parent": ""}
         with self.lock:
             if sum(1 for r in self.rows if r["state"] not in TERMINAL) >= 50:
                 raise ValueError("50 builds are already scheduled or waiting.")
             self.rows.append(row)
             self.save()
-        self._log(f"{version} of {ref} scheduled for {row['at']}{' and every day after' if repeat else ''} "
-                  f"({'with Full tests, ' if tests else ''}{where})")
+        self._log(f"{version} of {ref} scheduled for {row['at']}{' and every day after' if repeat else ''}"
+                  f"{' with Full tests' if tests else ''}")
         self.engine.wake()
         return deepcopy(row)
 
@@ -166,20 +147,42 @@ class Builds:
                 raise ValueError("Build not found.")
             if row["state"] in TERMINAL:
                 raise ValueError(f"This build is already {row['state']}.")
-            if row["state"] == "running" and row.get("route") == "pc":
-                raise ValueError("This build is running on this PC; it finishes.")
             if row.get("job") and row["state"] in ("queued", "running"):
                 coord = getattr(self.engine, "machines", None)
                 if coord is not None:
                     state = coord.machines.cancel(int(row["job"]))
                     if state == "stopping":
-                        self.update(row, reason="Stopping on the node.")
-                        return {"message": "The node stops this build at its next heartbeat."}
+                        self.update(row, reason="Stopping on the build machine.")
+                        return {"message": "The machine stops this build at its next heartbeat."}
             self.update(row, state="cancelled", finished=iso(utc()),
                         reason="Repeat stopped." if row.get("repeat") else "Cancelled before it started.")
         self._log(f"{row['version']} cancelled")
         self.engine.wake()
         return {"message": "Repeat stopped." if row.get("repeat") else "Build cancelled."}
+
+    def run_now(self, build_id: str) -> dict:
+        """A scheduled build (or the next run of a daily one) starts now instead of at its time."""
+        with self.lock:
+            row = next((r for r in self.rows if r["id"] == build_id), None)
+            if row is None:
+                raise ValueError("Build not found.")
+            if row["state"] != "scheduled":
+                raise ValueError(f"This build is already {row['state']}.")
+            self.update(row, at=iso(utc()))
+        self._log(f"{row['version']}: start now")
+        self.engine.wake()
+        return {"message": "Starting now."}
+
+    def retry(self, build_id: str) -> dict:
+        """Build a failed or cancelled build again: same version, branch and options, starting now. The branch is read
+        again, so a fix that landed since is in it."""
+        with self.lock:
+            row = next((r for r in self.rows if r["id"] == build_id), None)
+        if row is None:
+            raise ValueError("Build not found.")
+        if row["state"] not in ("failed", "cancelled", "done"):
+            raise ValueError(f"This build is still {row['state']}.")
+        return self.add({"version": row["version"], "ref": row["ref"], "tests": row.get("tests") or ""})
 
     # ---- the scheduler: off the event loop (it may ask GitHub for a branch head) ----
     def tick(self, at: datetime | None = None) -> None:
@@ -190,7 +193,7 @@ class Builds:
             try:
                 if row["state"] == "scheduled" and utc(row["at"]) <= at:
                     self._due(row, at)
-                elif row["state"] in ("waiting",) and row.get("route") in ("", "node"):
+                elif row["state"] == "waiting":
                     self._route(row)
                 elif row["state"] in ("queued", "running") and row.get("route") == "node":
                     self._follow_node(row)
@@ -224,30 +227,21 @@ class Builds:
         coord = getattr(self.engine, "machines", None)
         if coord is not None:
             return coord.resolve(ref)
-        data = self.engine.ctx.gh.api(f"repos/{self.engine.cfg.repo}/commits/{ref}", fresh=True)
+        data = self.engine.gh.api(f"repos/{self.engine.cfg.repo}/commits/{ref}", fresh=True)
         return str((data or {}).get("sha") or "")
 
     def _route(self, row: dict) -> None:
-        """Choose the machine once. A node gets a queued job; this PC waits for the merge slot (loop.py starts it)."""
-        if row.get("route") == "pc":
-            return
+        """Queue the `package` job (machines.py). Any machine with the labels takes it, this PC's own worker included."""
         coord = getattr(self.engine, "machines", None)
-        where = row.get("where") or "auto"
-        nodes = []
-        if coord is not None and where != "pc":
-            nodes = coord.machines.eligible(self.node_labels(), self._node_ram(), "package")
-        if where == "node" or (where == "auto" and nodes):
-            if coord is None:
-                self.update(row, state="failed", finished=iso(utc()), reason="No test nodes are set up.")
-                return
-            job = coord.machines.enqueue("package", row["sha"], {"version": row["version"], "tests": row["tests"]},
-                                         ref=row["ref"], requested_by=f"build {row['version']}",
-                                         labels=self.node_labels())
-            self.update(row, route="node", state="queued", job=job,
-                        reason=f"Queued for {', '.join(nodes) if nodes else 'a test node (none online yet)'} as job {job}.")
-            self._log(f"{row['version']}: job {job} queued for the nodes")
+        if coord is None:
+            self.update(row, state="failed", finished=iso(utc()), reason="No build machines are set up.")
             return
-        self.update(row, route="pc", state="waiting", reason="Waiting for this PC: it starts when no merge round or PC check is running.")
+        nodes = coord.machines.eligible(self.node_labels(), self._node_ram(), "package")
+        job = coord.machines.enqueue("package", row["sha"], {"version": row["version"], "tests": row["tests"]},
+                                     ref=row["ref"], requested_by=f"build {row['version']}", labels=self.node_labels())
+        self.update(row, route="node", state="queued", job=job,
+                    reason=f"Queued for {', '.join(nodes) if nodes else 'a build machine (none can take it right now)'} as job {job}.")
+        self._log(f"{row['version']}: job {job} queued")
 
     def _follow_node(self, row: dict) -> None:
         coord = getattr(self.engine, "machines", None)
@@ -265,11 +259,6 @@ class Builds:
             self._log(f"{row['version']}: {job['summary']}")
         elif state in ("failed", "lost", "cancelled"):
             summary = job.get("summary") or state
-            if summary.startswith(NOT_ON_NODE) and row.get("where") != "node":
-                # The node has not opted in to the `package` recipe: build it here instead.
-                self.update(row, route="pc", state="waiting", job=0, machine="",
-                            reason=f"{job['machine'] or 'The node'} does not take builds yet; waiting for this PC.")
-                return
             self.update(row, state="cancelled" if state == "cancelled" else "failed", machine=job["machine"],
                         finished=job["finished"] or iso(utc()), reason=summary)
             self._log(f"{row['version']}: {summary}")
@@ -288,7 +277,7 @@ class Builds:
         (an upload can take an hour; the scheduler keeps ticking)."""
         import publish
         p = publish.conf(self.conf)
-        if p is None or self.engine.dry_run or (self._publishing is not None and self._publishing.is_alive()):
+        if p is None or (self._publishing is not None and self._publishing.is_alive()):
             return
         keep = max(1, int(p.get("keep") or 3))
         with self.lock:
@@ -313,7 +302,7 @@ class Builds:
         if not row.get("output") or not folder.is_dir():
             self.update(row, publish="skipped", publish_reason=f"The package folder is not on this PC ({row.get('output') or 'none'}).")
             return
-        gh = self.engine.ctx.gh
+        gh = self.engine.gh
         pub = publish.Publisher(gh, str(p.get("repo") or self.engine.cfg.repo), getattr(gh, "gh", "gh"), self._log)
         try:
             part = int(float(p.get("partGb") or 1.9) * 2**30)
@@ -350,87 +339,9 @@ class Builds:
             self.update(row, publish="failed", publish_reason=f"{type(e).__name__}: {e}"[:400])
             self._log(f"{row['version']}: publish failed: {e}")
 
-    # ---- this PC ----
-    def next_pc(self) -> dict | None:
-        """The oldest build waiting for this PC."""
-        with self.lock:
-            waiting = [r for r in self.rows if r["state"] == "waiting" and r.get("route") == "pc" and r.get("sha")]
-        return min(waiting, key=lambda r: (r["at"], r["created"])) if waiting else None
-
-    def run_pc(self, row: dict) -> None:
-        """Run in a thread. Uses the merge checkout (rounds.prepare_worktree waits for the heavy lease and keeps a
-        dirty checkout aside), checks out the build's commit, runs the package steps, then cleans up."""
-        import rounds
-        import node_worker
-        repo, cfg = self.engine.ctx.repo, self.engine.cfg
-        try:
-            path = rounds.prepare_worktree(repo, f"fletchery/build-{row['version']}", cfg.heavy_lease_file)
-        except rounds.CheckoutBusy as e:
-            self.update(row, reason=f"Waiting for this PC: {e}"[:300])
-            return
-        except (rounds.CheckoutRecovery, RuntimeError) as e:
-            self.update(row, reason=f"Build checkout unavailable; it tries again: {e}"[:300])
-            return
-        try:
-            repo.git("fetch", repo.remote, row["sha"], cwd=path)
-            repo.git("checkout", "--no-overwrite-ignore", "-B", f"fletchery/build-{row['version']}", row["sha"], cwd=path)
-            # The merge checkout may hold LFS pointer text for assets a round never needed: 0.4.0 failed to cook on
-            # 60 "Package is unloadable" Silhouette meshes (2026-11-12). Fetch the real files before building.
-            repo.git("lfs", "pull", cwd=path)
-        except RuntimeError as e:
-            self.update(row, state="failed", finished=iso(utc()), reason=f"Could not check out {row['sha'][:10]}: {e}"[:300])
-            return
-        out = node_worker.package_out(self.out_dir(), self.engine.cfg.name or "Build", row["version"], row["sha"])
-        self.update(row, state="running", machine="This PC", started=iso(utc()), output=str(out),
-                    reason=f"Building on this PC into {out}.")
-        self._log(f"{row['version']}: building {row['sha'][:10]} on this PC into {out}")
-        engine_dir = self.conf.get("engine") or r"E:\UE_5.8"
-        steps = node_worker.package_steps({"version": row["version"], "tests": row["tests"], "out_dir": str(out)},
-                                          Path(path), engine_dir)
-        deadline_s = float(self.conf.get("timeoutMinutes") or 300) * 60
-        log_file = Path(self.engine.state_dir) / "build-logs" / f"{row['id']}.log"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        failed, started = "", datetime.now(timezone.utc)
-        flags = 0x00004000 if sys.platform == "win32" else 0  # below normal: the PC is shared
-        with open(log_file, "a", encoding="utf-8", errors="replace") as log:
-            for name, step, always in steps:
-                if failed and not always:
-                    continue
-                left = deadline_s - (datetime.now(timezone.utc) - started).total_seconds()
-                if not always and left <= 0:
-                    failed = failed or "Timed out"
-                    continue
-                argv = step() if callable(step) else step
-                log.write(f"\n==> {name}\n")
-                log.flush()
-                try:
-                    p = subprocess.run(argv, cwd=str(path), stdout=log, stderr=subprocess.STDOUT, timeout=max(60, left) if not always else 600,
-                                       creationflags=flags, env=dict(os.environ, FLETCHERY_BUILD=row["id"]))
-                    code = p.returncode
-                except subprocess.TimeoutExpired:
-                    code = 124
-                except OSError as e:
-                    log.write(f"could not start: {e}\n")
-                    code = 127
-                if code and not always and not failed:
-                    failed = f"{name} failed (exit {code})"
-        tail = _tail(log_file)
-        if failed:
-            self.update(row, state="failed", finished=iso(utc()), reason=f"{failed}. Log: {log_file}", log=str(log_file), tail=tail)
-        else:
-            self.update(row, state="done", finished=iso(utc()), reason=f"Packaged to {out}.", log=str(log_file), tail=tail)
-        self._log(f"{row['version']}: {failed or 'packaged to ' + str(out)}")
 
 
 def _out_from(summary: str) -> str:
     """Where to find the build: the copy on this PC when the node sent one back, else the node's folder."""
     m = re.search(r"; copied to (.+?) on the PC", summary or "") or re.match(r"Packaged to (.+?) on ", summary or "")
     return m.group(1) if m else ""
-
-
-def _tail(path: Path, lines: int = 40) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return "\n".join(text.rstrip().splitlines()[-lines:])

@@ -25,7 +25,10 @@
   }
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
-  function fill(node, rows, empty) { node.replaceChildren(...(rows.length ? rows : [el('li', {class: 'empty', text: empty})])); }
+  function fill(node, rows, empty, more) {
+    const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
+    node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
+  }
   function span(seconds) {
     const s = Math.max(0, Math.round(seconds));
     if (s < 60) return s + ' s';
@@ -59,6 +62,7 @@
       tile(c.blockers || 0, 'stuck/blocked', c.blockers > 0));
     const b = $('b-live');
     if (b) { b.hidden = !c.blockers; b.textContent = c.blockers > 99 ? '99+' : String(c.blockers || ''); }
+    document.title = (c.blockers ? '(' + c.blockers + ') ' : '') + 'Fletchery';
   }
   function blockerRow(b) {
     const label = {feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked'}[b.kind] || 'Look';
@@ -89,17 +93,41 @@
       m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null);
   }
   function runnerRow(r) {
+    const j = r.job, stepFor = j && j.step_started ? (Date.now() - Date.parse(j.step_started)) / 60000 : 0;
     const chip = !r.online ? el('span', {class: 'chip needs', text: 'Offline'}) :
-      r.busy || r.job ? el('span', {class: 'chip wait', text: 'Busy'}) : el('span', {class: 'chip run', text: 'Idle'});
+      j && j.pr_closed ? el('span', {class: 'chip needs', text: 'Not needed'}) :
+      stepFor > 60 ? el('span', {class: 'chip needs', text: 'Step too long'}) :
+      r.busy || j ? el('span', {class: 'chip wait', text: 'Busy'}) : el('span', {class: 'chip run', text: 'Idle'});
     return el('li', null, el('div', {class: 'r-row'},
       el('div', null, el('div', {class: 'title', text: r.name}), el('p', {class: 'sub', text: join(r.machine, (r.labels || []).join(', ')).join(' · ')}),
-        r.job ? el('p', {class: 'sub'}, a(r.job.url, '', r.job.title), ...sep(['', ...join(r.job.step, r.job.started ? since(r.job.started) : '')])) : null),
+        j ? el('p', {class: 'sub'}, a(j.url, '', j.title), ...sep(['', ...join(j.step ? 'step "' + j.step + '"' + (j.step_started ? ' for ' : '') : '',
+          j.step_started ? since(j.step_started) : j.started ? since(j.started) : '')])) : null,
+        j && j.pr_closed ? el('p', {class: 'sub', text: 'Its pull request is closed: nothing needs this run.'}) : null,
+        j && j.id && desk() ? el('div', {class: 'ctl'}, control('Cancel run', '/api/actions/cancel', {repo: j.repo, id: j.id}, 'Cancel this GitHub Actions run?')) : null),
       chip));
   }
   function bar(part) {   // width set through the DOM: the page's CSP allows no inline style attributes
     const fillEl = el('i');
     fillEl.style.width = Math.round(100 * Math.min(1, Math.max(0, part))) + '%';
     return el('div', {class: 'bar', 'aria-hidden': 'true'}, fillEl);
+  }
+  function control(text, path, body, ask) {
+    const b = el('button', {type: 'button', class: 'small', text});
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      if (await window.fletcheryAct(path, body, 'Sent to GitHub.', ask)) setTimeout(refresh, 1500);
+      b.disabled = false;
+    });
+    return b;
+  }
+  const desk = () => document.body.classList.contains('controls') && typeof window.fletcheryAct === 'function';
+  function runControls(r) {
+    if (!desk()) return null;
+    const id = {repo: r.repo, id: r.id};
+    if (r.status !== 'completed') return el('div', {class: 'ctl'}, control('Cancel run', '/api/actions/cancel', id, 'Cancel this GitHub Actions run?'));
+    const bad = ['failure', 'timed_out', 'cancelled', 'startup_failure'].includes(r.conclusion);
+    return el('div', {class: 'ctl'}, bad ? control('Re-run failed jobs', '/api/actions/rerun', {...id, failed: true}) : null,
+      control('Re-run', '/api/actions/rerun', id));
   }
   function runRow(r) {
     const going = r.status === 'in_progress', waiting = r.status !== 'completed' && !going;
@@ -111,7 +139,7 @@
     return el('li', null, el('div', {class: 'run-row'}, el('span', {class: 'ico ' + ico[0], role: 'img', 'aria-label': ico[2], text: ico[1]}),
       el('div', null, a(r.url, 'title', r.name + (r.pr ? ' · PR #' + r.pr : '')),
         el('p', {class: 'sub'}, ...sep(where), where.length ? ' · ' : '', ...when),
-        going && r.steps_total ? bar(r.steps_done / r.steps_total) : null)));
+        going && r.steps_total ? bar(r.steps_done / r.steps_total) : null, runControls(r))));
   }
   function prRow(p) {
     const c = p.checks || {};
@@ -122,7 +150,8 @@
     return el('li', null, el('div', {class: 'r-row'},
       el('div', null, a(p.url, 'title', el('span', {class: 'num', text: '#' + p.number}), p.title),
         el('p', {class: 'sub'}, ...sep(join(p.repo.split('/')[1], p.author, what, ago(p.updated))))),
-      el('span', {class: 'chip ' + chip[0], text: chip[1]})));
+      el('div', {class: 'chips'}, el('span', {class: 'chip ' + chip[0], text: chip[1]}),
+        p.auto_merge ? el('span', {class: 'chip run', text: 'Auto-merge on'}) : null)));
   }
   function issueRow(i) {
     return el('li', null, a(i.url, 'title', el('span', {class: 'num', text: '#' + i.number}), i.title),
@@ -157,11 +186,13 @@
     $('liveRunnerNote').hidden = !note; $('liveRunnerNote').textContent = note || '';
     $('n-lrun').textContent = (d.runners || []).length ? '(' + d.runners.length + ')' : '';
     fill($('liveRunners'), (d.runners || []).map(runnerRow), 'No self-hosted runners found.');
-    fill($('liveRuns'), (d.runs || []).slice(0, 25).map(runRow), 'No recent Actions runs.');
-    $('n-lpr').textContent = (d.prs || []).length ? '(' + d.prs.length + ')' : '';
-    fill($('livePrs'), (d.prs || []).map(prRow), 'No open pull requests.');
-    $('n-liss').textContent = (d.issues || []).length ? '(' + d.issues.length + ')' : '';
-    fill($('liveIssues'), (d.issues || []).slice(0, 40).map(issueRow), 'No open issues.');
+    fill($('liveRuns'), (d.runs || []).slice(0, 25).map(runRow), 'No recent Actions runs.', (d.runs || []).length - 25);
+    $('n-lpr').textContent = (d.prs || []).length ? '(' + (repo ? d.prs.length : (full.counts || {}).prs || d.prs.length) + ')' : '';
+    const c = full.counts || {};
+    fill($('livePrs'), (d.prs || []).map(prRow), 'No open pull requests.', repo ? 0 : (c.prs || 0) - (d.prs || []).length);
+    const nIss = repo ? (d.issues || []).length : (full.counts || {}).issues || (d.issues || []).length;
+    $('n-liss').textContent = nIss ? '(' + nIss + ')' : '';
+    fill($('liveIssues'), (d.issues || []).slice(0, 40).map(issueRow), 'No open issues.', nIss - Math.min(40, (d.issues || []).length));
     const f = d.fresh || {};
     $('liveFoot').replaceChildren(...sep(join(
       (d.repos || []).length + ' repositories watched',
@@ -200,6 +231,7 @@
     const kept = JSON.parse(localStorage.getItem(KEEP) || 'null');
     if (kept && kept.body && Date.now() - kept.at < 86400000) { last = kept.body; lastOk = kept.at; draw(kept.body); }
   } catch (e) { /* nothing kept */ }
+  document.addEventListener('fletchery-refresh', () => setTimeout(refresh, 1500));
   document.addEventListener('fletchery-tab', e => { tab = e.detail; if (tab === 'live') refresh(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); else clearTimeout(timer); });
   window.addEventListener('online', refresh);

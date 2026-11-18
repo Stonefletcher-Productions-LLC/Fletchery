@@ -3,7 +3,6 @@ import json
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +14,7 @@ from machines import Machines, WorkerApi, check_listen  # noqa: E402
 
 SHA = "a" * 40
 NODE = ["os:windows", "ram:24", "role:tests", "role:cook", "unreal:5.8.4"]
+BUILD = {"version": "0.4.5"}
 
 
 class Base(unittest.TestCase):
@@ -39,51 +39,9 @@ class RegistryTests(Base):
         self.assertFalse(self.m.authenticate("other", key))
         self.assertNotIn(key.encode(), Path(self.m.path).read_bytes())
 
-    def test_round_jobs_go_first_then_builds_then_pr_checks(self):
-        self.node()
-        check = self.m.enqueue("checkout-only", SHA, requested_by="PR check")
-        build = self.m.enqueue("checkout-only", SHA, requested_by="build 0.4.0")
-        round_job = self.m.enqueue("node-checks", SHA, requested_by="round 133")
-        order = []
-        for _ in range(3):
-            job = self.m.claim("NODE-01")
-            order.append(job["id"])
-            self.m.finish("NODE-01", job["id"], 0, "")
-        self.assertEqual(order, [round_job, build, check])
-
-    def test_waiting_round_job_stops_the_running_pr_check(self):
-        self.node()
-        check = self.m.enqueue("checkout-only", SHA, requested_by="PR check")
-        self.assertEqual(self.m.claim("NODE-01")["id"], check)
-        self.assertEqual(self.m.preempt_for_rounds(), [], "nothing waits for the node yet")
-        round_job = self.m.enqueue("node-checks", SHA, requested_by="round 141")
-        self.assertEqual(self.m.preempt_for_rounds(), [(check, "NODE-01", round_job)])
-        self.assertTrue(self.m.heartbeat("NODE-01", check)["cancel"])
-        self.assertEqual(self.m.preempt_for_rounds(), [], "one stop per round job; the node is already stopping")
-
-    def test_preempt_leaves_builds_idle_nodes_and_other_round_jobs_alone(self):
-        self.node()
-        self.node("PC-NODE")
-        build = self.m.enqueue("checkout-only", SHA, requested_by="build 0.4.0")
-        self.assertEqual(self.m.claim("NODE-01")["id"], build)
-        self.m.enqueue("node-checks", SHA, requested_by="round 141")
-        self.assertEqual(self.m.preempt_for_rounds(), [], "PC-NODE is idle and takes it")
-        first = self.m.claim("PC-NODE")["id"]
-        self.m.enqueue("node-checks", SHA, requested_by="round 141 split")
-        self.assertEqual(self.m.preempt_for_rounds(), [], "a build or another round job is never stopped")
-        self.assertFalse(self.m.heartbeat("NODE-01", build)["cancel"])
-        self.assertFalse(self.m.heartbeat("PC-NODE", first)["cancel"])
-
-    def test_preempt_only_where_the_round_job_could_run(self):
-        self.node(labels=["os:windows", "role:checks"])
-        check = self.m.enqueue("checkout-only", SHA, requested_by="PR check", labels=[])
-        self.assertEqual(self.m.claim("NODE-01")["id"], check)
-        self.m.enqueue("node-checks", SHA, requested_by="round 141")
-        self.assertEqual(self.m.preempt_for_rounds(), [], "this node lacks the round job's labels")
-
     def test_revoke_stops_the_key_and_requeues_its_job(self):
         key = self.node()
-        job = self.m.enqueue("node-checks", SHA)
+        job = self.m.enqueue("package", SHA, BUILD)
         self.assertEqual(self.m.claim("NODE-01")["id"], job)
         self.assertTrue(self.m.revoke("NODE-01"))
         self.assertFalse(self.m.authenticate("NODE-01", key))
@@ -107,46 +65,46 @@ class RegistryTests(Base):
 
 class QueueTests(Base):
     def test_jobs_go_to_a_node_with_the_labels_and_ram(self):
-        self.node("small", ["os:windows", "role:tests"], 8)
-        self.node("cook", ["os:windows"], 64)
+        self.node("small", ["os:windows", "role:cook"], 8)
+        self.node("tests", ["os:windows", "role:tests"], 64)
         self.node("NODE-01")
-        job = self.m.enqueue("node-checks", SHA, {"only": "RunFlowTest, RunM5aTest", "strict_slots": True}, pr=1666)
-        self.assertEqual(self.m.view()["jobs"][0]["pr"], 1666)
+        job = self.m.enqueue("package", SHA, {"version": "0.4.5", "tests": "full"})
         self.assertIsNone(self.m.claim("small"))   # too little RAM
-        self.assertIsNone(self.m.claim("cook"))    # no role:tests
+        self.assertIsNone(self.m.claim("tests"))   # no role:cook
         got = self.m.claim("NODE-01")
-        self.assertEqual((got["id"], got["params"]), (job, {"only": "RunFlowTest,RunM5aTest", "strict_slots": True}))
+        self.assertEqual((got["id"], got["params"]), (job, {"version": "0.4.5", "tests": "full"}))
 
     def test_extra_labels_narrow_the_choice(self):
         self.node()
-        self.m.enqueue("node-checks", SHA, labels=["unreal:5.8.3"])
+        self.m.enqueue("package", SHA, BUILD, labels=["unreal:5.8.3"])
         self.assertIsNone(self.m.claim("NODE-01"))
-        self.m.enqueue("node-checks", SHA, labels=["unreal:5.8.4"])
+        self.m.enqueue("package", SHA, BUILD, labels=["unreal:5.8.4"])
         self.assertEqual(self.m.claim("NODE-01")["id"], 2)
 
     def test_a_node_runs_one_job_at_a_time_oldest_first(self):
         self.node()
-        a, b = self.m.enqueue("node-checks", SHA), self.m.enqueue("nightly-full", SHA)
+        a, b = self.m.enqueue("package", SHA, BUILD), self.m.enqueue("checkout-only", SHA)
         self.assertEqual(self.m.claim("NODE-01")["id"], a)
         self.assertIsNone(self.m.claim("NODE-01"))
         self.m.finish("NODE-01", a, 0, "ok")
         self.assertEqual(self.m.claim("NODE-01")["id"], b)
 
-    def test_parameters_can_choose_tests_never_a_command(self):
-        for only in ("RunFlowTest; Remove-Item", "a b", "$(x)", "x,,y", "../x"):
-            with self.assertRaises(ValueError, msg=only):
-                self.m.enqueue("node-checks", SHA, {"only": only})
+    def test_parameters_can_choose_a_version_never_a_command(self):
+        for version in ("0.4; Remove-Item", "a b", "$(x)", "1.2", "../x"):
+            with self.assertRaises(ValueError, msg=version):
+                self.m.enqueue("package", SHA, {"version": version})
+        for retired in ("powershell", "node-checks", "pr-check", "nightly-full"):
+            with self.assertRaises(ValueError, msg=retired):
+                self.m.enqueue(retired, SHA)
         with self.assertRaises(ValueError):
-            self.m.enqueue("powershell", SHA)
-        with self.assertRaises(ValueError):
-            self.m.enqueue("node-checks", "main")
-        job = self.m.enqueue("nightly-full", SHA, {"only": "X", "cmd": "calc"})
+            self.m.enqueue("package", "main", BUILD)
+        job = self.m.enqueue("checkout-only", SHA, {"only": "X", "cmd": "calc"})
         self.assertEqual(self.m.view()["jobs"][0]["params"], {})
         self.assertEqual(job, 1)
 
     def test_only_the_node_running_a_job_can_report_on_it(self):
         self.node(); self.node("other")
-        job = self.m.enqueue("node-checks", SHA)
+        job = self.m.enqueue("package", SHA, BUILD)
         self.m.claim("NODE-01")
         for call in (lambda: self.m.heartbeat("other", job), lambda: self.m.append_log("other", job, "x"),
                      lambda: self.m.finish("other", job, 0)):
@@ -155,8 +113,8 @@ class QueueTests(Base):
 
     def test_cancel_reaches_the_node_at_its_heartbeat(self):
         self.node()
-        queued = self.m.enqueue("node-checks", SHA)
-        running = self.m.enqueue("node-checks", SHA)
+        queued = self.m.enqueue("package", SHA, BUILD)
+        running = self.m.enqueue("package", SHA, BUILD)
         self.assertEqual(self.m.cancel(queued), "cancelled")
         self.assertEqual(self.m.claim("NODE-01")["id"], running)
         self.assertFalse(self.m.heartbeat("NODE-01", running)["cancel"])
@@ -167,7 +125,7 @@ class QueueTests(Base):
 
     def test_a_silent_node_loses_its_job_once_then_it_fails(self):
         self.node()
-        job = self.m.enqueue("node-checks", SHA)
+        job = self.m.enqueue("package", SHA, BUILD)
         self.m.claim("NODE-01")
         later = datetime.now(timezone.utc) + timedelta(minutes=10)
         self.assertEqual(self.m.reap(later), [job])
@@ -177,9 +135,33 @@ class QueueTests(Base):
         row = self.m.view()["jobs"][0]
         self.assertEqual((row["state"], row["attempts"]), ("lost", 2))
 
+    def test_a_restarted_coordinator_gives_nodes_time_to_call_in(self):
+        # Audit 2026-11-18: after the PC's backend was down a few minutes, every running job was queued again and ran
+        # twice. The coordinator's own start counts as a heartbeat.
+        self.node()
+        job = self.m.enqueue("package", SHA, BUILD)
+        self.m.claim("NODE-01")
+        later = datetime.now(timezone.utc) + timedelta(minutes=10)
+        started = (later - timedelta(seconds=30)).isoformat()
+        self.assertEqual(self.m.reap(later, since=started), [])
+        self.assertEqual(self.m.job(job)["state"], "running")
+
+    def test_a_job_past_its_limit_is_stopped_then_given_up(self):
+        self.node()
+        job = self.m.enqueue("checkout-only", SHA)   # 30-minute limit
+        self.m.claim("NODE-01")
+        t = datetime.now(timezone.utc)
+        self.m.heartbeat("NODE-01", job)
+        self.assertEqual(self.m.reap(t + timedelta(minutes=41), since=(t + timedelta(minutes=41)).isoformat()), [])
+        self.assertTrue(self.m.heartbeat("NODE-01", job)["cancel"], "asked to stop after its limit plus grace")
+        self.assertEqual(self.m.reap(t + timedelta(minutes=61), since=(t + timedelta(minutes=61)).isoformat()), [job])
+        row = self.m.job(job)
+        self.assertEqual(row["state"], "lost")
+        self.assertIn("twice its 30-minute limit", row["summary"])
+
     def test_logs_append_and_are_capped(self):
         self.node()
-        job = self.m.enqueue("node-checks", SHA)
+        job = self.m.enqueue("package", SHA, BUILD)
         self.m.claim("NODE-01")
         self.m.append_log("NODE-01", job, "line 1\n")
         self.m.append_log("NODE-01", job, "line 2\n")
@@ -195,54 +177,6 @@ class QueueTests(Base):
         self.assertNotIn("more", self.m.log_text(job))
 
 
-class StatusTests(Base):
-    def test_statuses_use_the_old_names_once_per_change_with_a_shadow_prefix(self):
-        self.node()
-        sent = []
-        post = lambda sha, state, context, desc: sent.append((state, context, desc))  # noqa: E731
-        job = self.m.enqueue("nightly-full", SHA)
-        self.m.post_statuses(post)
-        self.m.post_statuses(post)
-        self.assertEqual(sent, [("pending", "shadow/Nightly full tests (node)", "Queued in Fletchery")])
-        self.m.claim("NODE-01")
-        self.m.finish("NODE-01", job, 1, "2 of 40 failed on NODE-01: RunFlowTest, RunM5aTest")
-        self.m.post_statuses(post)
-        self.assertEqual(sent[-1], ("failure", "shadow/Nightly full tests (node)",
-                                    "2 of 40 failed on NODE-01: RunFlowTest, RunM5aTest"))
-        live = Machines(self.tmp.name, "owner/repo", shadow=False)
-        live.enqueue("node-checks", SHA)
-        live.post_statuses(post)
-        self.assertEqual(sent[-1][1], "Node checks")
-
-    def test_a_failed_post_is_sent_again(self):
-        self.m.enqueue("node-checks", SHA)
-        calls = []
-
-        def post(*a):
-            calls.append(a)
-            if len(calls) == 1:
-                raise RuntimeError("GitHub down")
-        self.m.post_statuses(post)
-        self.m.post_statuses(post)
-        self.m.post_statuses(post)
-        self.assertEqual(len(calls), 2)
-
-    def test_checkout_only_reports_nothing(self):
-        self.m.enqueue("checkout-only", SHA)
-        sent = []
-        self.m.post_statuses(lambda *a: sent.append(a))
-        self.assertEqual(sent, [])
-
-    def test_nightly_once_a_day_inside_its_window(self):
-        at = datetime(2026, 11, 12, 7, 5, tzinfo=timezone.utc)
-        self.assertEqual(self.m.nightly_due("07:00", at), "2026-11-12")
-        self.m.nightly_done("2026-11-12")
-        self.assertIsNone(self.m.nightly_due("07:00", at))
-        self.assertIsNone(self.m.nightly_due("07:00", at.replace(hour=6)))
-        self.assertIsNone(self.m.nightly_due("07:00", at.replace(hour=11)))
-        self.assertEqual(self.m.nightly_due("07:00", at + timedelta(days=1)), "2026-11-13")
-
-
 class FakeGh:
     def __init__(self):
         self.posts = []
@@ -255,18 +189,11 @@ class FakeGh:
 
 
 class CoordinatorTests(unittest.TestCase):
-    def test_tick_queues_the_nightly_on_main_and_posts_its_status(self):
+    def test_builds_copied_back_land_in_the_builds_out_dir(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
-            cfg = type("C", (), {"state_dir": d, "repo": "o/r", "machines": {"nightly": {"at": "07:00"}, "shadow": False}})()
-            gh = FakeGh()
-            c = machines.Coordinator(cfg, gh, log=lambda *_: None)
-            at = datetime(2026, 11, 12, 7, 1, tzinfo=timezone.utc)
-            c.tick(at)
-            c.tick(at)
-            jobs = c.machines.view()["jobs"]
-            self.assertEqual([(j["recipe"], j["sha"], j["ref"]) for j in jobs], [("nightly-full", "b" * 40, "main")])
-            self.assertEqual(gh.posts, [("repos/o/r/statuses/" + "b" * 40,
-                                         {"state": "pending", "context": "Nightly full tests (node)", "description": "Queued in Fletchery"})])
+            cfg = type("C", (), {"state_dir": d, "repo": "o/r", "machines": {}, "builds": {"outDir": str(Path(d) / "out")}})()
+            c = machines.Coordinator(cfg, FakeGh(), log=lambda *_: None)
+            self.assertEqual(Path(c.machines.upload_dir()), Path(d) / "out")
 
     def test_resolve_refuses_odd_refs(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
@@ -292,56 +219,10 @@ class ApiTests(Base):
     def test_a_paused_node_checks_in_but_takes_nothing(self):
         api = WorkerApi(self.m, "127.0.0.1:0")
         key = self.node()
-        self.m.enqueue("node-checks", SHA)
+        self.m.enqueue("package", SHA, BUILD)
         code, body = api.handle("/v1/claim", "NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})
         self.assertEqual((code, body["job"]), (200, None))
         self.assertTrue(self.m.view()["machines"][0]["stats"]["paused"])
-
-
-    def test_a_held_off_node_hears_that_a_round_waits_for_it(self):
-        # 2026-11-16, rounds 213-215: local runs kept the node's lease; the node must know a round waits so local runs
-        # let the round go next (node_worker writes the marker LifeShare's LaneGuard reads).
-        api = WorkerApi(self.m, "127.0.0.1:0", log=lambda *_: None)
-        key = self.node()
-        held = {"paused": True, "stats": {"paused": True, "lease": "local run Tools\\RunHomeShots.ps1"}}
-        self.m.enqueue("node-checks", SHA, requested_by="pr 2120")
-        self.assertFalse(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["round_waiting"],
-                         "a PR check is not a round")
-        self.m.enqueue("node-checks", SHA, requested_by="round 216")
-        self.assertTrue(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["round_waiting"])
-        self.assertFalse(self.m.round_waiting("other"), "an unknown node waits for nothing")
-
-    def test_a_node_busy_with_a_local_run_takes_only_round_jobs(self):
-        # #208: worker 10 reports a local run's hold and asks for round jobs only; a PR check stays queued.
-        api = WorkerApi(self.m, "127.0.0.1:0", log=lambda *_: None)
-        key = self.node()
-        held = {"paused": True, "rounds_only": True,
-                "stats": {"paused": True, "lease_only": True, "lease": "local run Tools\\BuildTown.ps1"}}
-        check = self.m.enqueue("node-checks", SHA, requested_by="pr 2177")
-        self.assertIsNone(api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["job"])
-        stats = self.m.view()["machines"][0]["stats"]
-        self.assertEqual((stats["lease"], stats["lease_only"]), ("local run Tools\\BuildTown.ps1", True),
-                         "the dashboard can say why the node is paused")
-        labels = machines.RECIPES["node-checks"]["labels"]
-        self.assertEqual(self.m.eligible(labels, 0, "node-checks"), [], "not free for a PR check")
-        self.assertEqual(self.m.eligible(labels, 0, "node-checks", for_round=True), ["NODE-01"],
-                         "a round still counts on it, so it does not fall back to the PC")
-        round_job = self.m.enqueue("node-checks", SHA, requested_by="round 230")
-        job = api.handle("/v1/claim", "NODE-01", key, "ip", held)[1]["job"]
-        self.assertEqual((job["id"], job["round"]), (round_job, True))
-        self.assertEqual(self.m.job(check)["state"], "queued")
-        # A person's pause or an older worker (no rounds_only) takes nothing, as before.
-        self.m.finish("NODE-01", round_job, 0, "Passed")
-        self.m.enqueue("node-checks", SHA, requested_by="round 231")
-        self.assertIsNone(api.handle("/v1/claim", "NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})[1]["job"])
-        paused = {"paused": True, "pause_file": True, "lease": "x", "lease_only": True}
-        self.m.seen("NODE-01", stats=paused)
-        self.assertEqual(self.m.eligible(labels, 0, "node-checks", for_round=True), [])
-        self.m.set_paused("NODE-01", "tests", True)
-        self.assertFalse(self.m.round_waiting("NODE-01"), "a node paused from tests by a person is not waited for")
-        self.m.set_paused("NODE-01", "tests", False)
-        job = api.handle("/v1/claim", "NODE-01", key, "ip", {})[1]["job"]
-        self.assertTrue(job["round"], "the round's job is marked as a round job")
 
 
 class RoundMarkerTests(unittest.TestCase):
@@ -405,31 +286,6 @@ class RoundLeaseTests(unittest.TestCase):
                                waiting=said.append, stop=lambda: next(stops), sleep=lambda _: None)
         self.assertIn("Tools\\RunSpecs.ps1", said)
         self.assertEqual(json.loads(self.lease.read_text(encoding="utf-8"))["token"], "x", "the local hold is untouched")
-
-
-class DashboardTests(Base):
-    def test_dashboard_adds_a_machine_queues_and_cancels_a_job(self):
-        from server import Dashboard
-        logs = []
-        cfg = type("C", (), {"state_dir": self.tmp.name, "repo": "o/r", "machines": {}})()
-        fm = type("F", (), {})()
-        fm.ctx = type("X", (), {"log": staticmethod(logs.append), "gh": FakeGh()})()
-        fm.machines = machines.Coordinator(cfg, fm.ctx.gh, log=logs.append)
-        dash = Dashboard.__new__(Dashboard)
-        dash.fm = fm
-        added = dash.machine_add({"name": "NODE-01"})
-        self.assertTrue(fm.machines.machines.authenticate("NODE-01", added["key"]))
-        job = dash.job_add({"recipe": "node-checks", "ref": "main", "only": "RunFlowTest", "pr": "1666"})
-        self.assertEqual(job["sha"], "b" * 40)
-        row = fm.machines.machines.view()["jobs"][0]
-        self.assertEqual((row["ref"], row["pr"], row["params"]["only"], row["requested_by"]), ("main", 1666, "RunFlowTest", "dashboard"))
-        self.assertEqual(dash.job_cancel({"id": job["id"]}), {"state": "cancelled"})
-        self.assertEqual(dash.machine_revoke({"name": "NODE-01"}), {"revoked": "NODE-01"})
-        with self.assertRaises(ValueError):
-            dash.machine_revoke({"name": "NODE-01"})
-        fm.machines = None
-        with self.assertRaises(ValueError):
-            dash.job_add({"recipe": "node-checks", "ref": "main"})
 
 
 def git(cwd, *args):

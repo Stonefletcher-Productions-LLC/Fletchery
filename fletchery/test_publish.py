@@ -164,7 +164,7 @@ class HookTests(Base):
 
     def test_publishes_the_newest_builds_only_and_records_the_link(self):
         self.engine.cfg.builds = {"publish": {"to": "github", "keep": 1}}
-        self.engine.ctx.gh = FakeGitHub()
+        self.engine.gh = FakeGitHub()
         old = self.done_row("0.3.9", "2026-11-10T04:00:00+00:00", self.engine.state_dir / "nope")
         new = self.done_row("0.4.0", "2026-11-12T04:00:00+00:00", package(self.engine.state_dir))
         with mock.patch("publish.subprocess.run", return_value=mock.Mock(returncode=0)):
@@ -181,7 +181,7 @@ class HookTests(Base):
 
     def test_drive_keeps_its_own_count(self):
         self.engine.cfg.builds = {"publish": {"to": "github", "keep": 3, "driveRemote": "gdrive:B", "driveKeep": 2}}
-        self.engine.ctx.gh = FakeGitHub()
+        self.engine.gh = FakeGitHub()
         row = self.done_row("0.4.0", "2026-11-12T04:00:00+00:00", package(self.engine.state_dir))
         with mock.patch("publish.subprocess.run", return_value=mock.Mock(returncode=0)), \
                 mock.patch("publish.to_remote", return_value=([], ["https://drive.google.com/x"])) as remote:
@@ -193,7 +193,7 @@ class HookTests(Base):
 
     def test_missing_folder_is_skipped_and_upload_failure_recorded(self):
         self.engine.cfg.builds = {"publish": {"to": "github", "keep": 3}}
-        self.engine.ctx.gh = FakeGitHub()
+        self.engine.gh = FakeGitHub()
         gone = self.done_row("0.3.9", "2026-11-10T04:00:00+00:00", self.engine.state_dir / "nope")
         self.b._publish_next()
         self.wait()
@@ -207,7 +207,7 @@ class HookTests(Base):
 
     def test_a_node_build_is_found_where_the_node_sent_it(self):
         self.engine.cfg.builds = {"publish": {"to": "github", "keep": 3}}
-        self.engine.ctx.gh = FakeGitHub()
+        self.engine.gh = FakeGitHub()
         package(Path(self.m.upload_dir()))
         row = self.done_row("0.4.0", "2026-11-12T04:00:00+00:00", "E:\\buildlane-node\\_work\\builds\\LifeShare-0.4.0")
         with mock.patch("publish.subprocess.run", return_value=mock.Mock(returncode=0)) as run:

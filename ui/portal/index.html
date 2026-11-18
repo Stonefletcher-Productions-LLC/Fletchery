@@ -20,6 +20,9 @@
 <header class="top">
   <div class="top-row">
     <h1 id="project">Fletchery</h1>
+    <button type="button" class="icon-btn" id="refreshTop" aria-label="Refresh now" title="Refresh now">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M17.7 6.3A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.3L13 11h7V4z" fill="currentColor"/></svg>
+    </button>
     <button type="button" class="icon-btn" id="bell" aria-label="Notifications" aria-haspopup="dialog">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 3a6 6 0 0 0-6 6v3.4L4.3 16a1 1 0 0 0 .9 1.5h13.6a1 1 0 0 0 .9-1.5L18 12.4V9a6 6 0 0 0-6-6Zm-2.2 16a2.3 2.3 0 0 0 4.4 0Z" fill="currentColor"/></svg>
     </button>
@@ -43,38 +46,45 @@
     <p class="fine" id="liveFoot"></p>
   </section>
 
-  <section class="view" id="view-now" aria-labelledby="tab-now" hidden>
-    <div class="stats" id="stats"></div>
-    <section class="card" aria-labelledby="h-needs"><h2 id="h-needs">Needs you</h2><ul class="rows" id="needs"></ul></section>
-    <section class="card" aria-labelledby="h-workers"><h2 id="h-workers">Working now</h2><ul class="rows" id="workers"></ul></section>
-    <section class="card" aria-labelledby="h-merge-mini"><h2 id="h-merge-mini">Merging</h2><div id="mergeMini"></div></section>
-    <section class="card" id="machinesCard" aria-labelledby="h-machines" hidden><h2 id="h-machines">Machines</h2><ul class="rows" id="machines"></ul></section>
-    <details class="card log-card"><summary><h2>Activity</h2></summary><ol class="log" id="log"></ol></details>
-  </section>
-
-  <section class="view" id="view-tasks" aria-labelledby="tab-tasks" hidden>
-    <section class="card"><h2>Needs you <span class="count" id="n-needs"></span></h2><ul class="rows" id="t-needs"></ul></section>
-    <section class="card"><h2>Working <span class="count" id="n-running"></span></h2><ul class="rows" id="t-running"></ul></section>
-    <section class="card"><h2>Queued <span class="count" id="n-queued"></span></h2><ul class="rows" id="t-queued"></ul></section>
-    <section class="card"><h2>Has a pull request <span class="count" id="n-pr"></span></h2><ul class="rows" id="t-pr"></ul></section>
-  </section>
-
-  <section class="view" id="view-merges" aria-labelledby="tab-merges" hidden>
-    <section class="card"><h2>Merge round</h2><div id="mergeFull"></div></section>
-    <section class="card"><h2>Waiting to merge <span class="count" id="n-waiting"></span></h2><ul class="rows" id="waiting"></ul></section>
-  </section>
-
   <section class="view" id="view-builds" aria-labelledby="tab-builds" hidden>
-    <section class="card"><h2>Builds</h2><ul class="rows" id="builds"></ul></section>
+    <section class="card desk" id="newBuildCard" aria-labelledby="h-newbuild" hidden>
+      <h2 id="h-newbuild">Queue a build</h2>
+      <form id="newBuild" class="form">
+        <label>Version <input name="version" id="bVersion" required pattern="\d+\.\d+\.\d+" placeholder="0.4.5" autocomplete="off" inputmode="decimal"></label>
+        <label>Branch or commit <input name="ref" id="bRef" autocomplete="off" spellcheck="false"></label>
+        <label>When <input name="at" id="bAt" type="datetime-local"></label>
+        <label class="check"><input type="checkbox" name="daily" id="bDaily"> Every day</label>
+        <label class="check"><input type="checkbox" name="tests" id="bTests"> Run the Full tests first</label>
+        <div class="actions"><button type="submit" class="primary">Queue build</button><span class="msg" id="bMsg" role="status" aria-live="polite"></span></div>
+      </form>
+    </section>
+    <section class="card" aria-labelledby="h-builds"><h2 id="h-builds">Builds</h2><ul class="rows" id="builds"></ul></section>
+    <section class="card" aria-labelledby="h-bmach"><h2 id="h-bmach">Build machines</h2>
+      <div class="alert" id="heldNote" role="status" hidden><strong>All machines paused</strong>Running jobs finish; nothing new starts until you resume.</div>
+      <div class="toolbar ctrl" hidden><button type="button" class="small" id="holdAll">Pause all machines</button></div>
+      <ul class="rows" id="buildMachines"></ul></section>
+    <section class="card" aria-labelledby="h-jobs"><h2 id="h-jobs">Machine jobs</h2><ul class="rows" id="jobs"></ul></section>
+  </section>
+
+  <section class="view" id="view-activity" aria-labelledby="tab-activity" hidden>
+    <section class="card" aria-labelledby="h-health"><h2 id="h-health">Fletchery</h2><ul class="rows" id="health"></ul>
+      <div class="toolbar">
+        <button type="button" class="small" id="reload">Reload the page</button>
+        <button type="button" class="small ctrl" id="checkNow" hidden>Check GitHub now</button>
+        <button type="button" class="small ctrl" id="restart" hidden>Restart the backend</button>
+        <span class="msg" id="rMsg" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="h-log"><h2 id="h-log">Activity</h2><ol class="log" id="log"></ol></section>
   </section>
 </main>
 
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
 <nav class="tabs" aria-label="Sections">
   <button type="button" id="tab-live" data-tab="live" aria-current="page"><span class="glyph" aria-hidden="true">◉</span>Live<span class="badge" id="b-live" hidden></span></button>
-  <button type="button" id="tab-now" data-tab="now"><span class="glyph" aria-hidden="true">●</span>Agents<span class="badge" id="b-now" hidden></span></button>
-  <button type="button" id="tab-tasks" data-tab="tasks"><span class="glyph" aria-hidden="true">☰</span>Tasks</button>
-  <button type="button" id="tab-merges" data-tab="merges"><span class="glyph" aria-hidden="true">⇄</span>Merges</button>
-  <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds</button>
+  <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds<span class="badge" id="b-builds" hidden></span></button>
+  <button type="button" id="tab-activity" data-tab="activity"><span class="glyph" aria-hidden="true">◷</span>Activity<span class="badge" id="b-activity" hidden></span></button>
 </nav>
 
 <dialog id="notify" aria-labelledby="h-notify">
@@ -92,7 +102,7 @@
     <button type="button" id="notifyOff" hidden>Turn off on this phone</button>
     <button type="button" id="notifyClose">Close</button>
   </div>
-  <p class="fine">Read-only: this page cannot change anything in Fletchery.</p>
+  <p class="fine">On the phone, Fletchery is read-only: builds are queued from the window on the PC.</p>
 </dialog>
 
 <script src="portal.js"></script>

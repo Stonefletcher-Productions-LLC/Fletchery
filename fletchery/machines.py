@@ -11,9 +11,10 @@ names one of the node's own recipes (node_worker.RECIPES) plus checked parameter
 
 Profile (workers.machines):
     {"listen": "100.64.0.10:8771",            # the worker API: the coordinator's Tailscale address, never 0.0.0.0
-     "shadow": true,                            # commit statuses go out as "shadow/<context>" until cutover
-     "nightly": {"at": "07:00", "branch": "main", "recipe": "nightly-full"},   # optional; UTC
-     "assetRoots": ["E:\\lifeshare-scratch\\meshy_export"]}   # PC folders every node mirrors (same path) before imports
+     "assetRoots": ["E:\\lifeshare-scratch\\meshy_export"]}   # PC folders every node mirrors (same path)
+
+A machine also reports what it is doing between jobs (reporter.py, POST /v1/report with the same key): the Live tab
+shows it.
 
 The worker API (all POST, JSON, `Authorization: Bearer <key>` and `X-Fletchery-Machine: <name>`):
     /v1/hello      {labels, ram_gb, disk_free_gb, version}          -> {poll_seconds}
@@ -31,7 +32,7 @@ Command line (on the PC, against the same state folder as the backend):
     python machines.py --state-dir <dir> add <name>        print a new node's key (once)
     python machines.py --state-dir <dir> revoke <name>
     python machines.py --state-dir <dir> list
-    python machines.py --state-dir <dir> enqueue --recipe node-checks --sha <40 hex> [--only A,B] [--strict-slots]
+    python machines.py --state-dir <dir> cancel <job id>
 """
 from __future__ import annotations
 
@@ -43,13 +44,14 @@ import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ONLINE_SECONDS = 90          # a node that has not called for this long shows as offline
-RETURN_SECONDS = 15 * 60     # `run` waits for a node seen this recently: its worker is probably restarting
-RETURN_WAIT_MINUTES = 8      # how long `run` waits for such a node to call in again before "no result"
+# A running job past its recipe's timeout is asked to stop after this much grace, and given up (lost) at twice its
+# timeout: a node that hangs in checkout or clean-up never reports, and its job must not run "forever" (audit 2026-11-18).
+TIMEOUT_GRACE_MINUTES = 10
 LOST_SECONDS = 180           # a running job without a heartbeat for this long is lost (the node stopped or rebooted)
 MAX_ATTEMPTS = 2             # a lost job is queued again once, then fails
 MAX_BODY = 1024 * 1024
@@ -66,10 +68,6 @@ FALLBACK_LOG_BYTES = 5 * 1024 * 1024
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 LABEL = re.compile(r"^[A-Za-z0-9_.:+-]{1,64}$")
-ONLY = re.compile(r"^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$")
-IMPORT_LIST = re.compile(r"^[A-Za-z0-9_]+(:[A-Za-z0-9_./-]+)?(,[A-Za-z0-9_]+(:[A-Za-z0-9_./-]+)?)*$")
-ROUND_BRANCH = re.compile(r"^fletchery/round-[0-9]{1,6}$")
-IMPORT_LABEL = "role:imports"   # a node that has a write key (gitPushKey) and so can import and push round content
 # A worker that mirrors the PC's asset folders before an import (node_worker.sync_assets) says so with this label. When
 # the profile shares asset folders, an import job only goes to a node that carries it (Alex, 2026-11-13: "Ensure that
 # this is always going to be used"; #1681 failed because the node had no meshy_export).
@@ -81,19 +79,15 @@ ASSET_SKIP = (".fletchery-assets.json", ".fletchery-part")   # a mirror's own bo
 # What Fletchery can ask a node to run. The node has the same list and refuses anything else. `context` is the GitHub
 # commit status the job reports under: the names the Buildlane runner used, so ci.yml and lane.yml read them unchanged.
 RECIPES = {
-    "node-checks": {"context": "Node checks", "labels": ["os:windows", "role:tests"], "min_ram_gb": 16, "timeout_minutes": 120},
-    "nightly-full": {"context": "Nightly full tests (node)", "labels": ["os:windows", "role:tests"], "min_ram_gb": 16,
-                     "timeout_minutes": 150},
-    "checkout-only": {"context": "", "labels": [], "min_ram_gb": 0, "timeout_minutes": 30},
-    # A worker PR merged onto the base branch, then the project's PC check (LifeShare: Tools/CI/PrCheck.ps1). No commit
-    # status: Fletchery labels the PR or posts the failure itself, as it does for a check on the PC (nodecheck.py).
-    "pr-check": {"context": "", "labels": ["os:windows", "role:tests"], "min_ram_gb": 16, "timeout_minutes": 90},
-    # A packaged build Alex scheduled on Building -> Builds (builds.py). No commit status: a build is not a check.
+    # A packaged build scheduled on Builds (builds.py). The retired recipes (node-checks, nightly-full, pr-check,
+    # checkout-only) belonged to merge rounds and PR checks, which GitHub's self-hosted runners do now.
     "package": {"context": "", "labels": ["os:windows", "role:cook"], "min_ram_gb": 16, "timeout_minutes": 300},
+    # Fetch the commit and show it: a quick way to check that a new machine's worker works end to end.
+    "checkout-only": {"context": "", "labels": [], "min_ram_gb": 0, "timeout_minutes": 30},
 }
 # Each recipe is one kind of work. Alex can pause a single machine from a single kind (Building -> Machines).
-KIND = {"pr-check": "checks", "node-checks": "tests", "nightly-full": "tests", "checkout-only": "tests", "package": "builds"}
-NODE_KINDS = ("checks", "tests", "builds")
+KIND = {"package": "builds", "checkout-only": "builds"}
+NODE_KINDS = ("builds",)
 BUILD_VERSION = re.compile(r"^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$")
 
 SCHEMA = """
@@ -397,6 +391,30 @@ class Machines:
                 return "stopping"
             return row["state"]
 
+    # ---- holding the whole queue (the window's "Pause all machines") ----
+    def held(self) -> bool:
+        with self._db() as db:
+            row = db.execute("SELECT value FROM meta WHERE key='hold'").fetchone()
+            return bool(row and row["value"] == "1")
+
+    def set_held(self, on: bool) -> bool:
+        with self._lock, self._db() as db:
+            db.execute("INSERT INTO meta(key, value) VALUES('hold', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       ("1" if on else "0",))
+        return bool(on)
+
+    def retry(self, job_id: int, requested_by: str = "") -> int:
+        """Queue a finished job again: same recipe, commit, parameters and labels."""
+        row = self.job(job_id)
+        if row is None:
+            raise ValueError(f"No job {job_id}")
+        if row["state"] not in DONE:
+            raise ValueError(f"Job {job_id} is still {row['state']}; cancel it first")
+        with self._db() as db:
+            labels = json.loads(db.execute("SELECT labels FROM jobs WHERE id=?", (int(job_id),)).fetchone()["labels"] or "[]")
+        return self.enqueue(row["recipe"], row["sha"], row["params"], ref=row["ref"],
+                            requested_by=(requested_by or row["requested_by"] or f"retry of {job_id}"), labels=labels)
+
     def claim(self, machine: str, rounds_only: bool = False) -> dict | None:
         """The first queued job this node can run: every label it needs is one of the node's, and the node has the
         RAM. Merge-round jobs go first (a round waits on them), then builds, then PR checks and the rest, oldest first
@@ -406,7 +424,8 @@ class Machines:
             try:
                 m = db.execute("SELECT labels, ram_gb FROM machines WHERE name=? AND revoked IS NULL", (machine,)).fetchone()
                 busy = db.execute("SELECT id FROM jobs WHERE machine=? AND state='running'", (machine,)).fetchone()
-                if not m or busy:
+                hold = db.execute("SELECT value FROM meta WHERE key='hold'").fetchone()
+                if not m or busy or (hold and hold["value"] == "1"):
                     db.execute("COMMIT")
                     return None
                 have = set(json.loads(m["labels"] or "[]"))
@@ -448,46 +467,6 @@ class Machines:
                 if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
                     return True
             return False
-
-    def preempt_for_rounds(self, at: datetime | None = None) -> list[tuple[int, str, int]]:
-        """Stop a PR check (or other low-priority job) so a waiting merge-round job gets a node now. Claim order alone
-        made round jobs wait for the PR check in front of them: up to 9 minutes on 2026-11-12 (rounds 140, 141), close to
-        `run`'s 10-minute no-node limit. Only when no node that could take the round job is idle, only jobs ranked below
-        builds, at most one per waiting round job, and the most recently started first (least work lost). The stopped
-        check gives no result, so it simply runs again later. Returns [(stopped job, machine, round job)]."""
-        at = at or datetime.now(timezone.utc)
-        out = []
-        with self._lock, self._db() as db:
-            waiting = [r for r in db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY id").fetchall()
-                       if claim_rank(r["requested_by"]) == 0]
-            if not waiting:
-                return out
-            nodes = []
-            for m in db.execute("SELECT * FROM machines WHERE revoked IS NULL").fetchall():
-                if _age(m["last_seen"], at) > ONLINE_SECONDS or self._held_off(db, m, json.loads(m["stats"] or "{}"),
-                                                                               for_round=True):
-                    continue
-                run = db.execute("SELECT * FROM jobs WHERE machine=? AND state='running'", (m["name"],)).fetchone()
-                nodes.append((m, set(json.loads(m["labels"] or "[]")), set(self._paused(db, m["name"])), run))
-            used: set[str] = set()
-            for job in waiting:
-                able = [n for n in nodes if n[0]["name"] not in used and KIND.get(job["recipe"]) not in n[2]
-                        and set(json.loads(job["labels"])) <= n[1]
-                        and float(job["min_ram_gb"] or 0) <= float(n[0]["ram_gb"] or 0)]
-                if not able:
-                    continue
-                free = [n for n in able if n[3] is None or n[3]["cancel"]]  # idle, or already being stopped
-                if free:
-                    used.add(free[0][0]["name"])
-                    continue
-                low = [n for n in able if claim_rank(n[3]["requested_by"]) >= 2]
-                if not low:
-                    continue
-                m, _, _, run = max(low, key=lambda n: str(n[3]["started"] or ""))
-                db.execute("UPDATE jobs SET cancel=1 WHERE id=?", (run["id"],))
-                used.add(m["name"])
-                out.append((run["id"], m["name"], job["id"]))
-        return out
 
     def _own(self, db, job_id, machine):
         row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -532,14 +511,27 @@ class Machines:
         else:
             db.execute("UPDATE jobs SET state='lost', finished=?, summary=? WHERE id=?", (now(), why[:500], job_id))
 
-    def reap(self, at: datetime | None = None) -> list[int]:
-        """Running jobs whose node stopped answering: queued again once, then lost."""
+    def reap(self, at: datetime | None = None, since: str = "") -> list[int]:
+        """Running jobs whose node stopped answering: queued again once, then lost. `since` (the coordinator's start)
+        gives every node a full LOST_SECONDS after a restart of this PC's backend to call in again, so a job is not
+        queued twice just because the coordinator was away (audit 2026-11-18). Jobs past their timeout are stopped."""
         out = []
         with self._lock, self._db() as db:
-            for row in db.execute("SELECT id, machine, heartbeat, attempts FROM jobs WHERE state='running'").fetchall():
-                if _age(row["heartbeat"], at) > LOST_SECONDS:
+            for row in db.execute("SELECT id, machine, heartbeat, attempts, started, timeout_minutes, cancel "
+                                  "FROM jobs WHERE state='running'").fetchall():
+                beat = max(str(row["heartbeat"] or ""), since or "")
+                limit = float(row["timeout_minutes"] or 120)
+                ran = _age(row["started"], at) / 60 if row["started"] else 0
+                if _age(beat, at) > LOST_SECONDS:
                     self._lose(db, row["id"], row["attempts"], f"{row['machine']} stopped answering")
                     out.append(row["id"])
+                elif ran > 2 * limit:
+                    db.execute("UPDATE jobs SET state='lost', finished=?, summary=? WHERE id=?",
+                               (now(), f"Ran {ran:.0f} min, twice its {limit:.0f}-minute limit; given up", row["id"]))
+                    out.append(row["id"])
+                elif ran > limit + TIMEOUT_GRACE_MINUTES and not row["cancel"]:
+                    db.execute("UPDATE jobs SET cancel=1, summary=? WHERE id=?",
+                               (f"Over its {limit:.0f}-minute limit: asked to stop", row["id"]))
         return out
 
     # ---- results Fletchery acts on (nodecheck.py) ----
@@ -615,86 +607,7 @@ class Machines:
                     out.append(m["name"])
         return out
 
-    def returning(self, labels: list, min_ram_gb: float = 0, recipe: str = "") -> list[str]:
-        """Nodes that would be eligible but have not called in for over ONLINE_SECONDS, though they were seen within
-        RETURN_SECONDS: most likely a worker restarting (after a package job, an update, a reboot), not a node gone.
-        A paused node is not returning: it was paused on purpose."""
-        at = datetime.now(timezone.utc)
-        out = []
-        with self._db() as db:
-            for m in db.execute("SELECT * FROM machines WHERE revoked IS NULL ORDER BY name").fetchall():
-                stats = json.loads(m["stats"] or "{}")
-                if recipe and KIND.get(recipe) in self._paused(db, m["name"]):
-                    continue
-                if (ONLINE_SECONDS < _age(m["last_seen"], at) <= RETURN_SECONDS and not stats.get("pause_file")
-                        and set(labels) <= set(json.loads(m["labels"] or "[]")) and float(m["ram_gb"] or 0) >= min_ram_gb):
-                    out.append(m["name"])
-        return out
-
-    def carriers(self, labels: list) -> list[str]:
-        """Unrevoked nodes that carry every label, online or not."""
-        with self._db() as db:
-            return [m["name"] for m in db.execute("SELECT * FROM machines WHERE revoked IS NULL ORDER BY name").fetchall()
-                    if set(labels) <= set(json.loads(m["labels"] or "[]"))]
-
     # ---- GitHub commit statuses ----
-    def status_for(self, row) -> tuple[str, str] | None:
-        """(state, description) for a job's commit status now, or None when it reports nothing."""
-        if not row["context"]:
-            return None
-        s = row["state"]
-        if s == "queued":
-            return "pending", "Queued in Fletchery" + (f" ({row['summary']})" if row["summary"] else "")
-        if s == "running":
-            return "pending", f"Running on {row['machine']}"
-        if s == "passed":
-            return "success", row["summary"] or f"Passed on {row['machine']}"
-        if s == "failed":
-            return "failure", row["summary"] or f"Failed on {row['machine']} (exit {row['exit_code']})"
-        return "error", row["summary"] or s.capitalize()
-
-    def post_statuses(self, post) -> int:
-        """Send each job's commit status once per change. `post(sha, state, context, description)`; a failure is
-        retried on the next call."""
-        sent = 0
-        with self._db() as db:
-            rows = db.execute("SELECT * FROM jobs WHERE context != '' AND status_sent != state || ':' || summary "
-                              "ORDER BY id DESC LIMIT 50").fetchall()
-        for row in rows:
-            st = self.status_for(row)
-            if not st:
-                continue
-            context = ("shadow/" + row["context"]) if self.shadow else row["context"]
-            try:
-                post(row["sha"], st[0], context, _desc(st[1]))
-            except Exception:
-                continue
-            with self._lock, self._db() as db:
-                db.execute("UPDATE jobs SET status_sent=? WHERE id=?", (f"{row['state']}:{row['summary']}", row["id"]))
-            sent += 1
-        return sent
-
-    # ---- nightly ----
-    def nightly_due(self, at_hhmm: str, when: datetime | None = None) -> str | None:
-        """The UTC date to run the nightly for, once per day after `at_hhmm` (and within 3 hours of it)."""
-        when = when or datetime.now(timezone.utc)
-        try:
-            h, m = (int(x) for x in at_hhmm.split(":"))
-        except ValueError:
-            return None
-        start = when.replace(hour=h, minute=m, second=0, microsecond=0)
-        if not (start <= when < start + timedelta(hours=3)):
-            return None
-        day = start.date().isoformat()
-        with self._db() as db:
-            row = db.execute("SELECT value FROM meta WHERE key='nightly'").fetchone()
-        return None if row and row["value"] == day else day
-
-    def nightly_done(self, day: str) -> None:
-        with self._lock, self._db() as db:
-            db.execute("INSERT INTO meta(key, value) VALUES('nightly', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                       (day,))
-
     # ---- the dashboard ----
     def job(self, job_id: int) -> dict | None:
         with self._db() as db:
@@ -779,7 +692,7 @@ class Machines:
                         "version": m["version"], "stats": json.loads(m["stats"] or "{}"),
                         "job": dict(_job(job), **self.job_steps(job["id"])) if job else None, "last": _job(prev) if prev else None,
                         "paused_work": paused.get(m["name"], [])})
-        return {"machines": out, "jobs": [_job(r) for r in recent], "queued": queued, "shadow": self.shadow,
+        return {"machines": out, "jobs": [_job(r) for r in recent], "queued": queued, "shadow": self.shadow, "held": self.held(),
                 "recipes": {k: {"context": v["context"], "kind": KIND.get(k, "")} for k, v in RECIPES.items()},
                 "kinds": list(NODE_KINDS)}
 
@@ -877,31 +790,9 @@ def _clean_stats(stats) -> dict:
 
 
 def check_params(recipe: str, params: dict) -> dict:
-    """Only the parameters a recipe takes, each checked: a job can choose tests, never a command."""
+    """Only the parameters a recipe takes, each checked: a job can choose a version, never a command."""
     out = {}
-    if recipe == "node-checks":
-        only = ",".join(x.strip() for x in str(params.get("only") or "").split(",")) if params.get("only") else ""
-        if only and not ONLY.match(only):
-            raise ValueError("`only` is a comma list of check names (letters, digits, _)")
-        out = {"only": only, "strict_slots": bool(params.get("strict_slots"))}
-        imports = ",".join(x.strip() for x in str(params.get("imports") or "").split(",") if x.strip())
-        if imports:
-            branch = str(params.get("push_branch") or "")
-            if not IMPORT_LIST.match(imports):
-                raise ValueError("`imports` is a comma list of import steps (Name or Name:map)")
-            if not ROUND_BRANCH.match(branch):
-                raise ValueError("A job with imports pushes them only to fletchery/round-N (`push_branch`)")
-            out.update(imports=imports, push_branch=branch)
-    elif recipe == "pr-check":
-        try:
-            pr = int(params.get("pr") or 0)
-        except (TypeError, ValueError):
-            pr = 0
-        head = str(params.get("head") or "").lower()
-        if pr <= 0 or not SHA.match(head):
-            raise ValueError("A pr-check job needs `pr` (a number) and `head` (the PR's 40-character head SHA)")
-        out = {"pr": pr, "head": head}
-    elif recipe == "package":
+    if recipe == "package":
         version = str(params.get("version") or "").strip()
         if not BUILD_VERSION.match(version):
             raise ValueError("A build's version looks like 0.3.9")
@@ -1031,15 +922,19 @@ class WorkerApi:
 
 
 class Coordinator:
-    """What the backend runs for the machines: the worker API, and a thread that requeues lost jobs, starts the
-    nightly and sends commit statuses."""
+    """What the backend runs for the machines: the worker API, and a thread that requeues lost jobs and stops jobs
+    that ran past their limit."""
 
     def __init__(self, cfg, gh, log=print):
         conf = getattr(cfg, "machines", None) or {}
         self.conf = conf
         self.gh = gh
         self.log = log
-        self.machines = Machines(cfg.state_dir, cfg.repo, shadow=conf.get("shadow", True) is not False)
+        self.machines = Machines(cfg.state_dir, cfg.repo, shadow=False)
+        out_dir = ((getattr(cfg, "builds", None) or {}).get("outDir") or "")
+        if out_dir:   # builds copied back from a node land where Builds says they do (audit 2026-11-18: it was ignored)
+            self.machines.builds_dir = out_dir
+        self.started = now()
         roots = self.machines.set_asset_roots(conf.get("assetRoots") or [])
         for r in self.machines.missing_asset_roots():
             log(f"machines: shared asset folder {r} is missing or empty on this PC; node imports will refuse to start")
@@ -1065,10 +960,6 @@ class Coordinator:
         if self.api:
             self.api.stop()
 
-    def post(self, sha, state, context, description) -> None:
-        self.gh.api(f"repos/{self.machines.repo}/statuses/{sha}", "POST",
-                    {"state": state, "context": context, "description": description})
-
     def resolve(self, ref: str) -> str:
         ref = (ref or "").strip()
         if SHA.match(ref.lower()):
@@ -1079,25 +970,8 @@ class Coordinator:
         return str((data or {}).get("sha") or "")
 
     def tick(self, at: datetime | None = None) -> None:
-        for job in self.machines.reap(at):
-            self.log(f"machines: job {job} lost its machine")
-        for stopped, machine, wanted in self.machines.preempt_for_rounds(at):
-            self.log(f"machines: stopping job {stopped} on {machine} so merge-round job {wanted} can run now; "
-                     "it runs again later")
-        nightly = self.conf.get("nightly") or {}
-        if nightly.get("at"):
-            day = self.machines.nightly_due(nightly["at"], at)
-            if day:
-                try:
-                    branch = nightly.get("branch") or "main"
-                    sha = self.resolve(branch)
-                    job = self.machines.enqueue(nightly.get("recipe") or "nightly-full", sha, ref=branch,
-                                                requested_by=f"nightly {day}")
-                    self.machines.nightly_done(day)
-                    self.log(f"machines: nightly {day} queued as job {job} ({branch} at {sha[:10]})")
-                except Exception as e:
-                    self.log(f"machines: nightly not queued yet: {type(e).__name__}: {e}")
-        self.machines.post_statuses(self.post)
+        for job in self.machines.reap(at, since=self.started):
+            self.log(f"machines: job {job} lost its machine or ran past its limit")
 
     def _run(self) -> None:
         while not self._stop.wait(10):
@@ -1105,99 +979,6 @@ class Coordinator:
                 self.tick()
             except Exception as e:  # never take the backend down
                 self.log(f"machines: {type(e).__name__}: {e}")
-
-
-NO_NODE_MINUTES = 10   # `run`: give up (no result) when no node has taken the job by then
-
-
-def split_checks(only: str, parts: int) -> list[str]:
-    """The round's check names dealt round-robin into `parts` lists (largest first), so two nodes share one run."""
-    names = [x.strip() for x in str(only or "").split(",") if x.strip()]
-    parts = max(1, min(parts, len(names)))
-    return [",".join(names[i::parts]) for i in range(parts)] if names else [""]
-
-
-def run_job(m: "Machines", recipe: str, sha: str, params: dict | None = None, requested_by: str = "", labels=None,
-            timeout_minutes: float = 0, poll: float = 15, out=print, clock=None, sleep=None) -> int:
-    """Queue the job, wait for it, print its result and the end of its log. 0 passed, 1 failed (the tests failed),
-    2 no result: no node can take it, nobody took it within NO_NODE_MINUTES, it was lost or cancelled, or the job
-    itself reported "no result" (exit 2). A merge round runs its long tests this way (rounds.node_tests_text).
-    With two or more nodes free for it and a list of checks (`only`), the checks are split across the nodes and run at
-    the same time (Alex, 2026-11-12: "Can both machines run in parallel and speed things up?"); a run that imports
-    content is never split, because the imports must happen once."""
-    import time
-    clock, sleep = clock or time.monotonic, sleep or time.sleep
-    params = dict(params or {})
-    labels = list(labels or [])
-    if params.get("imports") and m.asset_roots():
-        missing = m.missing_asset_roots()
-        if missing:
-            out(f"No result: the shared asset folder {', '.join(missing)} is missing or empty on this PC, so the "
-                f"imports cannot run anywhere. Restore it (or fix workers.machines.assetRoots) and run the round again.")
-            return 2
-        if ASSET_SYNC_LABEL not in labels:   # only a worker that mirrors the asset folders first may import
-            labels.append(ASSET_SYNC_LABEL)
-    need = list(RECIPES[recipe]["labels"]) + [x for x in labels if x not in RECIPES[recipe]["labels"]]
-    for_round = claim_rank(requested_by) == 0
-    names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe, for_round)
-    if not names:
-        # A node that dropped off a minute ago is usually its worker restarting (2026-11-13, round 165: NODE-01
-        # restarted after a package job, both `run` attempts fell inside the gap and the round imported on the PC).
-        back = m.returning(need, RECIPES[recipe]["min_ram_gb"], recipe)
-        if back:
-            out(f"{', '.join(back)} was seen recently but is not calling in; waiting up to {RETURN_WAIT_MINUTES} min "
-                "for it to come back...")
-            start = clock()
-            while not names and clock() - start < RETURN_WAIT_MINUTES * 60:
-                sleep(poll)
-                names = m.eligible(need, RECIPES[recipe]["min_ram_gb"], recipe, for_round)
-    if not names:
-        if not m.carriers(need):
-            out(f"No result: no node has the labels {' '.join(need)} (no node carries them at all).")
-        else:
-            out(f"No result: no online node takes {recipe} with labels {' '.join(need)} (offline, paused or busy "
-                "elsewhere).")
-        return 2
-    chunks = [params.get("only", "")] if params.get("imports") else split_checks(params.get("only", ""), len(names))
-    ids = []
-    for chunk in chunks:
-        ids.append(m.enqueue(recipe, sha, {**params, "only": chunk} if len(chunks) > 1 else params,
-                             requested_by=requested_by, labels=labels))
-    if len(ids) > 1:
-        out(f"Jobs {', '.join(map(str, ids))} queued: {recipe} at {sha[:10]}, the checks split across {len(ids)} nodes "
-            f"({' | '.join(chunks)}). Waiting for the nodes...")
-    else:
-        out(f"Job {ids[0]} queued: {recipe} at {sha[:10]}. Waiting for a node...")
-    start, limit = clock(), (timeout_minutes or RECIPES[recipe]["timeout_minutes"] + NO_NODE_MINUTES) * 60
-    seen_running: set = set()
-    jobs: dict = {}
-    while True:
-        jobs = {i: m.job(i) for i in ids}
-        for i, job in jobs.items():
-            if job["state"] == "running" and i not in seen_running:
-                seen_running.add(i)
-                out(f"Job {i} running on {job['machine']}.")
-        if all(j["state"] in DONE for j in jobs.values()):
-            break
-        waited = clock() - start
-        # A split job still queued behind its sibling is waiting for a node to free up, not abandoned.
-        nobody = waited > NO_NODE_MINUTES * 60 and all(j["state"] == "queued" for j in jobs.values() if j["state"] not in DONE)
-        if nobody and not any(j["state"] == "running" for j in jobs.values()) or waited > limit:
-            for i, job in jobs.items():
-                if job["state"] not in DONE:
-                    m.cancel(i)
-            out(f"No result: job {', '.join(str(i) for i, j in jobs.items() if j['state'] not in DONE)} "
-                f"{'was not taken by any node' if nobody else 'ran too long'}; cancelled.")
-            return 2
-        sleep(poll)
-    codes = []
-    for i, job in jobs.items():
-        tail = "\n".join(m.log_text(i, 256 * 1024).replace("\r\n", "\n").rstrip().split("\n")[-60:])
-        if tail:
-            out(tail)
-        out(f"Job {i} on {job['machine']}: {job['state']}: {job['summary']}")
-        codes.append(0 if job["state"] == "passed" else 1 if job["state"] == "failed" and job.get("exit_code") != 2 else 2)
-    return 1 if 1 in codes else max(codes)
 
 
 def main(argv=None) -> int:
@@ -1209,24 +990,8 @@ def main(argv=None) -> int:
     sub.add_parser("add").add_argument("name")
     sub.add_parser("revoke").add_argument("name")
     sub.add_parser("list")
-    q = sub.add_parser("enqueue")
-    q.add_argument("--recipe", required=True, choices=sorted(RECIPES))
-    q.add_argument("--sha", required=True)
-    q.add_argument("--only", default="")
-    q.add_argument("--strict-slots", action="store_true")
-    q.add_argument("--pr", type=int, default=0)
     c = sub.add_parser("cancel")
     c.add_argument("id", type=int)
-    r = sub.add_parser("run", help="queue a job, wait for it and exit 0 passed / 1 failed / 2 no result")
-    r.add_argument("--recipe", required=True, choices=["node-checks"])
-    r.add_argument("--sha", required=True)
-    r.add_argument("--only", default="")
-    r.add_argument("--strict-slots", action="store_true")
-    r.add_argument("--imports", default="", help="Lane-Imports steps to run and push first (needs --push-branch)")
-    r.add_argument("--push-branch", default="", help="fletchery/round-N: where the node pushes the imported content")
-    r.add_argument("--label", action="append", default=[])
-    r.add_argument("--requested-by", default="command line")
-    r.add_argument("--timeout-minutes", type=float, default=0)
     a = ap.parse_args(argv)
     m = Machines(a.state_dir, a.repo)
     if a.cmd == "add":
@@ -1236,18 +1001,8 @@ def main(argv=None) -> int:
         print("revoked" if m.revoke(a.name) else "no such machine, or already revoked")
     elif a.cmd == "list":
         print(json.dumps(m.view(), indent=2))
-    elif a.cmd == "enqueue":
-        print(m.enqueue(a.recipe, a.sha, {"only": a.only, "strict_slots": a.strict_slots}, requested_by="command line",
-                        pr=a.pr))
     elif a.cmd == "cancel":
         print(m.cancel(a.id))
-    elif a.cmd == "run":
-        params = {"only": a.only, "strict_slots": a.strict_slots}
-        if a.imports:
-            params.update(imports=a.imports, push_branch=a.push_branch)
-            a.label = list(a.label) + ([IMPORT_LABEL] if IMPORT_LABEL not in a.label else [])
-        return run_job(m, a.recipe, a.sha, params, a.requested_by[:100],
-                       a.label, a.timeout_minutes)
     return 0
 
 

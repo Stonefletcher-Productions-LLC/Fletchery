@@ -45,7 +45,7 @@ API = "https://api.github.com"
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
 BLOCKED_LABEL = re.compile(r"block|needs[\s_:-]*(alex|you|human|person|owner|decision)|waiting[\s_:-]*on", re.I)
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
-REPORT_GONE = 15 * 60      # ... and as offline (no blocker) after this long
+RUNNER_REFUSED_RETRY = 3600   # a runner list GitHub refused (no admin rights) is asked again after an hour
 LIMITS = {                 # seconds before something counts as stuck
     "queued_run": 20 * 60,      # an Actions run nobody picked up
     "step": 60 * 60,            # one job step
@@ -54,7 +54,14 @@ LIMITS = {                 # seconds before something counts as stuck
     "idle_lease": 10 * 60,      # a hold while the machine's CPU stays idle
     "queue_wait": 90 * 60,      # a run waiting in a machine's queue
     "check": 90 * 60,           # one PR check run
+    "auto_merge": 2 * 3600,     # a PR set to merge automatically, checks green, not merged
 }
+DISK_LOW_GB = 30               # a machine's drive with less free space than this is flagged (workers.portal.live.diskFreeGb)
+
+
+def _ago_text(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s} s" if s < 120 else f"{s // 60} min" if s < 7200 else f"{s // 3600} h"
 
 
 def now_iso() -> str:
@@ -159,6 +166,9 @@ class GitHub:
             data = json.loads(body or b"null")
             if headers.get("ETag"):
                 with self._lock:
+                    if len(self.cache) > 4000 and url not in self.cache:   # bounded: old URLs (finished runs) drop out
+                        for old in list(self.cache)[:1000]:
+                            self.cache.pop(old, None)
                     self.cache[url] = (headers["ETag"], data)
             return data
         if code == 401:
@@ -258,6 +268,13 @@ def gh_token() -> str:
 
 
 # ---- the watcher ----
+def _runner_job(run: dict) -> dict:
+    """What a runner is doing, from its run row: enough to see a step that runs too long or a run nobody needs."""
+    return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
+            "step": run["step"], "step_started": run["step_started"], "url": run["url"], "started": run["started"],
+            "status": run["status"], "pr_closed": bool(run.get("pr_closed"))}
+
+
 class DevWatch:
     def __init__(self, conf: dict | None = None, log=None, token_fn=gh_token, github: GitHub | None = None):
         conf = conf or {}
@@ -268,6 +285,8 @@ class DevWatch:
         self.fast = max(10.0, float(conf.get("fastSeconds") or 15))
         self.slow = max(self.fast, float(conf.get("slowSeconds") or 90))
         self.names = {str(k).lower(): _text(v, 60) for k, v in (conf.get("names") or {}).items()}
+        # runner name suffixes to strip when GitHub doesn't send a runner's labels (InstallPrRunner.ps1 labels)
+        self.runner_labels = [str(x) for x in conf.get("runnerLabels") or ("unreal-pr", "unreal-light")]
         self.gh = github or GitHub(token_fn, self.log)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -288,6 +307,13 @@ class DevWatch:
         self.error = ""
         self.interval = self.fast
         self.started = now_iso()
+        # The backend adds what only it knows (app.py): build machines whose worker stopped calling in, builds no
+        # machine can take. A callable returning [{"kind", "title", "detail", "since", "key"}].
+        self.extra = None
+        try:
+            self.disk_low = float(conf.get("diskFreeGb", DISK_LOW_GB)) if isinstance(conf, dict) else DISK_LOW_GB
+        except (TypeError, ValueError):
+            self.disk_low = DISK_LOW_GB
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -298,9 +324,10 @@ class DevWatch:
         if len(body) > 64 * 1024:
             raise ValueError("report too large")
         with self._lock:
+            was = (self.reports.get(str(machine)) or {}).get("data") or {}
             self.reports[str(machine)] = {"data": data, "at": now_iso(), "ip": ip}
-        if data.get("busy"):
-            self._wake.set()      # a machine just picked something up: read GitHub soon
+        if data.get("busy") and not was.get("busy"):
+            self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
         return {"ok": True, "every": 10}
 
     # ---- the loop ----
@@ -331,7 +358,9 @@ class DevWatch:
         orgs = sorted({r["owner"] for r in self.repos if r.get("org")})
         with ThreadPoolExecutor(max_workers=6) as pool:
             got = dict(zip(names, pool.map(self._poll_repo, names)))
-            places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos if not r.get("org")]
+            # Organisation runners need admin:org; runners registered on one repository are listed there, so every
+            # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
+            places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
         runs, jobs, prs, checks, issues = {}, {}, {}, {}, {}
         errors = [g["error"] for g in got.values() if g.get("error")]
@@ -383,7 +412,10 @@ class DevWatch:
             return self.gh.get(path)
         except GitHubError as e:
             if e.code in (403, 404, 410) and "rate limit" not in str(e).lower():
-                self.skip[path] = time.time() + quiet_for
+                now_s = time.time()
+                if len(self.skip) > 500:
+                    self.skip = {k: v for k, v in self.skip.items() if v > now_s}
+                self.skip[path] = now_s + quiet_for
                 return None
             raise
 
@@ -429,14 +461,14 @@ class DevWatch:
     def _poll_runners(self, where: tuple):
         kind, name = where
         try:
-            data = self._try(f"{kind}/{name}/actions/runners?per_page=100", quiet_for=600)
+            data = self._try(f"{kind}/{name}/actions/runners?per_page=100", quiet_for=RUNNER_REFUSED_RETRY)
         except GitHubError:
             return self.runners.get(name)     # keep the last answer through a hiccup
         if data is None:
             if kind == "orgs":
-                self.runner_note = ("The GitHub sign-in on this PC cannot list the organisation's runners (it needs the "
-                                    "admin:org scope: run `gh auth refresh -h github.com -s admin:org`). Runners are shown "
-                                    "from their jobs and the machines' own reports until then.")
+                self.runner_note = ("The GitHub sign-in on this PC cannot list the organisation's own runners (that needs "
+                                    "`gh auth refresh -h github.com -s admin:org`). Runners added to a repository are listed; "
+                                    "others show up through their jobs.")
             return None
         return data.get("runners") or []
 
@@ -444,7 +476,7 @@ class DevWatch:
     def machine_of(self, runner_name: str, labels=()) -> str:
         """Runners are named <COMPUTERNAME>-<label> (InstallPrRunner.ps1): the machine is the name without the label."""
         n = str(runner_name or "")
-        for lab in sorted((str(x) for x in labels or ()), key=len, reverse=True):
+        for lab in sorted({str(x) for x in labels or ()} | set(self.runner_labels), key=len, reverse=True):
             if lab and n.lower().endswith("-" + lab.lower()):
                 return n[: -len(lab) - 1]
         return n
@@ -475,6 +507,8 @@ class DevWatch:
         # jobs per runner (from runs still going)
         repo_of_run = {}
         runs_out = []
+        open_heads = {repo: {str((p.get("head") or {}).get("ref") or "") for p in ps} | {f"#{p.get('number')}" for p in ps}
+                      for repo, ps in prs_by.items()}
         for repo, runs in runs_by.items():
             for r in runs:
                 repo_of_run[r["id"]] = repo
@@ -491,9 +525,17 @@ class DevWatch:
                        "created": _text(r.get("created_at"), 30), "started": _text(r.get("run_started_at") or r.get("created_at"), 30),
                        "updated": _text(r.get("updated_at"), 30), "runner": _text(job.get("runner_name"), 80),
                        "job": _text(job.get("name"), 120), "step": _text((cur or {}).get("name"), 120),
-                       "step_started": _text((cur or {}).get("started_at"), 30), "steps_done": done, "steps_total": len(steps)}
+                       "step_started": _text((cur or {}).get("started_at"), 30), "steps_done": done, "steps_total": len(steps),
+                       "labels": [_text(x, 60) for x in job.get("labels") or [] if isinstance(x, str)][:8]}
+                heads = open_heads.get(repo)
+                row["pr_closed"] = bool(row["status"] in ACTIVE and row["event"].startswith("pull_request") and heads is not None
+                                        and (f"#{prn}" not in heads if prn else row["branch"] and row["branch"] not in heads))
                 runs_out.append(row)
                 label = f"{row['name']}" + (f" · PR #{prn}" if prn else "")
+                if row["pr_closed"]:
+                    block("stuck", f"{label} is still {'running' if row['status'] == 'in_progress' else 'queued'}, but its pull "
+                          "request is closed", f"{repo}{' on ' + row['runner'] if row['runner'] else ''}: nothing needs this run. "
+                          "Cancel it to free the runner.", row["url"], row["started"], f"closed:{repo}:{row['id']}", repo)
                 if row["status"] == "queued" and _age(row["created"], at) > LIMITS["queued_run"]:
                     block("stuck", f"{label} has waited {int(_age(row['created'], at) // 60)} min for a runner",
                           f"{repo}: no free runner with its labels picked it up.", row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
@@ -518,17 +560,18 @@ class DevWatch:
                 row = {"name": _text(x.get("name"), 80), "owner": _text(owner, 80), "labels": labels[:8],
                        "machine": self.display(self.machine_of(x.get("name"), labels)),
                        "online": x.get("status") == "online", "busy": bool(x.get("busy")),
-                       "job": ({"title": job["name"] + (f" · PR #{job['pr']}" if job["pr"] else ""), "repo": job["repo"],
-                                "step": job["step"], "url": job["url"], "started": job["started"]} if job else None)}
+                       "job": _runner_job(job) if job else None}
                 runners_out.append(row)
                 if not row["online"]:
                     block("runner", f"Runner {row['name']} is offline", f"{row['machine']} · {', '.join(labels)}", key=f"runner:{row['name']}")
         known = {r["name"].lower() for r in runners_out}
+        seen_labels = {lab for r in runners_out for lab in r["labels"]}
         for name, job in running_by_runner.items():   # runners seen only through their jobs (no admin:org)
             if name not in known:
-                runners_out.append({"name": job["runner"], "owner": "", "labels": [], "machine": self.display(self.machine_of(job["runner"])),
-                                    "online": True, "busy": True, "job": {"title": job["name"], "repo": job["repo"], "step": job["step"],
-                                                                          "url": job["url"], "started": job["started"]}})
+                labels = sorted(seen_labels | set(job.get("labels") or []))
+                runners_out.append({"name": job["runner"], "owner": "", "labels": job.get("labels") or [],
+                                    "machine": self.display(self.machine_of(job["runner"], labels)),
+                                    "online": True, "busy": True, "job": _runner_job(job)})
         runners_out.sort(key=lambda r: (r["machine"].lower(), r["name"].lower()))
 
         machines_out = self._machines(at, runners_out, block)
@@ -544,7 +587,7 @@ class DevWatch:
                         "queued" if going else "passed" if cr else "none"
                 labels = [str(lab.get("name")) for lab in p.get("labels") or []][:10]
                 row = {"repo": repo, "number": p.get("number"), "title": _text(p.get("title"), 200), "url": _web(p.get("html_url")),
-                       "draft": bool(p.get("draft")), "author": _text((p.get("user") or {}).get("login"), 60),
+                       "draft": bool(p.get("draft")), "auto_merge": bool(p.get("auto_merge")), "author": _text((p.get("user") or {}).get("login"), 60),
                        "branch": _text((p.get("head") or {}).get("ref"), 120), "base": _text((p.get("base") or {}).get("ref"), 80),
                        "updated": _text(p.get("updated_at"), 30), "created": _text(p.get("created_at"), 30), "labels": labels,
                        "checks": {"state": state, "total": len(cr), "done": len(cr) - len(going),
@@ -560,6 +603,10 @@ class DevWatch:
                     if c.get("status") == "in_progress" and _age(c.get("started_at"), at) > LIMITS["check"]:
                         block("stuck", f"PR #{row['number']} check \"{_text(c.get('name'), 60)}\" has run {int(_age(c.get('started_at'), at) // 60)} min",
                               repo, _web(c.get("html_url")) or row["url"], c.get("started_at") or "", f"checklong:{repo}:{c.get('id')}", repo)
+                if row["auto_merge"] and state == "passed" and _age(row["updated"], at) > LIMITS["auto_merge"]:
+                    block("stuck", f"PR #{row['number']} is set to merge automatically but has waited "
+                          f"{int(_age(row['updated'], at) // 3600)} h", f"{repo} · checks pass; a required review, a conflict or "
+                          "the merge queue may be holding it", row["url"], row["updated"], f"automerge:{repo}:{row['number']}", repo)
                 if any(BLOCKED_LABEL.search(lab) for lab in labels):
                     block("label", f"PR #{row['number']} is marked blocked", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
                           f"label:{repo}:{row['number']}", repo)
@@ -579,6 +626,13 @@ class DevWatch:
                           f"label:{repo}:{row['number']}", repo)
         issues_out.sort(key=lambda r: -_ts(r["updated"]))
 
+        if self.extra is not None:
+            try:
+                for b in self.extra() or []:
+                    block(b.get("kind") or "stuck", b.get("title") or "", b.get("detail") or "", b.get("url") or "",
+                          b.get("since") or "", b.get("key") or "")
+            except Exception as e:   # never lose the whole feed over it
+                block("feed", "Fletchery could not check its own machines", f"{type(e).__name__}: {e}"[:200], key="extra")
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
@@ -636,9 +690,16 @@ class DevWatch:
             if procs.get("claude"):
                 acts.append({"kind": "coding", "title": f"Claude: {int(procs['claude'])} session" + ("s" if int(procs["claude"]) > 1 else ""),
                              "since": "", "detail": ""})
+            for x in (stats.get("disks") or [])[:4]:
+                if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float)) and x["free_gb"] < self.disk_low:
+                    block("stuck", f"{self.display(host)}: {_text(x.get('name'), 8)} has {x['free_gb']:.0f} GB free",
+                          f"Below {self.disk_low:.0f} GB: builds and checks there may fail. Clear old worktrees or build output.",
+                          key=f"disk:{host}:{_text(x.get('name'), 8)}")
             silent = age > REPORT_STALE
-            if silent and age < REPORT_GONE:
-                block("machine", f"{self.display(host)} stopped reporting", f"Last report {int(age)} s ago.", since=rep["at"], key=f"machine:{host}")
+            if silent:   # stays listed (and flagged) until it reports again or a week has passed
+                block("machine", f"{self.display(host)} stopped reporting",
+                      f"Last report {_ago_text(age)} ago. Its reporter task may have stopped, or the machine is off.",
+                      since=rep["at"], key=f"machine:{host}")
             by[host.lower()] = {"name": self.display(host), "host": host, "online": not silent, "last_report": rep["at"],
                                 "busy": bool(acts and any(a["kind"] not in ("queued",) for a in acts)) or bool(procs.get("runner")),
                                 "stats": {k: stats.get(k) for k in ("cpu", "ram_used_gb", "ram_total_gb") if isinstance(stats.get(k), (int, float))},
@@ -652,7 +713,7 @@ class DevWatch:
             # GitHub did not list the label that would have told us where the machine name ends.
             m = next((v for k, v in by.items() if k == key or v["name"].lower() == key), None) or next(
                 (v for k, v in sorted(by.items(), key=lambda kv: -len(kv[0])) if r["name"].lower().startswith(k + "-")), None)
-            if m is not None and r["machine"].lower() not in (m["host"].lower(), m["name"].lower()):
+            if m is not None:
                 r["machine"] = m["name"]
             if m is None:
                 m = by.setdefault(key, {"name": r["machine"], "host": r["machine"], "online": r["online"], "last_report": "",

@@ -1,18 +1,19 @@
-"""A Fletchery project: today's BuildLane profile (repo, status file, pause file, drive...) plus a `workers` block for
-the Workers engine. One file per project, the same file the Projects screen edits.
+"""A Fletchery project profile: one JSON file per project. Fletchery only reads it (old keys from the retired coding
+agents and merge rounds are ignored, so an existing profile keeps working).
 
     {
       "name": "LifeShare", "repo": "owner/LifeShare",
-      "statusFile": "E:\\GitHubRunner\\status.json", "pauseFile": "E:\\GitHubRunner\\PAUSED", "drive": "E",
-      "minimumFreeGB": 12,
       "workers": {
-        "enabled": true, "projectRoot": "E:\\lifeshare-scratch\\foreman\\host", "baseBranch": "Test-Staging",
-        "maxParallel": 2, "dailyBudgetUsd": 60, "auth": "subscription", ...
+        "baseBranch": "Test-Staging",
+        "dashboardPort": 8770,                       # the desktop window: http://127.0.0.1:8770
+        "stateDir": "E:\\lifeshare-scratch\\foreman",  # "" = %LOCALAPPDATA%\\Fletchery\\<name>
+        "portal": {"port": 8772, "users": ["you@example.com"], "push": {...}, "live": {...}},   # portal.py
+        "machines": {"listen": "100.64.0.10:8771", "assetRoots": [...]},                   # machines.py
+        "builds": {"outDir": "...", "nodeLabels": [...], "publish": {...}},                 # builds.py
+        "scratchRoots": ["E:\\lifeshare-scratch"], "scratchMode": "trim", ...               # scratch.py
       }
     }
-
-Project rules (conventions, which checks run, prompt additions) live in the project's own repository, in `.fletchery/`
-(see rules.py), not here."""
+"""
 from __future__ import annotations
 
 import json
@@ -32,228 +33,55 @@ def default_state_dir(name: str) -> str:
 
 # profile key (in "workers") -> Config field
 WORKER_KEYS = {
-    "autoCleanup": "auto_cleanup", "cleanupRetentionHours": "cleanup_retention_hours", "thinTextWorkers": "thin_text_workers",
-    "mergeBackupDir": "merge_backup_dir", "keepMergeCheckouts": "keep_merge_checkouts",
-    "workMinimumFreeGB": "work_min_free_gb", "attemptRetentionHours": "attempt_retention_hours",
+    "baseBranch": "base_branch", "stateDir": "state_dir", "dashboardPort": "dashboard_port",
+    "heavyLeaseFile": "heavy_lease_file", "builds": "builds", "machines": "machines", "portal": "portal",
     "scratchRoots": "scratch_roots", "scratchMode": "scratch_mode", "scratchKeep": "scratch_keep",
     "scratchTrimHours": "scratch_trim_hours", "scratchRemoveDays": "scratch_remove_days",
     "scratchDisposable": "scratch_disposable", "scratchBackupDir": "scratch_backup_dir",
-    "taskBackupDir": "task_backup_dir", "taskBackupDays": "task_backup_days", "diskReportRoot": "disk_report_root",
-    "emergencyWorkers": "emergency_workers", "workerRankLimits": "worker_rank_limits", "yieldTo": "yield_to",
-    "assetTasks": "asset_tasks", "workerAllowedTools": "worker_allowed_tools", "workerDirs": "worker_dirs",
-    "autoPrerequisites": "auto_prerequisites", "stackDepth": "stack_depth",
-    "enabled": "workers_enabled", "projectRoot": "project_root", "baseBranch": "base_branch", "assignee": "assignee",
-    "worktreeRoot": "worktree_root", "stateDir": "state_dir", "maxParallel": "max_parallel", "pollMinutes": "poll_minutes",
-    "model": "model", "auth": "auth", "limitBackoffMinutes": "limit_backoff_minutes",
-    "workerBudgetUsd": "worker_budget_usd", "reviewerBudgetUsd": "reviewer_budget_usd", "fixerBudgetUsd": "fixer_budget_usd",
-    "plannerBudgetUsd": "planner_budget_usd", "dailyBudgetUsd": "daily_budget_usd",
-    "workerMaxTurns": "worker_max_turns", "reviewerMaxTurns": "reviewer_max_turns", "fixerMaxTurns": "fixer_max_turns",
-    "plannerMaxTurns": "planner_max_turns", "fixerAttempts": "fixer_attempts", "codeFreeze": "code_freeze",
-    "gateTimeoutSeconds": "gate_timeout_s", "stallMinutes": "stall_minutes", "hangMinutes": "hang_minutes", "drainMaxMinutes": "drain_max_minutes", "plugin": "plugin", "dashboardPort": "dashboard_port", "label": "label",
-    "watchFailures": "watch_failures", "runnerRoot": "runner_root", "watchSkipWorkflows": "watch_skip_workflows",
-    "watchMinutes": "watch_minutes", "mergeFlags": "merge_flags", "mergeRoundFile": "merge_round_file",
-    "heavyLeaseFile": "heavy_lease_file", "mergeRounds": "merge_rounds", "mergeLabel": "merge_label",
-    "mergeRoundMax": "merge_round_max", "roundAgent": "merge_agent", "mergeNotes": "merge_notes",
-    "mergeBudgetUsd": "merge_budget_usd", "mergeMaxTurns": "merge_max_turns", "mergeRetryMinutes": "merge_retry_minutes", "mergePlaytest": "merge_playtest", "prCheckCommand": "pr_check_command", "prCheckTimeoutMinutes": "pr_check_timeout_minutes", "playtestIssueTitle": "playtest_issue_title", "roundSharedSessions": "round_shared_sessions",
-    "mergeBacklogHigh": "merge_backlog_high", "mergeBacklogLow": "merge_backlog_low", "agents": "agents", "routing": "routing", "escalate": "escalate", "machines": "machines", "builds": "builds", "portal": "portal",
 }
 # profile key (top level) -> Config field
-PROFILE_KEYS = {"name": "name", "repo": "repo", "statusFile": "lane_status_file", "pauseFile": "lane_pause_file",
-                "drive": "lane_drive", "minimumFreeGB": "lane_min_free_gb"}
+PROFILE_KEYS = {"name": "name", "repo": "repo"}
 
 
 @dataclass
 class Config:
     name: str = "project"
-    repo: str = ""
-    workers_enabled: bool = True
-    project_root: str = ""                   # a local clone of the project; task worktrees are made from it
-    base_branch: str = "main"
-    label: str = "fletchery"                 # issues with this label are tasks; status labels are "<label>:queued" ...
-    assignee: str = ""
-    worktree_root: str = ""                  # "" = <state_dir>/worktrees
+    repo: str = ""                           # owner/name: builds are made from this repository
+    base_branch: str = "main"                # what a build packages when no branch is named
     state_dir: str = ""                      # "" = %LOCALAPPDATA%\Fletchery\<name>
-    max_parallel: int = 2                    # on a Claude plan the limits are shared with your own sessions
-    worker_rank_limits: dict = None          # None = allocate All workers by task demand; manual per-rank 0..10
-    emergency_workers: int = 1              # dedicated build/merge repair slot, independently 0 or 1
-    # Programs (image names, e.g. "Wow.exe") that mean "the PC is someone's right now": while one runs, no new
-    # coding session, PC check or build starts on this PC; running work finishes (2026-11-16, Alex gaming). Merge
-    # rounds still start: they build and test on the node, and Alex wants merging to continue (2026-11-17).
-    yield_to: list = None
-    auto_cleanup: bool = True                # retire verified closed/published task copies when idle
-    cleanup_retention_hours: float = 24
-    # Each round whose checkout ends dirty gets quarantined and replaced by a fresh 11-13 GB checkout; nothing removed
-    # the old ones and E: filled twice (2026-11-07, 2026-11-09). Quarantined merge checkouts beyond the newest
-    # `keep_merge_checkouts` are retired after their uncommitted files are copied to `merge_backup_dir` (ideally another
-    # drive). With no backup folder only clean ones are retired. Their branches, and so their commits, stay.
-    merge_backup_dir: str = ""
-    keep_merge_checkouts: int = 2
-    # Disk guard (2026-11-13: E: fell to 27 GB of 931 as task checkouts piled up). Below `work_min_free_gb` on the
-    # worktree drive no new task, fixer, round or build starts and finished copies are cleaned at once. 0 = off
-    # (the default, so small test and CI disks are unaffected); the LifeShare profile sets 100.
-    work_min_free_gb: float = 0.0
-    attempt_retention_hours: float = 24      # old attempt/repair copies of an open task are removed after this idle time
-    task_backup_dir: str = ""                # "" = <state_dir>/task-backups: changed files + logs of removed copies
-    task_backup_days: float = 14
+    dashboard_port: int = 8770               # the desktop window's page, on 127.0.0.1 only
+    heavy_lease_file: str = ""               # LaneGuard's heavy.json on this PC (shown on Live by the reporter)
+    builds: dict = None                      # builds.py: {"outDir", "nodeLabels", "timeoutMinutes", "publish"}
+    machines: dict = None                    # machines.py: {"listen": "<Tailscale IP>:8771", "assetRoots": [...]}
+    portal: dict = None                      # portal.py: {"port": 8772, "users": [...], "push": {...}, "live": {...}}
     # Scratch retention (scratch.py; 2026-11-16: sessions' own worktrees filled both machines). Folders directly under
-    # `scratch_roots` that Fletchery did not make: build output is trimmed once idle `scratch_trim_hours` (2 h when the
-    # disk guard holds), and in "remove" mode a clean, pushed, unlocked worktree idle `scratch_remove_days` is listed,
-    # a day later moved to the quarantine folder beside the root, and a week after that removed with
-    # `git worktree remove`. `scratch_keep` are folder-name patterns never touched; `scratch_disposable` are
-    # plain-folder patterns (packaged builds) that are listed when idle and never removed: a folder that is not a git
-    # checkout is never removed in any mode (2026-11-17). No roots = off. Modes: off, report, trim, remove.
+    # `scratch_roots`: build output is trimmed once idle `scratch_trim_hours`; in "remove" mode a clean, pushed,
+    # unlocked worktree idle `scratch_remove_days` is listed, a day later quarantined, and a week after that removed
+    # with `git worktree remove`. A folder that is not a git checkout is never removed. No roots = off.
+    # Modes: off, report, trim, remove.
     scratch_roots: list = None
     scratch_mode: str = "trim"
     scratch_keep: list = None
     scratch_trim_hours: float = 24
     scratch_remove_days: float = 7
     scratch_disposable: list = None
-    scratch_backup_dir: str = ""             # "" = <state_dir>/scratch-backups: newest Saved/Logs of removed worktrees
-    disk_report_root: str = ""               # "" = the folder holding state_dir; its 10 largest folders are shown
-    thin_text_workers: bool = True            # omit binary Art/Content only in newly created text task checkouts
-    asset_tasks: dict = None                 # explicit per-task paths/mode; default remains text-only
-    # Claude sessions load no settings.json (runtime.py: setting_sources=[]), so an allow rule in
-    # ~/.claude/settings.json never reaches a worker (LifeShare #929/#991/#1045/#1046/#1066, 2026-11-07).
-    # These go into the sessions themselves: extra auto-approved tools for workers and fixers, e.g.
-    # "Bash(E:/BlenderTools/BlenderMCP/.venv/Scripts/python.exe E:/BlenderTools/BlenderMCP/call.py:*)",
-    # and folders outside the task worktree that every Claude session may read (writers may also edit them).
-    worker_allowed_tools: list = None
-    worker_dirs: list = None
-    auto_prerequisites: bool = True          # turn actionable blocks into dependencies, not repeated human prompts
-    stack_depth: int = 1                     # a task may start on its one open dependency's PR branch once that PR is `ready` (0 = off)
-    poll_minutes: float = 10
-    dashboard_port: int = 8770               # http://127.0.0.1:<port> while Fletchery runs
-    model: str = ""                          # "" = the Claude CLI's default
-    # "subscription": sessions use the Claude CLI's own sign-in (a Claude plan); any ANTHROPIC_API_KEY is removed from
-    # their environment so nothing bills the API by accident. "api": sessions use ANTHROPIC_API_KEY.
-    auth: str = "subscription"
-    limit_backoff_minutes: int = 30          # after a usage-limit hit, dispatch nothing new for this long
-    worker_budget_usd: float = 8.0
-    reviewer_budget_usd: float = 2.0
-    fixer_budget_usd: float = 5.0
-    planner_budget_usd: float = 4.0
-    daily_budget_usd: float = 60.0
-    worker_max_turns: int = 80
-    stall_minutes: int = 60                  # a worker/fixer session with no tool call for this long is stopped and requeued (0 = never)
-    hang_minutes: float = 30                 # the backend's own pass loop stuck this long: it exits for a restart (watchdog.py; 0 = never)
-    drain_max_minutes: float = 15            # a code reload waits this long for sessions to finish, then rounds and workers go on
-    reviewer_max_turns: int = 25
-    fixer_max_turns: int = 50
-    planner_max_turns: int = 40
-    fixer_attempts: int = 2
-    code_freeze: bool = False                # True tells every worker and fixer the project is under a code freeze
-    gate_timeout_s: int = 900
-    plugin: str = ""                         # a Claude Code plugin folder, relative to the project root
-    # the lane watcher (watcher.py): failed builds outside workers' PRs become tasks
-    watch_failures: bool = True
-    runner_root: str = ""                    # the local runner's run store; "" = from its runner.json, else GitHub Actions
-    watch_skip_workflows: list = None        # workflow file names never filed (e.g. advisory ones)
-    watch_minutes: float = 5
-    # the Merge section: notes shown on a PR waiting to merge when it changes matching paths, e.g.
-    # [{"paths": "^Content/Town/|Furniture", "flag": "strict NavCheck on the PC"}]
-    merge_flags: list = None
-    merge_round_file: str = ""               # what the merge round is doing (merge.py); "" = <state_dir>/merge-round.json
-    heavy_lease_file: str = ""               # who holds the PC for heavy work (HeavyLease.ps1's heavy.json); "" = not shown
-    # merge rounds (rounds.py): Fletchery merges, builds, tests and lands `ready` PRs by itself, one round at a time
-    merge_rounds: bool = False
-    merge_label: str = "ready"               # PRs with this label into the base branch go in the next round
-    merge_round_max: int = 6                 # at most this many PRs per round, most-unblocking first
-    merge_agent: str = ""                    # profile `roundAgent`: the agent that runs rounds; "" = Best active worker (the strongest available one). The old `mergeAgent` key is ignored.
-    merge_notes: str = ""                    # a file with the project's round instructions when the repo has no .fletchery/merger.md
-    merge_budget_usd: float = 60.0
-    merge_max_turns: int = 600
-    pr_check_command: str = ""               # prcheck.py: built and quick-tested on the PC before a worker PR gets the merge label
-    pr_check_timeout_minutes: float = 60
-    merge_playtest: bool = False             # land PRs whose only unrun acceptance needs people (two players, manual review)
-    playtest_issue_title: str = "Playtest checklist"  # those checks go on this issue instead of deferring the PR
-    merge_retry_minutes: float = 45          # after a round that landed nothing, wait this long before trying the same PRs
-    # balance (loop.py): a running round no longer stops every new session. Agents on other accounts keep working;
-    # the round agent's own account (its plan's limits) starts at most this many new sessions. -1 = stop all new work.
-    round_shared_sessions: int = 2
-    # backpressure: new feature tasks pause once this many of the workers' PRs wait labelled for merging, and resume
-    # at the low mark. 0 = two rounds' worth (high) and one round's worth (low); high -1 = never pause. Fixers and
-    # repairs always run.
-    merge_backlog_high: int = 0
-    merge_backlog_low: int = 0
-    # the coding agents (agents.py): [{"name", "kind": claude|codex|opencode, "model", "tier", "vendor", "enabled",
-    # "maxParallel", "keyEnv"}]; None = Claude only. `routing` says which agent takes which difficulty.
-    agents: list = None
-    routing: dict = None
-    builds: dict = None                      # builds.py: {"outDir", "engine", "timeoutMinutes", "nodeLabels", "publish"}; None = defaults
-    machines: dict = None                    # machines.py: {"listen": "<Tailscale IP>:8771", "shadow": true, "nightly": {...}}; None = off
-    portal: dict = None                      # portal.py: {"port": 8772, "hosts": ["pc.tailnet.ts.net"], "users": ["you@example.com"], "push": {...}}; None = off
-    escalate: bool = True                    # a failed attempt goes to a stronger agent before the task is blocked
-    # the Build Lane, from the profile; "" hides the panel
-    lane_status_file: str = ""
-    lane_pause_file: str = ""
-    lane_drive: str = ""
-    lane_min_free_gb: float = 12.0
+    scratch_backup_dir: str = ""
 
-    # ---- labels ----
-    @property
-    def queued(self) -> str: return f"{self.label}:queued"
-    @property
-    def running(self) -> str: return f"{self.label}:running"
-    @property
-    def in_pr(self) -> str: return f"{self.label}:pr"
-    @property
-    def blocked(self) -> str: return f"{self.label}:blocked"
-    @property
-    def status_label(self) -> str: return f"{self.label}-status"
-
-    # ---- loading and saving ----
     @staticmethod
     def load(path: Path | None = None) -> "Config":
-        """A profile (.json). Old Foreman configs (flat snake_case keys) load too."""
         cfg = Config()
         cfg._path = Path(path) if path else None
         if cfg._path and cfg._path.exists():
             data = json.loads(cfg._path.read_text(encoding="utf-8-sig"))
-            names = {f.name for f in fields(Config)}
             for k, v in data.items():
                 if k in PROFILE_KEYS:
                     setattr(cfg, PROFILE_KEYS[k], v)
-                elif k in names:  # a flat Foreman config
-                    setattr(cfg, k, v)
             for k, v in (data.get("workers") or {}).items():
                 if k in WORKER_KEYS:
                     setattr(cfg, WORKER_KEYS[k], v)
         if not cfg.state_dir:
             cfg.state_dir = default_state_dir(cfg.name)
-        if not cfg.worktree_root:
-            cfg.worktree_root = str(Path(cfg.state_dir) / "worktrees")
         return cfg
-
-    def save(self, **changes) -> None:
-        """Apply `changes` (Config field names) and write them back into the profile they came from: lane fields at
-        the top level, everything else in the `workers` block. Other keys are left as they are."""
-        for k in changes:
-            if not hasattr(self, k):
-                raise KeyError(k)
-        for k, v in changes.items():
-            setattr(self, k, v)
-        path = getattr(self, "_path", None)
-        if not path:
-            return
-        data = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
-        flat = not ("workers" in data or "repo" in data and "statusFile" in data)
-        to_profile = {v: k for k, v in PROFILE_KEYS.items()}
-        to_workers = {v: k for k, v in WORKER_KEYS.items()}
-        for k, v in changes.items():
-            if flat and k not in to_profile:
-                data[k] = v
-            elif k in to_profile:
-                data[to_profile[k]] = v
-            elif k in to_workers:
-                data.setdefault("workers", {})[to_workers[k]] = v
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
-
-    def resolve(self, p: str) -> Path:
-        """A path from the profile: absolute as is, relative to the project root otherwise."""
-        q = Path(p)
-        return q if q.is_absolute() else Path(self.project_root or ".") / q
 
     def dump(self) -> str:
         return json.dumps({f.name: getattr(self, f.name) for f in fields(Config)}, indent=2)

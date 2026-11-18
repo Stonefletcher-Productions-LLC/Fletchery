@@ -1,4 +1,4 @@
-// Browser checks for the phone portal (ui/portal) against a local fixture; never talks to a real Fletchery.
+// Browser checks for Fletchery's page (ui/portal) against a local fixture; never talks to a real Fletchery.
 // Run with Playwright installed: node ui/test-portal.cjs   (FLETCHERY_BROWSER=<chromium> off Windows;
 // FLETCHERY_PORTAL_SHOTS=<folder> also saves screenshots)
 const assert = require('node:assert/strict');
@@ -9,35 +9,26 @@ const { chromium, devices } = require(process.env.FLETCHERY_PLAYWRIGHT || 'playw
 
 const ago = minutes => new Date(Date.now() - minutes * 60000).toISOString();
 const gh = 'https://github.com/example/harbor';
+const job = (id, state, extra) => ({id, recipe: 'package', state, machine: 'NODE-01', ref: 'main', sha: 'a1b2c3d4e5', version: '0.4.6',
+  requested_by: 'build 0.4.6', created: ago(30), started: state === 'queued' ? '' : ago(25), finished: '', summary: '', cancel: false,
+  log_bytes: 2048, steps: [{name: 'Build the editor', state: 'done', start: ago(25), end: ago(12)}, {name: 'Package 0.4.6', state: 'running', start: ago(12), end: ''}], ...extra});
 const data = {
-  project: 'Harbor', repo: 'example/harbor', repo_url: gh, at: ago(0), last_pass: ago(3), next_pass_at: ago(-7), passing: false,
-  pauses: [], max_parallel: 4, spent_today: 27.08, daily_budget: 400, auth: 'subscription', pc: 'the PC is free',
-  needs: [{number: 900, title: 'Missing <asset> access', why: 'Needs you: allow the Blender tool or pick another route', url: gh + '/issues/900', pr: 0, pr_url: '', agent: '', depends: []}],
-  workers: [
-    {task: 891, title: 'Shower interactions', agent: 'sonnet', stage: 'Reviewing', since: ago(18), last: 'Read src/shower.cpp', last_at: ago(1), emergency: false},
-    {task: 899, title: 'Preview reactions', agent: 'codex-sol', stage: 'Writing', since: ago(6), last: 'Edit ui/reactions.ts', last_at: ago(0), emergency: false},
-  ],
-  running: [{number: 891, title: 'Shower interactions', why: '', url: gh + '/issues/891', pr: 0, pr_url: '', agent: 'sonnet', depends: []},
-            {number: 899, title: 'Preview reactions', why: '', url: gh + '/issues/899', pr: 0, pr_url: '', agent: 'codex-sol', depends: []}],
-  queued: [{number: 840, title: 'Bikes and parcels', why: 'ready', url: gh + '/issues/840', pr: 0, pr_url: '', agent: '', depends: []},
-           {number: 841, title: 'Parcel lockers', why: 'waits for #840', url: gh + '/issues/841', pr: 0, pr_url: '', agent: '', depends: [840]}],
-  in_pr: [{number: 1036, title: 'Save purchased bike details', why: '', url: gh + '/issues/1036', pr: 1041, pr_url: gh + '/pull/1041', agent: 'opus', depends: []}],
-  merge: {on: true, held: false, active: true, state: 'running', round: '16', headline: 'Game tests running · 47 min elapsed', why: '',
-    started: ago(47), updated: ago(1), stale: false, prs: [1041, 1043], agent: 'opus', backlog: 3,
-    steps: [{name: 'Compile', state: 'done', message: '', seconds: 372}, {name: 'Imports', state: 'done', message: '', seconds: 95},
-            {name: 'Game tests', state: 'running', message: 'Verify the rebuilt game before landing.', seconds: null}, {name: 'Land', state: 'todo', message: '', seconds: null}],
-    previous: {round: '15', result: 'landed 4 PRs', ended: ago(190)},
-    waiting: [{pr: 1041, title: 'Save purchased bike details', url: gh + '/pull/1041', ready: true, flags: []},
-              {pr: 1050, title: 'Move the cafe counter', url: gh + '/pull/1050', ready: false, flags: ['strict NavCheck on the PC']}]},
+  project: 'Harbor', repo: 'example/harbor', at: ago(0), started: ago(185), version: 'abc12345', base: 'main',
+  build_machines: ['NODE-01'], machines_on: true, held: false, errors: [], restarting: '',
   builds: [
-    {id: 'b3', version: '0.4.6', state: 'running', ref: 'main', sha: 'a1b2c3d4e5', at: ago(30), started: ago(25), finished: '', machine: 'NODE-01', reason: '', publish: '', tests: 'full', repeat: '', links: []},
-    {id: 'b2', version: '0.4.5', state: 'done', ref: 'main', sha: '326ed7bfd3', at: ago(900), started: ago(890), finished: ago(800), machine: 'this PC', reason: 'Download ready', publish: 'published', tests: '', repeat: '',
+    {id: 'b3', version: '0.4.6', state: 'running', ref: 'main', sha: 'a1b2c3d4e5', at: ago(30), started: ago(25), finished: '', machine: 'NODE-01', job: 7, reason: 'Building on NODE-01.', publish: '', publish_reason: '', tests: 'full', repeat: '', links: []},
+    {id: 'b4', version: '0.4.7', state: 'scheduled', ref: 'main', sha: '', at: ago(-600), started: '', finished: '', machine: '', job: 0, reason: '', publish: '', publish_reason: '', tests: '', repeat: 'daily', links: []},
+    {id: 'b2', version: '0.4.5', state: 'done', ref: 'main', sha: '326ed7bfd3', at: ago(900), started: ago(890), finished: ago(800), machine: 'NODE-01', job: 5, reason: 'Download ready', publish: 'published', publish_reason: '', tests: '', repeat: '',
       links: [{label: 'GitHub download', url: gh + '/releases/tag/build-0.4.5'}, {label: 'Google Drive', url: 'https://drive.google.com/file/d/example'}]},
-    {id: 'b1', version: '0.4.4', state: 'failed', ref: 'main', sha: '99887766aa', at: ago(2000), started: ago(1990), finished: ago(1950), machine: 'NODE-01', reason: 'Compile failed in <Game>', publish: '', tests: '', repeat: '', links: [{label: 'bad', url: 'javascript:alert(1)'}]},
+    {id: 'b1', version: '0.4.4', state: 'failed', ref: 'main', sha: '99887766aa', at: ago(2000), started: ago(1990), finished: ago(1950), machine: 'NODE-01', job: 3, reason: 'Compile failed in <Game>', publish: '', publish_reason: '', tests: '', repeat: '', links: [{label: 'bad', url: 'javascript:alert(1)'}]},
   ],
-  machines: [{name: 'NODE-01', online: true, last_seen: ago(0), job: 'package', job_ref: 'main', paused: []}],
-  log: [{at: ago(5), line: 'Merge round 16 started'}, {at: ago(1), line: '<script>window.hacked = 1</script>'}],
+  machines: [{name: 'NODE-01', online: true, last_seen: ago(0), labels: ['os:windows', 'role:cook', 'ram:24'], builds: true, paused: [], job: job(7, 'running')},
+             {name: 'ALEX-PC', online: true, last_seen: ago(0), labels: ['os:windows', 'role:cook'], builds: false, paused: ['builds'], job: null}],
+  jobs: [job(7, 'running'), job(6, 'failed', {recipe: 'checkout-only', finished: ago(40), summary: 'git fetch failed', steps: []})],
+  scratch: {checked_at: ago(20), mode: 'trim', freed_gb: 3.2},
+  log: [{at: ago(5), line: 'builds: 0.4.6: job 7 queued'}, {at: ago(1), line: '<script>window.hacked = 1</script>'}],
 };
+let mode = 'phone';   // phone | readonly | desktop: what the backend tells this screen it may do
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
 let down = false;
 const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.json'), 'utf8'));   // devwatch.py's own output
@@ -50,10 +41,23 @@ const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
   const send = (code, body, type) => { res.writeHead(code, {'Content-Type': type, 'Content-Security-Policy': csp, 'Cache-Control': 'no-store'}); res.end(body); };
   if (off) return req.socket.destroy();
-  if (req.method !== 'GET') { posts.push(url); return send(404, '{}', 'application/json'); }
-  if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify(data), 'application/json');
+  if (req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      const parsed = JSON.parse(body || '{}');
+      if (url.startsWith('/api/push')) return send(200, '{}', 'application/json');
+      posts.push([url, parsed]);
+      if (mode === 'readonly' || (mode === 'phone' && url === '/api/builds/add')) return send(403, JSON.stringify({error: 'Do this in the Fletchery window on the PC.'}), 'application/json');
+      if (parsed.id === 'nope') return send(400, JSON.stringify({error: 'Build not found.'}), 'application/json');
+      send(200, JSON.stringify(url === '/api/builds/add' ? {...parsed, id: 'b9'} : {ok: true}), 'application/json');
+    });
+    return;
+  }
+  if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify({...data, desktop: mode === 'desktop', controls: mode !== 'readonly'}), 'application/json');
   if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt, fresh: {...live.fresh, github: liveAt}}), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
+  if (url === '/api/jobs/log') return send(200, 'step 1\nstep 2', 'text/plain');
   const file = path.join(__dirname, 'portal', url === '/' ? 'index.html' : path.basename(url));
   if (!fs.existsSync(file)) return send(404, '{}', 'application/json');
   send(200, fs.readFileSync(file), types[path.extname(file)] || 'application/octet-stream');
@@ -63,15 +67,23 @@ const server = http.createServer((req, res) => {
   await new Promise(done => server.listen(0, '127.0.0.1', done));
   const base = 'http://127.0.0.1:' + server.address().port;
   const shots = process.env.FLETCHERY_PORTAL_SHOTS;
+  if (shots) fs.mkdirSync(shots, {recursive: true});
   const executablePath = process.env.FLETCHERY_BROWSER;
   const browser = await chromium.launch(executablePath ? {executablePath} : {channel: 'msedge'});
   const errors = [];
+  const watch = page => {
+    page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+    page.on('pageerror', e => errors.push(String(e)));
+    page.on('dialog', d => d.accept());   // the confirms on stop, cancel, pause all and restart
+  };
+  const lastPost = () => posts[posts.length - 1];
   try {
     const phone = devices['iPhone 14'];
     const context = await browser.newContext({viewport: phone.viewport, deviceScaleFactor: shots ? phone.deviceScaleFactor : 1, isMobile: true, hasTouch: true, colorScheme: 'light'});
     const page = await context.newPage();
-    page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
-    page.on('pageerror', e => errors.push(String(e)));
+    watch(page);
+    const fits = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+
     // Live opens first: machines, runners, Actions, PRs, issues and what is stuck, from one feed.
     await page.goto(base + '/');
     await page.waitForSelector('#liveMachines .m-name');
@@ -85,8 +97,19 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveRuns'), /PR check · PR #12/);
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
     assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    assert.ok(await fits(), 'Live fits the phone');
+    for (const box of await page.$$eval('.tabs button, #bell, #refreshTop', list => list.map(b => b.getBoundingClientRect().toJSON()))) {
+      assert.ok(box.width >= 44 && box.height >= 44, 'touch target ' + JSON.stringify(box));
+    }
     if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png'), fullPage: true});
+
+    // GitHub Actions controls on Live: cancel a run that is going, after a confirm.
+    await page.waitForSelector('#liveRuns button:has-text("Cancel run")');
+    await page.click('#liveRuns button:has-text("Cancel run") >> nth=0');
+    await page.waitForSelector('#toast:not([hidden])');
+    assert.deepEqual(lastPost(), ['/api/actions/cancel', {repo: 'Acme/Game', id: 7}]);
+    assert.match(await page.textContent('#toast'), /Sent to GitHub/);
+
     // A feed whose data is old says so at the top, in words.
     liveAt = new Date(Date.now() - 5 * 60000).toISOString();
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
@@ -94,66 +117,67 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveStale'), /has not had fresh data for 5 min/);
     liveAt = new Date().toISOString();
 
-    await page.goto(base + '/#now');
-    await page.reload();
-    await page.waitForSelector('#needs .title');
-
-    // Now: the numbers, what needs you, the workers and the round in short.
-    assert.equal(await page.textContent('#project'), 'Harbor');
-    assert.deepEqual(await page.$$eval('#stats b', list => list.map(b => b.textContent)), ['1', '2', '2', '2']);
-    assert.match(await page.textContent('#needs'), /#900\s*Missing <asset> access/);
-    assert.equal(await page.getAttribute('#needs a.title', 'href'), gh + '/issues/900');
-    assert.equal(await page.getAttribute('#needs a.title', 'rel'), 'noopener noreferrer');
-    assert.equal(await page.$$eval('#workers > li', l => l.length), 2);
-    assert.match(await page.textContent('#mergeMini'), /Game tests running/);
-    assert.match(await page.textContent('#freshText'), /^Live/);
-    assert.equal(await page.textContent('#b-now'), '1');
-    assert.equal(await page.isVisible('#machinesCard'), true);
-
-    // Text from Fletchery is shown as text, never run or turned into markup.
-    await page.click('.log-card summary');
-    assert.match(await page.textContent('#log'), /<script>window\.hacked = 1<\/script>/);
-    assert.equal(await page.evaluate(() => window.hacked), undefined);
-    assert.equal(await page.$$eval('#needs asset', l => l.length), 0);
-
-    // Nothing is wider than the phone, and every control is big enough for a thumb.
-    const fits = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
-    assert.ok(await fits(), 'Now fits the phone');
-    for (const box of await page.$$eval('.tabs button, #bell', list => list.map(b => b.getBoundingClientRect().toJSON()))) {
-      assert.ok(box.width >= 44 && box.height >= 44, 'touch target ' + JSON.stringify(box));
-    }
-    if (shots) { fs.mkdirSync(shots, {recursive: true}); await page.click('.log-card summary'); await page.screenshot({path: path.join(shots, 'portal-now.png')}); }
-
-    // Tasks.
-    await page.click('#tab-tasks');
-    assert.equal(await page.isVisible('#view-now'), false);
-    assert.equal(await page.getAttribute('#tab-tasks', 'aria-current'), 'page');
-    assert.match(await page.textContent('#t-queued'), /Parcel lockers[\s\S]*waits for #840/);
-    assert.equal(await page.getAttribute('#t-pr .sub a', 'href'), gh + '/pull/1041');
-    assert.ok(await fits(), 'Tasks fits the phone');
-    assert.match(page.url(), /#tasks$/);
-
-    // Merges: every step with its state, and the PRs waiting.
-    await page.click('#tab-merges');
-    assert.deepEqual(await page.$$eval('#mergeFull .steps li', l => l.map(x => x.className)), ['done', 'done', 'running', 'todo']);
-    assert.match(await page.textContent('#mergeFull'), /Last round 15: landed 4 PRs/);
-    assert.match(await page.textContent('#waiting'), /strict NavCheck on the PC/);
-    if (shots) await page.screenshot({path: path.join(shots, 'portal-merges.png'), fullPage: true});
-
-    // Builds: download links, only real web links.
+    // Builds on the phone: every control but a new build.
     await page.click('#tab-builds');
+    await page.waitForSelector('#builds .title');
+    assert.equal(await page.textContent('#project'), 'Harbor');
+    assert.equal(await page.isVisible('#newBuildCard'), false, 'a new build is queued in the window');
     assert.deepEqual(await page.$$eval('#builds .links a', l => l.map(a => a.textContent + ' ' + a.href)),
       ['GitHub download ' + gh + '/releases/tag/build-0.4.5', 'Google Drive https://drive.google.com/file/d/example']);
-    assert.match(await page.textContent('#builds'), /Build 0\.4\.4[\s\S]*Failed[\s\S]*Compile failed in <Game>/);
+    assert.match(await page.textContent('#builds'), /0\.4\.4[\s\S]*Failed[\s\S]*Compile failed in <Game>/);
+    const buttons = sel => page.$$eval(sel + ' button', l => l.map(b => b.textContent));
+    assert.deepEqual(await buttons('#builds'), ['Stop', 'Run once now', 'Stop repeating', 'Build again']);
+    await page.click('#builds button:has-text("Build again")');
+    await page.waitForFunction(() => /queued again/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/builds/retry', {id: 'b1'}]);
+    await page.click('#builds button:has-text("Stop") >> nth=0');
+    await page.waitForFunction(n => window.__posts !== n, 0).catch(() => {});
+    assert.deepEqual(lastPost(), ['/api/builds/cancel', {id: 'b3'}]);
+    // Machines: pause one, pause all, and machine jobs: stop, run again, log.
+    assert.deepEqual(await buttons('#buildMachines'), ['Pause builds', 'Resume builds']);
+    assert.match(await page.textContent('#buildMachines'), /ALEX-PC[\s\S]*Builds paused/);
+    await page.click('#buildMachines button:has-text("Resume builds")');
+    await page.waitForFunction(() => /takes builds again/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/machines/pause', {name: 'ALEX-PC', kind: 'builds', on: false}]);
+    assert.equal(await page.isVisible('#holdAll'), true);
+    await page.click('#holdAll');
+    await page.waitForFunction(() => /All machines paused/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/machines/hold', {on: true}]);
+    assert.deepEqual(await buttons('#jobs'), ['Stop', 'Run again']);
+    assert.equal(await page.getAttribute('#jobs a.small-link', 'href'), '/api/jobs/log?id=7');
+    await page.click('#jobs button:has-text("Stop")');
+    await page.waitForFunction(() => /next check-in/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/jobs/cancel', {id: 7}]);
     assert.ok(await fits(), 'Builds fits the phone');
     if (shots) await page.screenshot({path: path.join(shots, 'portal-builds.png'), fullPage: true});
 
+    // A control that fails says why, in red.
+    await page.evaluate(() => window.fletcheryAct('/api/builds/now', {id: 'nope'}, 'x'));
+    assert.match(await page.textContent('#toast'), /Build not found/);
+    assert.equal(await page.getAttribute('#toast', 'class'), 'toast bad');
+
+    // Activity: the app itself, its controls, and text shown as text.
+    await page.click('#tab-activity');
+    await page.waitForSelector('#health .title');
+    assert.match(await page.textContent('#health'), /Backend[\s\S]*Running[\s\S]*Up 3 h[\s\S]*code abc12345/);
+    assert.match(await page.textContent('#health'), /Build machines[\s\S]*Taking jobs[\s\S]*2 of 2 online · 1 running, 0 queued/);
+    assert.match(await page.textContent('#log'), /<script>window\.hacked = 1<\/script>/);
+    assert.equal(await page.evaluate(() => window.hacked), undefined);
+    await page.click('#checkNow');
+    await page.waitForFunction(() => /Reading GitHub now/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/live/refresh', {}]);
+    await page.click('#restart');
+    await page.waitForFunction(() => /Restarting/.test(document.getElementById('rMsg').textContent));
+    assert.deepEqual(lastPost(), ['/api/restart', {}]);
+    assert.ok(await fits(), 'Activity fits the phone');
+    if (shots) await page.screenshot({path: path.join(shots, 'portal-activity.png'), fullPage: true});
+
     // A reload on a tab comes back to that tab.
     await page.reload();
-    await page.waitForSelector('#builds .title');
-    assert.equal(await page.isVisible('#view-builds'), true);
+    await page.waitForSelector('#health .title');
+    assert.equal(await page.isVisible('#view-activity'), true);
 
-    // Notifications: says what the PC said when it is not set up; a browser without web-app push says so.
+    // Notifications: says what the PC said when it is not set up.
     push = {available: false, why: 'Notifications are off for this portal (workers.portal.push).'};
     await page.click('#bell');
     await page.waitForFunction(() => /workers\.portal\.push/.test(document.getElementById('notifyText').textContent));
@@ -162,10 +186,10 @@ const server = http.createServer((req, res) => {
 
     // The PC stops answering: the page says so and keeps what it last showed.
     down = true;
-    await page.click('#tab-now');
+    await page.click('#tab-builds');
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
-    assert.match(await page.textContent('#needs'), /#900/);
+    assert.match(await page.textContent('#builds'), /0\.4\.6/);
 
     // Opening with the PC out of reach (Tailscale still connecting): the page comes from the copy saved on the phone
     // at once, with what it last showed, and says it cannot reach the PC.
@@ -177,41 +201,83 @@ const server = http.createServer((req, res) => {
     off = true;
     await page.reload();
     assert.match(await page.textContent('#freshText'), /Showing what it said/);
-    assert.match(await page.textContent('#needs'), /#900/);
+    assert.match(await page.textContent('#builds'), /0\.4\.6/);
     await page.waitForFunction(() => /reach the PC/.test(document.getElementById('freshText').textContent));
     off = false;
     down = false;
 
+    // Controls off (workers.portal.controls false): the phone only reads.
+    mode = 'readonly';
+    const before = posts.length;
+    const ro = await context.newPage();
+    watch(ro);
+    await ro.goto(base + '/#builds');
+    await ro.waitForSelector('#builds .title');
+    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent).length), 0);
+    await ro.click('#tab-activity');
+    assert.equal(await ro.isVisible('#restart'), false);
+    assert.equal(await ro.isVisible('#reload'), true);
+    await ro.click('#tab-live');
+    await ro.waitForSelector('#liveRuns li');
+    assert.equal(await ro.$$eval('#liveRuns button', l => l.length), 0);
+    assert.equal(posts.length, before);
+    await ro.close();
+
     // An iPhone in Safari (not yet on the Home Screen) is told how to add it.
-    push = {available: true, key: push.key || 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
-    const safari = await browser.newContext({...phone, deviceScaleFactor: 1, colorScheme: 'dark'});
+    mode = 'phone';
+    push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
+    const safari = await browser.newContext({...phone, deviceScaleFactor: shots ? phone.deviceScaleFactor : 1, colorScheme: 'dark'});
     const tab = await safari.newPage();
-    await tab.goto(base + '/#merges');
-    await tab.waitForSelector('#mergeFull .steps');
-    assert.equal(await tab.isVisible('#view-merges'), true);
+    watch(tab);
+    await tab.goto(base + '/#builds');
+    await tab.waitForSelector('#builds .title');
     await tab.click('#bell');
     await tab.waitForSelector('#installSteps:not([hidden])');
     assert.match(await tab.textContent('#installSteps'), /Add to Home Screen/);
-    if (shots) { await tab.click('#notifyClose'); await tab.click('#tab-now'); await tab.screenshot({path: path.join(shots, 'portal-now-dark.png')}); }
+    if (shots) { await tab.click('#notifyClose'); await tab.click('#tab-live'); await tab.waitForSelector('#liveMachines .m-name'); await tab.screenshot({path: path.join(shots, 'portal-live-dark.png')}); }
 
-    // Read-only: the page never sent anything but reads.
-    assert.deepEqual(posts, []);
-    assert.deepEqual(errors.filter(e => !/Failed to load resource|ERR_|net::/.test(e)), []);
-    // Agents and merges switched off: only Live and Builds stay. Several projects: a chip shows one at a time.
-    data.workers_enabled = false;
+    // The desktop window: wide layout, tabs on top, and the form for a new build.
+    mode = 'desktop';
+    const desk = await browser.newContext({viewport: {width: 1400, height: 1000}, deviceScaleFactor: shots ? 2 : 1, colorScheme: 'light'});
+    const win = await desk.newPage();
+    watch(win);
+    await win.goto(base + '/#builds');
+    await win.waitForSelector('#newBuildCard:not([hidden])');
+    assert.equal(await win.evaluate(() => document.body.classList.contains('desktop')), true);
+    assert.equal(await win.isVisible('#bell'), false);
+    await win.fill('#bVersion', '0.4.8');
+    await win.check('#bDaily');
+    await win.click('#newBuild button[type=submit]');
+    await win.waitForFunction(() => /0\.4\.8 queued/.test(document.getElementById('bMsg').textContent));
+    assert.deepEqual(lastPost(), ['/api/builds/add', {version: '0.4.8', ref: '', at: '', repeat: 'daily', tests: ''}]);
+    if (shots) {
+      await win.reload();
+      await win.waitForSelector('#builds .title');
+      await win.screenshot({path: path.join(shots, 'desktop-builds.png')});
+      await win.click('#tab-live');
+      await win.waitForSelector('#liveMachines .m-name');
+      await win.screenshot({path: path.join(shots, 'desktop-live.png')});
+      await win.click('#tab-activity');
+      await win.waitForSelector('#health .title');
+      await win.screenshot({path: path.join(shots, 'desktop-activity.png')});
+    }
+
+    // Several projects on Live: a chip shows one at a time.
+    mode = 'phone';
     live.prs.push({repo: 'Acme/Town', number: 7, title: 'Road decals', url: 'https://github.com/Acme/Town/pull/7', draft: false, author: 'dev',
                    branch: 'roads', base: 'main', updated: new Date().toISOString(), created: '', labels: [], checks: {state: 'passed', total: 1, done: 1, failed: [], running: [], url: ''}});
     const solo = await context.newPage();
-    await solo.goto(base + '/#tasks');
+    watch(solo);
+    await solo.goto(base + '/#tasks');   // an old link to a tab that is gone opens Live
     await solo.waitForSelector('#liveRepos button');
-    assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'builds']);
+    assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'builds', 'activity']);
     assert.equal(await solo.isVisible('#view-live'), true);
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 3);
     await solo.click('#liveRepos button:has-text("Town")');
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 1);
     assert.match(await solo.textContent('#livePrs'), /Road decals/);
-    await solo.click('#liveRepos button:has-text("All projects")');
-    data.workers_enabled = true;
+
+    assert.deepEqual(errors.filter(e => !/Failed to load resource|ERR_|net::/.test(e)), []);
     console.log('portal browser checks passed');
   } finally {
     await browser.close();

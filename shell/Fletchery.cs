@@ -1,6 +1,8 @@
-// Fletchery.exe: the native window for Fletchery. Owns the window, taskbar and tray icon, Windows notifications and
-// single-instance behaviour; draws the screens with WebView2 (the Edge engine in Windows 10/11) from the local backend
-// (python -m fletchery run), which it starts, restarts after an update (exit 75) or a crash, and stops on Quit.
+// Fletchery.exe: the native window for Fletchery. Owns the window, taskbar and tray icon, Windows notifications for
+// anything Live lists as stuck, and single-instance behaviour; draws the page with WebView2 (the Edge engine in Windows
+// 10/11) from the local backend (python -m fletchery run). When the backend has its own supervisor (settings.json
+// "managedBackend": true, set by Install-Fletchery.ps1 -AutoStart) the window only attaches to it and never starts a
+// second one. Otherwise it starts it, restarts it after an update (exit 75) or a crash, and stops it on Quit.
 // Built by Build-Fletchery.ps1 with the .NET Framework compiler that ships with Windows (C# 5: no $"", no ?.).
 using System;
 using System.Collections.Generic;
@@ -59,6 +61,7 @@ internal sealed class Settings
     public string StateDir = "";
     public Rectangle Bounds = Rectangle.Empty;
     public bool Maximized;
+    public bool Managed;                 // a scheduled task runs the backend: attach only, never start or stop it
 
     public static Settings Load(string[] args)
     {
@@ -84,6 +87,8 @@ internal sealed class Settings
                 }
                 object m;
                 if (d.TryGetValue("maximized", out m) && m is bool) s.Maximized = (bool)m;
+                object mb;
+                if (d.TryGetValue("managedBackend", out mb) && mb is bool) s.Managed = (bool)mb;
             }
             catch (Exception) { }
         }
@@ -124,8 +129,11 @@ internal sealed class Settings
 
     public void Save()
     {
+        // Read, change only the window's own keys, write: keys this build does not know survive (audit 2026-11-18).
         var d = new Dictionary<string, object>();
-        d["profile"] = Profile; d["python"] = Python; d["backend"] = Backend;
+        try { if (File.Exists(Path)) d = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(Path)) ?? d; }
+        catch (Exception) { }
+        if (!string.IsNullOrEmpty(Profile)) d["profile"] = Profile;
         d["bounds"] = new int[] { Bounds.X, Bounds.Y, Bounds.Width, Bounds.Height };
         d["maximized"] = Maximized;
         try { File.WriteAllText(Path, new JavaScriptSerializer().Serialize(d), new UTF8Encoding(false)); } catch (Exception) { }
@@ -157,11 +165,13 @@ internal sealed class Backend
         catch (Exception) { return false; }
     }
 
-    public string Status()
+    public string Status() { return Get("api/status"); }
+
+    public string Get(string path)
     {
         try
         {
-            var req = (HttpWebRequest)WebRequest.Create(Url + "api/status");
+            var req = (HttpWebRequest)WebRequest.Create(Url + path);
             req.Timeout = 4000; req.Proxy = null;
             using (var resp = (HttpWebResponse)req.GetResponse())
             using (var r = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) return r.ReadToEnd();
@@ -174,6 +184,11 @@ internal sealed class Backend
     public void EnsureRunning()
     {
         if (Answers() || Owned) return;   // already up (perhaps started by Start-Fletchery.ps1): attach, never start a second
+        if (settings.Managed)
+        {
+            LastError = "Waiting for the Fletchery backend. Its scheduled task (\"Fletchery\") starts it at sign-in and checks it every 10 minutes.";
+            return;
+        }
         if (string.IsNullOrEmpty(settings.Profile) || !File.Exists(settings.Profile))
         {
             LastError = "No project profile is set. Run Install-Fletchery.ps1 -Profile <file>, or start Fletchery with a profile path.";
@@ -219,6 +234,7 @@ internal sealed class Backend
         try { code = process.ExitCode; } catch (Exception) { }
         if (stopping) return;
         if (code == 75) { EnsureRunning(); return; }   // new code on disk: start again right away
+        if (code == 77) { process = null; LastError = ""; return; }   // another backend already runs: attach to it
         DateTime now = DateTime.Now;
         crashes.RemoveAll(t => (now - t).TotalMinutes > 5);
         crashes.Add(now);
@@ -237,7 +253,7 @@ internal sealed class Backend
     public void Stop()
     {
         stopping = true;
-        if (!Owned) return;
+        if (!Owned) return;   // a backend the scheduled task (or someone else) started keeps running
         try
         {
             // the backend and the Claude sessions it started, by process tree of the PID we own
@@ -258,9 +274,9 @@ internal sealed class MainWindow : Form
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer();
     private bool quitting, navigated;
-    private readonly HashSet<string> seen = new HashSet<string>();
+    private HashSet<string> seen = new HashSet<string>();
+    private int ticks;
     private bool firstStatus = true;
-    private string lastSignedOut = "";
 
     public MainWindow(Settings s)
     {
@@ -363,41 +379,37 @@ internal sealed class MainWindow : Form
             web.Visible = true; message.Visible = false;
         }
         else if (navigated && !web.Visible && string.IsNullOrEmpty(backend.LastError)) { web.Visible = true; message.Visible = false; web.Reload(); }
-        Notify(status);
+        if (++ticks % 4 == 1) Notify(await Task.Run(() => backend.Get("api/live")));   // about every 16 s
     }
 
-    // Windows notifications for what needs Alex: a blocked task, a new PR, the sign-in expiring.
+    // Windows notifications for anything the Live tab lists as stuck or blocked (each once, while it lasts).
     private void Notify(string json)
     {
+        if (json == null) return;
         Dictionary<string, object> d;
         try { d = new JavaScriptSerializer { MaxJsonLength = 64 * 1024 * 1024 }.Deserialize<Dictionary<string, object>>(json); }
         catch (Exception) { return; }
         var news = new List<string>();
-        object tasks;
-        if (d.TryGetValue("tasks", out tasks) && tasks is object[])
+        var now = new HashSet<string>();
+        object blockers;
+        if (d.TryGetValue("blockers", out blockers) && blockers is object[])
         {
-            foreach (object o in (object[])tasks)
+            foreach (object o in (object[])blockers)
             {
-                var t = o as Dictionary<string, object>;
-                if (t == null) continue;
-                string n = Convert.ToString(t["number"]), st = Convert.ToString(t["status"]), title = Convert.ToString(t["title"]);
-                string key = n + ":" + st;
+                var b = o as Dictionary<string, object>;
+                if (b == null) continue;
+                string key = Convert.ToString(b.ContainsKey("key") ? b["key"] : b["title"]);
+                now.Add(key);
                 if (seen.Contains(key)) continue;
-                seen.Add(key);
-                if (firstStatus) continue;
-                if (st == "blocked") news.Add("#" + n + " needs you: " + title);
-                if (st == "pr") news.Add("#" + n + " has a PR: " + title);
+                if (!firstStatus) news.Add(Convert.ToString(b["title"]));
             }
         }
-        object so;
-        string signedOut = d.TryGetValue("signed_out", out so) && so is string ? (string)so : "";
-        if (signedOut.Length > 0 && signedOut != lastSignedOut) news.Add("Claude needs signing in again: run claude, then /login.");
-        lastSignedOut = signedOut;
+        seen = now;
         firstStatus = false;
         if (news.Count == 0) return;
-        tray.BalloonTipTitle = "Fletchery: " + settings.ProjectName;
-        tray.BalloonTipText = string.Join("\n", news.ToArray());
-        tray.BalloonTipIcon = ToolTipIcon.Info;
+        tray.BalloonTipTitle = news.Count == 1 ? "Fletchery: stuck or blocked" : "Fletchery: " + news.Count + " stuck or blocked";
+        tray.BalloonTipText = string.Join("\n", news.GetRange(0, Math.Min(4, news.Count)).ToArray());
+        tray.BalloonTipIcon = ToolTipIcon.Warning;
         tray.ShowBalloonTip(8000);
     }
 
@@ -433,12 +445,6 @@ internal sealed class MainWindow : Form
 
     private void Quit()
     {
-        string status = backend.Status();
-        bool busy = status != null && status.Contains("\"live\": [{");
-        if (busy && backend.Owned &&
-            MessageBox.Show(this, "Workers are writing code right now. Quit anyway? Their tasks go back to the queue and the next worker continues from their commits.",
-                            "Quit Fletchery", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-            return;
         quitting = true;
         poll.Stop();
         backend.Stop();
