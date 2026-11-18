@@ -40,6 +40,8 @@ const data = {
 };
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
 let down = false;
+const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.json'), 'utf8'));   // devwatch.py's own output
+let liveAt = new Date().toISOString();
 let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
 const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -50,6 +52,7 @@ const server = http.createServer((req, res) => {
   if (off) return req.socket.destroy();
   if (req.method !== 'GET') { posts.push(url); return send(404, '{}', 'application/json'); }
   if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify(data), 'application/json');
+  if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt}), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
   const file = path.join(__dirname, 'portal', url === '/' ? 'index.html' : path.basename(url));
   if (!fs.existsSync(file)) return send(404, '{}', 'application/json');
@@ -69,7 +72,30 @@ const server = http.createServer((req, res) => {
     const page = await context.newPage();
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
     page.on('pageerror', e => errors.push(String(e)));
+    // Live opens first: machines, runners, Actions, PRs, issues and what is stuck, from one feed.
     await page.goto(base + '/');
+    await page.waitForSelector('#liveMachines .m-name');
+    assert.equal(await page.isVisible('#view-live'), true);
+    assert.equal(await page.isVisible('#liveStale'), false);
+    assert.deepEqual(await page.$$eval('#liveStats b', list => list.map(b => b.textContent)), ['2/3', '2', '2', '6']);
+    assert.equal(await page.textContent('#b-live'), '6');
+    assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
+    assert.match(await page.textContent('#liveMachines'), /Gaming PC[\s\S]*PR check #12[\s\S]*SF-NODE-01[\s\S]*Hand merge batch 7/);
+    assert.match(await page.textContent('#liveRunners'), /ALEX-PC-unreal-pr[\s\S]*Busy[\s\S]*NODE-unreal-light[\s\S]*Offline/);
+    assert.match(await page.textContent('#liveRuns'), /PR check · PR #12/);
+    assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
+    assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png'), fullPage: true});
+    // A feed whose data is old says so at the top, in words.
+    liveAt = new Date(Date.now() - 5 * 60000).toISOString();
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    await page.waitForSelector('#liveStale:not([hidden])');
+    assert.match(await page.textContent('#liveStale'), /has not had fresh data for 5 min/);
+    liveAt = new Date().toISOString();
+
+    await page.goto(base + '/#now');
+    await page.reload();
     await page.waitForSelector('#needs .title');
 
     // Now: the numbers, what needs you, the workers and the round in short.

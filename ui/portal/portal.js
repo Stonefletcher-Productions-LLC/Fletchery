@@ -6,7 +6,7 @@
   const WAIT_MS = 12000;     // give up on one read after this long
   const KEEP = 'fletchery-portal-last';
   const KEEP_MS = 24 * 3600 * 1000;
-  const TABS = ['now', 'tasks', 'merges', 'builds'];
+  const TABS = ['live', 'now', 'tasks', 'merges', 'builds'];
   const $ = id => document.getElementById(id);
   let last = null;        // the newest summary
   let lastOk = 0;         // when it arrived (ms)
@@ -223,12 +223,13 @@
 
   // ---- tabs ----
   function show(tab, quiet) {
-    if (!TABS.includes(tab)) tab = 'now';
+    if (!TABS.includes(tab)) tab = 'live';
     for (const t of TABS) {
       $('view-' + t).hidden = t !== tab;
       if (t === tab) $('tab-' + t).setAttribute('aria-current', 'page'); else $('tab-' + t).removeAttribute('aria-current');
     }
     if (!quiet) { history.replaceState(null, '', '#' + tab); window.scrollTo(0, 0); }
+    document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: tab}));
   }
   document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) show(b.dataset.tab); });
   window.addEventListener('hashchange', () => show(location.hash.slice(1), true));

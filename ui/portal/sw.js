@@ -1,8 +1,8 @@
 // Fletchery portal service worker: opens the page from the copy saved on the phone, so it appears at once even while
 // Tailscale is still connecting or the PC cannot be reached, and shows notifications. Status is never saved here:
 // the page asks the PC for it after it has opened.
-const CACHE = 'fletchery-portal-v2';
-const SHELL = ['/', '/portal.css', '/portal.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'fletchery-portal-v3';
+const SHELL = ['/', '/portal.css', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()).catch(() => self.skipWaiting()));

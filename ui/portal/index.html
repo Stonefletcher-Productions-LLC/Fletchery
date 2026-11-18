@@ -30,7 +30,19 @@
 <main id="main">
   <div id="alerts"></div>
 
-  <section class="view" id="view-now" aria-labelledby="tab-now">
+  <section class="view" id="view-live" aria-labelledby="tab-live">
+    <div class="alert bad" id="liveStale" role="alert" hidden></div>
+    <div class="stats" id="liveStats"></div>
+    <section class="card" id="liveBlockersCard" aria-labelledby="h-lblock"><h2 id="h-lblock">Stuck or blocked <span class="count" id="n-lblock"></span></h2><ul class="rows" id="liveBlockers"></ul></section>
+    <section class="card" aria-labelledby="h-lmach"><h2 id="h-lmach">Machines</h2><ul class="rows" id="liveMachines"></ul></section>
+    <section class="card" aria-labelledby="h-lrun"><h2 id="h-lrun">Runners <span class="count" id="n-lrun"></span></h2><p class="sub" id="liveRunnerNote" hidden></p><ul class="rows" id="liveRunners"></ul></section>
+    <section class="card" aria-labelledby="h-lact"><h2 id="h-lact">GitHub Actions</h2><ul class="rows" id="liveRuns"></ul></section>
+    <section class="card" aria-labelledby="h-lpr"><h2 id="h-lpr">Open pull requests <span class="count" id="n-lpr"></span></h2><ul class="rows" id="livePrs"></ul></section>
+    <section class="card" aria-labelledby="h-liss"><h2 id="h-liss">Tasks and issues <span class="count" id="n-liss"></span></h2><ul class="rows" id="liveIssues"></ul></section>
+    <p class="fine" id="liveFoot"></p>
+  </section>
+
+  <section class="view" id="view-now" aria-labelledby="tab-now" hidden>
     <div class="stats" id="stats"></div>
     <section class="card" aria-labelledby="h-needs"><h2 id="h-needs">Needs you</h2><ul class="rows" id="needs"></ul></section>
     <section class="card" aria-labelledby="h-workers"><h2 id="h-workers">Working now</h2><ul class="rows" id="workers"></ul></section>
@@ -57,7 +69,8 @@
 </main>
 
 <nav class="tabs" aria-label="Sections">
-  <button type="button" id="tab-now" data-tab="now" aria-current="page"><span class="glyph" aria-hidden="true">●</span>Now<span class="badge" id="b-now" hidden></span></button>
+  <button type="button" id="tab-live" data-tab="live" aria-current="page"><span class="glyph" aria-hidden="true">◉</span>Live<span class="badge" id="b-live" hidden></span></button>
+  <button type="button" id="tab-now" data-tab="now"><span class="glyph" aria-hidden="true">●</span>Agents<span class="badge" id="b-now" hidden></span></button>
   <button type="button" id="tab-tasks" data-tab="tasks"><span class="glyph" aria-hidden="true">☰</span>Tasks</button>
   <button type="button" id="tab-merges" data-tab="merges"><span class="glyph" aria-hidden="true">⇄</span>Merges</button>
   <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds</button>
@@ -82,5 +95,6 @@
 </dialog>
 
 <script src="portal.js"></script>
+<script src="live.js"></script>
 </body>
 </html>

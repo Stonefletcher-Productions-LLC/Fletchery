@@ -92,7 +92,8 @@ class Settings(unittest.TestCase):
         self.assertIsNone(portal.settings(None))
         self.assertIsNone(portal.settings({"enabled": False, "port": 8772}))
         self.assertEqual(portal.settings({"hosts": ["Your-PC.Your-Tailnet.ts.net."], "users": ["You@Example.com"]}),
-                         {"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": None})
+                         {"port": 8772, "hosts": [HOSTNAME], "users": [USER], "push": None, "live": {}})
+        self.assertIsNone(portal.settings({"live": False})["live"])
 
     def test_bad_blocks(self):
         for bad in ("yes", {"port": 80}, {"port": "x"}, {"hosts": "a.ts.net"}, {"hosts": ["https://a.ts.net"]},
@@ -117,6 +118,7 @@ class Served(unittest.TestCase):
             conf["port"] = s.getsockname()[1]
         self.p = portal.Portal(lambda: STATUS, conf, self.tmp.name)
         self.p.push.start = lambda: None
+        self.p.live.start = lambda: None      # never reads the real GitHub in tests (test_devwatch.py fakes it)
         self.p.start()
         self.port = conf["port"]
 

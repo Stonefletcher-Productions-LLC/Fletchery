@@ -23,6 +23,7 @@ Profile, under `workers`:
     "portal": {"port": 8772, "hosts": ["your-pc.your-tailnet.ts.net"], "users": ["you@example.com"],
                "push": {"contact": "mailto:you@example.com"}}
 
+`live` is optional (devwatch.py): the Live tab, on unless `"live": false`; its own settings go in that object.
 `push` is optional (push.py): notifications on the phone for what needs you, finished rounds and finished builds.
 See docs/PORTAL.md."""
 from __future__ import annotations
@@ -44,6 +45,7 @@ STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/index.html": ("index.html", "text/html; charset=utf-8"),
           "/portal.css": ("portal.css", "text/css; charset=utf-8"),
           "/portal.js": ("portal.js", "text/javascript; charset=utf-8"),
+          "/live.js": ("live.js", "text/javascript; charset=utf-8"),
           "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
           "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
           "/icon-180.png": ("icon-180.png", "image/png"),
@@ -79,7 +81,11 @@ def settings(conf) -> dict | None:
     push = conf.get("push")
     if push is not None and not isinstance(push, (dict, bool)):
         raise ValueError("workers.portal.push must be an object or true/false")
-    return {"port": port, "hosts": hosts, "users": users, "push": ({} if push is True else push) or None}
+    live = conf.get("live", {})
+    if live is not False and not isinstance(live, dict):
+        raise ValueError("workers.portal.live must be an object or false (see devwatch.py)")
+    return {"port": port, "hosts": hosts, "users": users, "push": ({} if push is True else push) or None,
+            "live": None if live is False else live}
 
 
 # ---- what the phone may see ----
@@ -201,6 +207,11 @@ class Portal:
         self.server: ThreadingHTTPServer | None = None
         self._cache: tuple[float, bytes] = (0.0, b"")
         self._lock = threading.Lock()
+        self._live_cache: tuple[float, bytes] = (0.0, b"")
+        self.live = None
+        if conf.get("live") is not None:
+            import devwatch
+            self.live = devwatch.DevWatch(conf["live"], self.log)
         self.push = None
         if conf.get("push") is not None and state_dir is not None:
             import push
@@ -216,6 +227,14 @@ class Portal:
             if time.monotonic() - at > 3 or not body:
                 body = json.dumps(self.summary()).encode("utf-8")
                 self._cache = (time.monotonic(), body)
+            return body
+
+    def live_bytes(self) -> bytes:
+        with self._lock:
+            at, body = self._live_cache
+            if time.monotonic() - at > 2 or not body:
+                body = json.dumps(self.live.snapshot()).encode("utf-8")
+                self._live_cache = (time.monotonic(), body)
             return body
 
     # ---- who may ask ----
@@ -314,6 +333,13 @@ class Portal:
                         return self._send(200, portal.summary_bytes())
                     except Exception as e:
                         return self._json(503, {"error": f"Fletchery could not report its status ({type(e).__name__})."})
+                if path == "/api/live":
+                    if portal.live is None:
+                        return portal_off(self)
+                    try:
+                        return self._send(200, portal.live_bytes())
+                    except Exception as e:
+                        return self._json(503, {"error": f"The Live feed could not be read ({type(e).__name__})."})
                 if path == "/api/push":
                     return self._json(200, portal.push.info() if portal.push else
                                       {"available": False, "why": "Notifications are off for this portal (workers.portal.push)."})
@@ -350,13 +376,20 @@ class Portal:
                 except Exception as e:
                     return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
 
+        def portal_off(h):
+            return h._json(404, {"error": "The Live tab is off for this portal (workers.portal.live is false)."})
+
         self.server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, name="fletchery-portal", daemon=True).start()
+        if self.live is not None:
+            self.live.start()
         if self.push:
             self.push.start()
 
     def stop(self) -> None:
+        if self.live is not None:
+            self.live.stop()
         if self.push:
             self.push.stop()
         if self.server:
