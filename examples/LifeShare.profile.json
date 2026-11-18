@@ -1,185 +1,11 @@
 {
   "name": "LifeShare",
   "repo": "Stonefletcher-Productions-LLC/LifeShare",
-  "branch": "main",
-  "workflow": "lane.yml",
-  "planWorkflow": "build-plan-shadow.yml",
-  "activeJobs": "ci.yml|Build and test;ci.yml|focused;compile-preview.yml|Compile only (not release validation)",
-  "statusFile": "E:\\GitHubRunner\\status.json",
-  "pauseFile": "E:\\GitHubRunner\\PAUSED",
-  "runnerPath": "E:\\GitHubRunner\\LifeShare",
-  "drive": "E",
-  "serviceFilter": "*lifeshare*",
-  "cachePort": 8558,
-  "minimumFreeGB": 12,
-  "cleanBelowGB": 25,
   "workers": {
-    "enabled": true,
-    "projectRoot": "E:\\lifeshare-scratch\\foreman\\host",
     "baseBranch": "Test-Staging",
-    "label": "foreman",
-    "assignee": "ProjektPayne",
     "stateDir": "E:\\lifeshare-scratch\\foreman",
-    "worktreeRoot": "E:\\lifeshare-scratch\\foreman\\worktrees",
-    "maxParallel": 2,
-    "pollMinutes": 10,
-    "auth": "subscription",
-    "dailyBudgetUsd": 60,
     "dashboardPort": 8770,
-    "plugin": "Tools/ClaudePlugin/lifeshare-guard",
-    "agents": [
-      {
-        "name": "opus",
-        "kind": "claude",
-        "model": "claude-opus-5-5",
-        "tier": 4,
-        "vendor": "anthropic"
-      },
-      {
-        "name": "sonnet",
-        "kind": "claude",
-        "model": "claude-sonnet-5-5",
-        "tier": 4,
-        "vendor": "anthropic"
-      },
-      {
-        "name": "fable",
-        "kind": "claude",
-        "model": "claude-fable-5-1",
-        "tier": 5,
-        "vendor": "anthropic",
-        "enabled": false,
-        "roles": [
-          "architect"
-        ],
-        "maxRunsPerDay": 3
-      },
-      {
-        "name": "codex-astra",
-        "kind": "codex",
-        "model": "gpt-6-astra",
-        "tier": 4,
-        "vendor": "openai",
-        "enabled": false
-      },
-      {
-        "name": "codex-sol",
-        "kind": "codex",
-        "model": "gpt-6.1-sol",
-        "tier": 4,
-        "vendor": "openai",
-        "enabled": false
-      },
-      {
-        "name": "codex-luna",
-        "kind": "codex",
-        "model": "gpt-6-luna",
-        "tier": 2,
-        "vendor": "openai",
-        "enabled": false
-      },
-      {
-        "name": "deepseek-pro",
-        "kind": "opencode",
-        "model": "opencode-go/deepseek-v4-pro",
-        "tier": 2,
-        "vendor": "deepseek",
-        "roles": [
-          "architect"
-        ],
-        "maxRunsPerDay": 6
-      },
-      {
-        "name": "deepseek",
-        "kind": "opencode",
-        "model": "opencode-go/deepseek-v4.1-flash",
-        "tier": 1,
-        "vendor": "deepseek"
-      }
-    ],
-    "routing": {
-      "mode": "scores",
-      "defaultSkill": "cpp",
-      "reviewMin": 50,
-      "plan": {
-        "levels": [
-          "hard"
-        ],
-        "lowerTo": "medium",
-        "architects": [
-          "sonnet",
-          "opus",
-          "deepseek-pro",
-          "fable"
-        ],
-        "minScore": 70
-      },
-      "preferredKindsBySkill": {
-        "art": [
-          "codex"
-        ]
-      },
-      "maxEscalations": 2,
-      "cheapReviewLevels": [
-        "easy",
-        "medium"
-      ]
-    },
-    "mergeRounds": true,
-    "mergeLabel": "ready",
-    "mergeRoundMax": 12,
-    "mergeNotes": "E:\\lifeshare-scratch\\foreman\\merger-notes.md",
-    "reviewerMaxTurns": 50,
-    "escalate": true,
-    "mergeAgent": "opus",
-    "roundAgent": "opus",
-    "roundSharedSessions": 4,
-    "mergePlaytest": true,
-    "mergeFlags": [
-      {
-        "paths": "^Content/Town/|^Content/HomeKit/|^Source/.*(Furniture|Venue|Slot)[^/]*\\.(cpp|h)$",
-        "flag": "strict NavCheck on the PC"
-      }
-    ],
-    "prCheckCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File Tools/CI/PrCheck.ps1",
     "heavyLeaseFile": "E:\\GitHubRunner\\ResourceLeases\\heavy.json",
-    "keepMergeCheckouts": 2,
-    "mergeBackupDir": "D:\\Backups\\merge-checkouts",
-    "workMinimumFreeGB": 50,
-    "workerAllowedTools": [
-      "Bash(E:/BlenderTools/BlenderMCP/.venv/Scripts/python.exe E:/BlenderTools/BlenderMCP/call.py:*)"
-    ],
-    "workerDirs": [
-      "E:/BlenderTools/BlenderMCP"
-    ],
-    "machines": {
-      "listen": "100.64.0.10:8771",
-      "shadow": false,
-      "prCheck": {
-        "labels": [
-          "unreal:5.8.4"
-        ]
-      },
-      "roundTests": {
-        "labels": [
-          "unreal:5.8.4"
-        ],
-        "whole": true,
-        "imports": true
-      },
-      "assetRoots": [
-        "E:\\lifeshare-scratch\\meshy_export"
-      ]
-    },
-    "builds": {
-      "publish": {
-        "to": "github",
-        "keep": 3,
-        "driveDir": "G:\\My Drive\\Builds",
-        "driveRemote": "gdrive:Builds",
-        "driveKeep": 2
-      }
-    },
     "portal": {
       "port": 8772,
       "hosts": [
@@ -188,9 +14,52 @@
       "users": [
         "you@example.com"
       ],
+      "controls": true,
       "push": {
         "contact": "mailto:you@example.com"
+      },
+      "live": {
+        "owners": [
+          "Stonefletcher-Productions-LLC",
+          "ProjektPayne"
+        ],
+        "activeDays": 21,
+        "names": {
+          "MY-PC": "Gaming PC"
+        },
+        "diskFreeGb": 30
       }
-    }
+    },
+    "machines": {
+      "listen": "100.64.0.10:8771",
+      "assetRoots": [
+        "E:\\lifeshare-scratch\\meshy_export"
+      ]
+    },
+    "builds": {
+      "outDir": "E:\\lifeshare-scratch\\LifeShare-builds",
+      "engine": "E:\\UE_5.8",
+      "timeoutMinutes": 300,
+      "nodeLabels": [
+        "unreal:5.8.4"
+      ],
+      "publish": {
+        "to": "github",
+        "keep": 3,
+        "driveRemote": "gdrive:Builds",
+        "driveKeep": 2
+      }
+    },
+    "scratchRoots": [
+      "E:\\lifeshare-scratch"
+    ],
+    "scratchMode": "trim",
+    "scratchKeep": [
+      "LifeShareArt",
+      "*rescue*"
+    ],
+    "scratchDisposable": [
+      "*-builds"
+    ]
   }
 }
