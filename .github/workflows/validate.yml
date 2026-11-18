@@ -5,16 +5,59 @@ name: Windows checks
 # included. Fletchery's coder agents and merge rounds are retired (LifeShare Docs/BuildMachines.md, "Every PR is
 # checked on push"), so its code changes rarely. To turn the automatic checks back on, restore the two lines below.
 #   push:
-#     branches: [main, 'codex/**']
+#     branches: [main]
 #   pull_request:
+#
+# Three jobs run side by side, so one slow part never hits another's time limit:
+#   python  every fletchery/test_*.py, found by name (a new test file runs with no change here; a deleted one just
+#           stops running). Each file runs on its own and the job fails if any file fails, after running them all.
+#   screens the desktop window and phone portal browser checks (ui/, Playwright).
+#   windows Fletchery.exe compiles, the reservation tool's process checks (Windows PowerShell and PowerShell 7), and
+#           the local runner's checks.
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  python:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Every fletchery/test_*.py
+        run: |
+          $env:PYTHONUTF8 = '1'
+          $failed = @()
+          foreach ($test in Get-ChildItem fletchery -Filter 'test_*.py' | Sort-Object Name) {
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            python $test.FullName
+            $code = $LASTEXITCODE
+            Write-Host ("{0} {1} ({2:n0} s)" -f $(if ($code -eq 0) { 'PASS' } else { "FAIL exit $code" }), $test.Name, $watch.Elapsed.TotalSeconds)
+            if ($code -ne 0) { $failed += $test.Name }
+          }
+          if ($failed) { Write-Host "Failed: $($failed -join ', ')"; exit 1 }
+  screens:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Desktop window and phone portal browser checks
+        shell: pwsh
+        run: |
+          npm ci --prefix ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test --prefix ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     defaults:
       run:
         shell: powershell -NoProfile -STA -ExecutionPolicy Bypass -File {0}
@@ -22,6 +65,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Fletchery.exe compiles
+        timeout-minutes: 5
+        run: ./shell/Build-Fletchery.ps1
       - name: Shared resource and process cleanup checks
         timeout-minutes: 6
         run: ./tools/TestLaneResources.ps1
@@ -29,131 +75,10 @@ jobs:
         timeout-minutes: 6
         run: ./tools/TestLaneProcesses.ps1
       - name: PowerShell 7 resource cleanup checks
+        timeout-minutes: 6
         shell: pwsh
         run: ./tools/TestLaneResources.ps1
       - name: Local runner checks
         timeout-minutes: 6
         shell: pwsh
         run: node runner/test/TestRunner.cjs
-      - name: Fletchery engine checks
-        run: |
-          $env:PYTHONUTF8 = '1'
-          python fletchery/test_fletchery.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_gate_lines.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Checkout recovery and reload lifecycle checks
-        run: |
-          $env:PYTHONUTF8 = '1'
-          python fletchery/test_round_recovery.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_github_dispatch.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_github_retry.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_fetch_retry.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_feedback_excerpt.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_lane_old.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_dispatch_resilience.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_flow.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_stacking.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_storage.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_storage_integration.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_disk_guard.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_scratch.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_interruption_results.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_interruption_recovery.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_emergency_workers.py
-          python fletchery/test_exhausted_repairs.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_dead_ends.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_escalation.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_plans.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_worker_handoff.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_worker_ranks.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_merge_priority.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_balance.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_merge_status.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_routing_policy.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_efficiency.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_reload_dispatch.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_repair_checkout.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_task_preservation.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_resource_waits.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_asset_jobs.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_asset_delivery.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_long_paths.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_playtest.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_prcheck.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_machines.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_nodecheck.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_builds.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_log_follower.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_round_agent.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_split_rounds.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_pipeline_responsiveness.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_limit_pause.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_stall_watchdog.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_pc_holder.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_blender_bridge.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_nowindow.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_worker_permissions.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_portal.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Control room browser checks
-        run: |
-          npm ci --prefix ui
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm test --prefix ui
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Automatic prerequisites and merge agent checks
-        run: |
-          $env:PYTHONUTF8 = '1'
-          python fletchery/test_blockers.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python fletchery/test_doctor.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
