@@ -58,7 +58,10 @@ class FakeMachines:
 
     def view(self, jobs=40):
         return {"machines": [{"name": "NODE-01", "online": False, "last_seen": HOUR_AGO},
-                             {"name": "NODE-02", "online": True}],
+                             {"name": "NODE-02", "online": True, "job": {"id": 9, "state": "running", "machine": "NODE-02", "recipe": "package",
+                                                                         "params": {"version": "0.4.6"}, "ref": "main", "started": HOUR_AGO,
+                                                                         "steps": [{"name": "BuildContent", "state": "passed"},
+                                                                                   {"name": "Package 0.4.6", "state": "running"}]}}],
                 "jobs": [{"id": 3, "state": "queued", "created": "2000-01-01T00:00:00Z", "requested_by": "build 0.4.6"}]}
 
     def cancel(self, job):
@@ -139,6 +142,13 @@ class AppTests(unittest.TestCase):
         self.app.machines = SimpleNamespace(machines=FakeMachines())
         keys = [b["key"] for b in self.app.machine_blockers()]
         self.assertEqual(keys, ["worker:NODE-01", "job:3"])
+
+
+    def test_live_shows_the_builds_this_backend_runs(self):
+        self.app.machines = SimpleNamespace(machines=FakeMachines())
+        self.assertEqual(self.app.machine_jobs(), [{"machine": "NODE-02", "kind": "building", "since": HOUR_AGO,
+                                                    "title": "Fletchery build 0.4.6 (job #9)",
+                                                    "detail": "step: Package 0.4.6 · from main"}])
 
 
 if __name__ == "__main__":

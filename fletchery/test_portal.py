@@ -209,13 +209,13 @@ class Served(unittest.TestCase):
         self.assertEqual(self.desk_post("/api/restart", **{"Sec-Fetch-Site": "cross-site"})[0], 403)
         self.assertEqual(self.calls, [])
 
-    def test_the_phone_has_the_controls_but_not_a_new_build(self):
+    def test_the_phone_has_every_control(self):
         s = json.loads(self.ask("/api/summary", self.remote())[1])
         self.assertEqual((s["desktop"], s["controls"]), (False, True))
         self.assertEqual(self.phone_post("/api/restart")[0], 200)
         self.assertEqual(self.calls, [("/api/restart", {"_from": f"the phone ({USER})"})])
-        self.assertEqual(self.phone_post("/api/builds/add", b'{"version": "1.0.0"}')[0], 403)
-        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.phone_post("/api/builds/add", b'{"version": "1.0.0"}')[0], 200)   # Alex 11-18: start builds anywhere
+        self.assertEqual(self.calls[-1], ("/api/builds/add", {"version": "1.0.0", "_from": f"the phone ({USER})"}))
         log = self.ask("/api/jobs/log?id=7", self.remote())[1].decode()
         self.assertIn("job 7 ran in [a folder on the PC]", log)
 
@@ -258,7 +258,7 @@ class ReadOnlyPhone(Served):
         self.assertEqual(self.desk_post("/api/restart")[0], 200)   # the window still can
 
     # the inherited tests below assume phone controls; they run in Served
-    test_the_phone_has_the_controls_but_not_a_new_build = None
+    test_the_phone_has_every_control = None
     test_strangers_and_other_pages_cannot_use_the_controls = None
 
 

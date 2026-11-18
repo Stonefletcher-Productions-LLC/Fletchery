@@ -97,6 +97,9 @@ def _scrub(v, limit: int = 300) -> str:
     return PATHS.sub("[a folder]", _text(v, limit * 2))[:limit]
 
 
+BUILD_KINDS = ("building", "check", "proof", "merging", "importing")   # what "Building now" lists
+
+
 def kind_of(purpose: str) -> str:
     """What a machine's hold is for, from the name its run gave itself (LaneGuard's LS_LANE_PURPOSE)."""
     p = (purpose or "").lower()
@@ -310,6 +313,9 @@ class DevWatch:
         # The backend adds what only it knows (app.py): build machines whose worker stopped calling in, builds no
         # machine can take. A callable returning [{"kind", "title", "detail", "since", "key"}].
         self.extra = None
+        # Builds the backend runs on its machines (app.py): [{"machine", "title", "since", "detail", "kind"}], shown on
+        # each machine and under "Building now" like everything else a machine does.
+        self.own_builds = None
         try:
             self.disk_low = float(conf.get("diskFreeGb", DISK_LOW_GB)) if isinstance(conf, dict) else DISK_LOW_GB
         except (TypeError, ValueError):
@@ -636,6 +642,9 @@ class DevWatch:
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
+        # Everything building, checking, testing, merging or importing right now, on any machine, in one list.
+        building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a["kind"] in BUILD_KINDS]
+        building.sort(key=lambda a: _ts(a.get("since")) or 0)
         return {
             "at": now_iso(), "fresh": {"github": self.last_ok, "tried": self.last_try, "every": round(self.interval),
                                        "error": _text(self.error), "remaining": self.gh.remaining,
@@ -643,7 +652,8 @@ class DevWatch:
             "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
-                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers)},
+                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "building": len(building)},
+            "building": building[:30],
             "blockers": blockers[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
@@ -726,4 +736,20 @@ class DevWatch:
                                                "title": r["job"]["title"], "since": r["job"]["started"],
                                                "detail": (f"step: {r['job']['step']} · " if r["job"]["step"] else "") + r["job"]["repo"],
                                                "url": r["job"]["url"]})
+        if self.own_builds is not None:
+            try:
+                own = list(self.own_builds() or [])
+            except Exception:
+                own = []
+            for j in own:
+                key = str(j.get("machine") or "").lower()
+                if not key:
+                    continue
+                m = next((v for k, v in by.items() if k == key or v["name"].lower() == key), None)
+                if m is None:
+                    m = by.setdefault(key, {"name": self.display(j["machine"]), "host": j["machine"], "online": True, "last_report": "",
+                                            "busy": False, "stats": {}, "disks": [], "procs": {}, "activities": [], "runners": [], "version": ""})
+                m["activities"].insert(0, {"kind": _text(j.get("kind") or "building", 20), "title": _text(j.get("title"), 200),
+                                           "since": _text(j.get("since"), 30), "detail": _text(j.get("detail"), 200), "fletchery": True})
+                m["busy"] = m["busy"] or j.get("kind") != "queued"
         return sorted(by.values(), key=lambda m: m["name"].lower())

@@ -1,6 +1,6 @@
 // Fletchery's page, on the phone and in the desktop window: reads /api/summary and draws Builds and Activity (live.js
 // draws Live). Controls (start, stop, pause, re-run, restart) show when the backend says this screen may use them: the
-// desktop window always, the phone unless workers.portal.controls is false. Queueing a new build is the window's only.
+// desktop window always, the phone unless workers.portal.controls is false.
 (function () {
   'use strict';
   const POLL_MS = 5000;      // while Builds or Activity is open
@@ -35,8 +35,10 @@
   function link(url, cls, ...kids) {
     return web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('div', {class: cls}, ...kids);
   }
+  const CAP = {buildsOpen: 6, buildsDone: 4, buildMachines: 6, jobs: 4, log: 40};
   function fill(node, rows, empty) {
     node.replaceChildren(...(rows.length ? rows : [el('li', {class: 'empty', text: empty})]));
+    if (CAP[node.id] && window.fletcheryKit) window.fletcheryKit.cap(node, CAP[node.id]);
   }
   function ago(iso) {
     const t = Date.parse(iso || '');
@@ -102,8 +104,10 @@
     });
     return b;
   }
+  let jobsById = {};
   function buildRow(b) {
     const [word, cls] = BUILD[b.state] || [b.state, ''];
+    const j = b.job ? jobsById[b.job] : null;
     const time = b.finished ? 'Finished ' + when(b.finished) : b.started ? 'Started ' + when(b.started) + ' (' + lasted(b.started) + ')' : b.at ? 'Planned for ' + when(b.at) : '';
     const publish = {zipping: 'Zipping the download', uploading: 'Uploading the download', failed: 'Upload failed', skipped: 'Not uploaded'}[b.publish];
     const open = !['done', 'failed', 'cancelled'].includes(b.state);
@@ -122,7 +126,9 @@
       b.reason && !(b.state === 'done' && b.links.length) ? el('p', {class: 'sub', text: b.reason}) : null,
       b.publish_reason && b.publish === 'failed' ? el('p', {class: 'sub', text: b.publish_reason}) : null,
       b.links.length ? el('div', {class: 'links'}, b.links.filter(l => web(l.url)).map(l =>
-        el('a', {href: l.url, target: '_blank', rel: 'noopener noreferrer', text: l.label}))) : null);
+        el('a', {href: l.url, target: '_blank', rel: 'noopener noreferrer', text: l.label}))) : null,
+      can && j && j.log_bytes ? el('a', {class: 'small-link', href: '/api/jobs/log?id=' + j.id, target: '_blank', rel: 'noopener', text: 'Log'}) : null,
+      b.state === 'running' && j ? steps(j) : null);
   }
   const JOB = {queued: ['Queued', 'wait'], running: ['Running', 'run'], passed: ['Passed', 'run'], failed: ['Failed', 'bad'],
     cancelled: ['Cancelled', ''], lost: ['Lost', 'bad']};
@@ -152,15 +158,15 @@
   }
   function machineRow(m) {
     const off = m.paused.includes('builds');
-    return el('li', null,
+    const doing = m.job ? (m.job.recipe === 'package' ? 'Building ' + m.job.version : 'Running ' + m.job.recipe) : '';
+    const [word, cls] = !m.online ? ['Offline', 'bad'] : doing ? [doing, 'wait'] : off ? ['Paused', 'hold'] : ['Ready', 'run'];
+    return el('li', {class: 'm-line'},
       el('div', {class: 'title', text: m.name}),
-      el('span', {class: 'chip ' + (m.online ? 'run' : 'bad'), text: m.online ? 'Worker online' : 'Worker offline'}),
-      m.job ? el('span', {class: 'chip wait', text: 'Running job #' + m.job.id}) : m.online ? el('span', {class: 'chip', text: 'Idle'}) : null,
-      off ? el('span', {class: 'chip hold', text: 'Builds paused'}) : null,
-      can ? button(off ? 'Resume builds' : 'Pause builds', '/api/machines/pause', {name: m.name, kind: 'builds', on: !off},
+      el('span', {class: 'chip ' + cls, text: word}),
+      off && (doing || !m.online) ? el('span', {class: 'chip hold', text: 'Paused'}) : null,
+      can ? button(off ? 'Resume' : 'Pause', '/api/machines/pause', {name: m.name, kind: 'builds', on: !off},
         off ? m.name + ' takes builds again.' : m.name + ' takes no new builds. A running one finishes.') : null,
-      !m.online && m.last_seen ? el('p', {class: 'sub', text: 'Last called in ' + ago(m.last_seen)}) : null,
-      el('p', {class: 'sub', text: m.labels.join(' · ')}));
+      !m.online && m.last_seen ? el('p', {class: 'sub', text: 'Worker last called in ' + ago(m.last_seen)}) : null);
   }
 
   function draw(d) {
@@ -168,8 +174,7 @@
     can = d.controls === true;
     document.body.classList.toggle('desktop', desktop);
     document.body.classList.toggle('controls', can);
-    for (const n of document.querySelectorAll('.desk')) n.hidden = !desktop || (n.id === 'newBuildCard' && !d.machines_on);
-    for (const n of document.querySelectorAll('.ctrl')) n.hidden = !can;
+    for (const n of document.querySelectorAll('.ctrl')) n.hidden = !can || (n.id === 'newBuildCard' && !d.machines_on);
     $('project').textContent = d.project && d.project !== 'project' ? d.project : 'Fletchery';
     const alerts = d.errors.map(t => el('div', {class: 'alert bad', role: 'status'}, el('strong', {text: 'Problem'}), t));
     if (d.restarting) alerts.unshift(el('div', {class: 'alert', role: 'status'}, el('strong', {text: 'Restarting'}), d.restarting));
@@ -183,12 +188,23 @@
     ab.hidden = !d.errors.length;
     ab.textContent = d.errors.length ? '!' : '';
     if (!$('bRef').value && !$('bRef').dataset.touched) $('bRef').placeholder = d.base || 'main';
-    fill($('builds'), d.builds.map(buildRow), d.machines_on ? 'No builds yet.' + (desktop ? '' : ' Queue one in the Fletchery window on the PC; Build again works here.') : 'No build machines are set up (workers.machines in the profile).');
+    jobsById = {};
+    for (const j of d.jobs) jobsById[j.id] = j;
+    for (const m of d.machines) if (m.job) jobsById[m.job.id] = {...jobsById[m.job.id], ...m.job};
+    const isOpen = b => !['done', 'failed', 'cancelled'].includes(b.state);
+    const openRows = d.builds.filter(isOpen).sort((a, b) => (a.state === 'scheduled') - (b.state === 'scheduled') || Date.parse(a.at || 0) - Date.parse(b.at || 0));
+    const doneRows = d.builds.filter(b => !isOpen(b));
+    $('n-bnow').textContent = openRows.length ? '(' + openRows.length + ')' : '';
+    fill($('buildsOpen'), openRows.map(buildRow), d.machines_on ? 'Nothing building or scheduled.' : 'No build machines are set up (workers.machines in the profile).');
+    $('n-bdone').textContent = doneRows.length ? '(' + doneRows.length + ')' : '';
+    fill($('buildsDone'), doneRows.map(buildRow), 'No finished builds yet.');
     fill($('buildMachines'), d.machines.map(machineRow), 'No build machines are registered.');
     $('heldNote').hidden = !d.held;
     $('holdAll').textContent = d.held ? 'Resume all machines' : 'Pause all machines';
     $('holdAll').dataset.on = d.held ? '' : '1';
-    fill($('jobs'), d.jobs.slice(0, 25).map(jobRow), 'No machine jobs yet.');
+    const other = d.jobs.filter(j => j.recipe !== 'package');
+    $('otherJobsCard').hidden = !other.length;
+    fill($('jobs'), other.slice(0, 15).map(jobRow), '');
     const sc = d.scratch || {};
     fill($('health'), [
       el('li', null, el('div', {class: 'title', text: 'Backend'}), el('span', {class: 'chip run', text: 'Running'}),
@@ -285,7 +301,7 @@
     try {
       const row = await post('/api/builds/add', {version: $('bVersion').value.trim(), ref: $('bRef').value.trim(), at,
         repeat: $('bDaily').checked ? 'daily' : '', tests: $('bTests').checked ? 'full' : ''});
-      msg.textContent = 'Build ' + row.version + ' queued.';
+      msg.textContent = 'Build ' + row.version + (at ? ' scheduled.' : ' started.');
       $('newBuild').reset(); delete $('bRef').dataset.touched;
       refresh();
     } catch (err) { msg.textContent = String(err.message || err); msg.className = 'msg bad'; }

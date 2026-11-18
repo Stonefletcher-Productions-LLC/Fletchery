@@ -23,7 +23,8 @@
   "queued": 1,
   "prs": 2,
   "issues": 1,
-  "blockers": 6
+  "blockers": 6,
+  "building": 1
  },
  "blockers": [
   {
@@ -324,6 +325,16 @@
    "created": "2026-11-18T04:29:29Z",
    "updated": "2026-11-18T04:30:29Z",
    "blocked": true
+  }
+ ],
+ "building": [
+  {
+   "kind": "check",
+   "title": "PR check \u00b7 PR #12",
+   "since": "2026-11-18T03:12:29Z",
+   "detail": "step: Build editor \u00b7 Acme/Game",
+   "url": "https://github.com/Acme/Game/actions/runs/7",
+   "machine": "Gaming PC"
   }
  ]
 }

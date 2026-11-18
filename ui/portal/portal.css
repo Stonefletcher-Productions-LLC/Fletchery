@@ -185,24 +185,22 @@ button.small:disabled { opacity: .5; }
 .chips .chip { margin: 0; }
 .desktop #bell { display: none; }
 
-/* The desktop window: wider, tabs across the top instead of at the bottom */
+/* The desktop window: one row of tabs across the top at any width (the bar at the bottom is the phone's) */
+body.desktop { padding-bottom: 0; }
+body.desktop .top { position: static; }
+body.desktop .tabs { position: sticky; top: 0; bottom: auto; border-top: 0; border-bottom: 1px solid var(--rule);
+  grid-auto-columns: max-content; justify-content: center; gap: 4px; padding: 0; }
+body.desktop .tabs button { flex-direction: row; gap: 7px; height: 46px; padding: 0 22px; font-size: 14px; }
+body.desktop .tabs button[aria-current="page"] { box-shadow: inset 0 -3px 0 var(--accent); }
+body.desktop .badge { position: static; }
+body.desktop .toast { bottom: 24px; }
+/* and two columns when it is wide enough */
 @media (min-width: 900px) {
-  /* <nav class="tabs"> comes after <main> in the page (the phone's bar sits at the bottom): reorder so it is under
-     the header, once, and sticks there while the page scrolls */
-  body.desktop { padding-bottom: 0; display: flex; flex-direction: column; min-height: 100vh; }
-  body.desktop .top { position: static; order: 0; }
-  body.desktop .tabs { order: 1; }
-  body.desktop main { order: 2; width: 100%; box-sizing: border-box; }
-  body.desktop .tabs { position: sticky; top: 0; bottom: auto; border-top: 0; border-bottom: 1px solid var(--rule);
-    grid-auto-columns: max-content; justify-content: center; gap: 4px; padding: 0; }
-  body.desktop .tabs button { flex-direction: row; gap: 7px; height: 46px; padding: 0 22px; font-size: 14px; }
-  body.desktop .tabs button[aria-current="page"] { box-shadow: inset 0 -3px 0 var(--accent); }
-  body.desktop .badge { position: static; }
   body.desktop main { max-width: 1280px; padding-top: 16px; }
   body.desktop #view-live:not([hidden]), body.desktop #view-builds:not([hidden]) { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; align-items: start; }
   body.desktop #view-live > .alert, body.desktop #view-live > .stats, body.desktop #view-live > .filters,
   body.desktop #view-live > #liveBlockersCard, body.desktop #view-live > .fine { grid-column: 1 / -1; }
-  body.desktop #view-builds > #newBuildCard { grid-row: span 2; }
+  body.desktop #view-live > #liveBuildingCard { grid-column: 1 / -1; }
 }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 6px; }
 .toolbar .msg { margin: 0 0 0 6px; }
@@ -210,8 +208,13 @@ button.small:disabled { opacity: .5; }
 .top-row #refreshTop { margin-left: auto; }
 
 /* What a control did: a short note above the tabs */
-.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 20;
+.toast { pointer-events: none; position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(76px + env(safe-area-inset-bottom)); z-index: 20;
   max-width: min(92vw, 520px); padding: 10px 14px; border-radius: 10px; background: var(--ink); color: var(--paper);
   font-size: 15px; box-shadow: 0 4px 16px rgba(0, 0, 0, .25); }
 .toast.bad { background: var(--failed-bg); color: var(--failed); border: 1px solid currentColor; }
-@media (min-width: 900px) { body.desktop .toast { bottom: 24px; } }
+
+/* Builds: the form, short; the extras fold away */
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+details.more { margin: 6px 0; }
+details.more > summary { cursor: pointer; color: var(--muted); font-size: 14px; min-height: 32px; line-height: 32px; }
+.m-line .title { display: inline-block; margin-right: 6px; }

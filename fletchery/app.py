@@ -212,6 +212,7 @@ class App:
                                     actions=self.actions(), job_log=self.job_log)
         if self.portal.live is not None:
             self.portal.live.extra = self.machine_blockers
+            self.portal.live.own_builds = self.machine_jobs
             api = getattr(self.machines, "api", None)
             if api is not None:
                 api.reports = self.portal.live
@@ -287,6 +288,23 @@ class App:
                             "title": f"{j.get('requested_by') or 'Job ' + str(j.get('id'))} has waited "
                                      f"{int(_age(j.get('created') or '') // 60)} min for a build machine",
                             "detail": "No online machine with the labels it needs has taken it."})
+        return out
+
+    def machine_jobs(self) -> list:
+        """For Live: the builds this backend runs on its machines, as machine activities ("Building now")."""
+        if self.machines is None:
+            return []
+        out = []
+        for m in self.machines.machines.view(jobs=1)["machines"]:
+            j = m.get("job")
+            if m.get("revoked") or not j or j.get("state") != "running" or not j.get("machine"):
+                continue
+            params = j.get("params") or {}
+            what = f"Fletchery build {params.get('version')}" if j.get("recipe") == "package" else f"Fletchery job: {j.get('recipe')}"
+            step = next((x.get("name") for x in reversed(j.get("steps") or []) if x.get("state") == "running"), "")
+            out.append({"machine": j["machine"], "kind": "building", "since": j.get("started") or "",
+                        "title": f"{what} (job #{j.get('id')})",
+                        "detail": " · ".join(x for x in (f"step: {step}" if step else "", f"from {j.get('ref')}" if j.get("ref") else "") if x)})
         return out
 
     def status(self) -> dict:

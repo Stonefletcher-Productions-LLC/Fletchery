@@ -151,6 +151,19 @@ class Feed(unittest.TestCase):
         self.assertTrue(pc["job"]["pr_closed"])
         self.assertFalse(next(r for r in self.watch().snapshot()["runs"] if r["id"] == 7)["pr_closed"])
 
+    def test_building_now_lists_every_build_on_every_machine(self):
+        w = self.watch()
+        w.own_builds = lambda: [{"machine": "SF-NODE-01", "kind": "building", "title": "Fletchery build 0.4.6 (job #9)", "since": ago(20),
+                           "detail": "step: Package 0.4.6"}]
+        s = w.snapshot()
+        node = next(m for m in s["machines"] if m["name"] == "SF-NODE-01")
+        self.assertTrue(node["busy"])
+        self.assertEqual(node["activities"][0]["title"], "Fletchery build 0.4.6 (job #9)")
+        self.assertEqual([(b["machine"], b["kind"]) for b in s["building"]], [("Gaming PC", "check"), ("SF-NODE-01", "building")])
+        self.assertEqual(s["counts"]["building"], 2)
+        w.own_builds = lambda: 1 / 0   # a broken hook never loses the feed
+        self.assertEqual(len(w.snapshot()["building"]), 1)
+
     def test_finished_checks_are_not_asked_again(self):
         w = self.watch()
         w.gh.asked.clear()
