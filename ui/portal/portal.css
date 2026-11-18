@@ -164,6 +164,7 @@ dialog li { margin: 4px 0; }
 .chip.k-merging, .chip.k-building, .chip.k-importing { background: var(--hold-bg); color: var(--hold); }
 .chip.k-proof, .chip.k-working { background: var(--running-bg); color: var(--running); }
 .chip.k-coding { background: var(--accent-bg); color: var(--accent); }
+.chip.k-codex { background: var(--queued-bg); color: var(--queued); }
 .chip.k-queued { background: var(--soft); color: var(--muted); }
 .r-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
 .r-row > div { min-width: 0; }
