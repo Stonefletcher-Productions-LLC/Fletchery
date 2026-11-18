@@ -9,8 +9,18 @@
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
   --tabs-h: 58px;
 }
+/* Theme: the header button sets <html data-theme="light|dark">; without it the system setting decides. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #141B22; --panel: #1D2731; --soft: #24313C; --ink: #EDF2F6; --muted: #A5B5C4; --rule: #374652;
+  --accent: #70DCC1; --accent-bg: #183E36;
+  --queued: #9DCCF1; --queued-bg: #223C50; --running: #7DE2BC; --running-bg: #193C32;
+  --failed: #FFA4B3; --failed-bg: #492731; --blocked: #FFB782; --blocked-bg: #452E23;
+  --hold: #EEC77E; --hold-bg: #403522;
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --paper: #141B22; --panel: #1D2731; --soft: #24313C; --ink: #EDF2F6; --muted: #A5B5C4; --rule: #374652;
     --accent: #70DCC1; --accent-bg: #183E36;
     --queued: #9DCCF1; --queued-bg: #223C50; --running: #7DE2BC; --running-bg: #193C32;
@@ -18,6 +28,9 @@
     --hold: #EEC77E; --hold-bg: #403522;
   }
 }
+#themeTop svg { display: none; }
+#themeTop[data-mode="system"] .t-system, #themeTop:not([data-mode]) .t-system,
+#themeTop[data-mode="light"] .t-light, #themeTop[data-mode="dark"] .t-dark { display: block; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
