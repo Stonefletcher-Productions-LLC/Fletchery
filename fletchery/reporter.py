@@ -8,7 +8,10 @@ What it reads (nothing here starts, stops or changes anything):
     runs: {"title": "Proof run for #2263", "kind": "proof", "detail": "NavCheck", "since": "<UTC ISO>"}. A file not
     rewritten for 3 minutes is ignored (its script died);
   - which tools run (GitHub job, Unreal editor, compiler, shader workers, Claude, Blender), counted by process name;
-  - CPU, memory and free disk.
+  - CPU, memory and free disk;
+  - <lease folder>/disk.json, written by LifeShare's disk guard (Tools/CI/DiskGuard.ps1) every 10 minutes: the build
+    drive's free and total space, its state (ok, low, full), the thresholds, the runner services it stopped and the
+    biggest folders. Sent as it is, bounded; the Live tab warns from it.
 
 It posts that to Fletchery's machines worker API (/v1/report), signed with this machine's existing node key, so no new
 secret and no new open port. The Live tab marks the machine silent after a minute without a report.
@@ -38,7 +41,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1"
+VERSION = "2"  # 2: sends disk.json (the disk guard) and each drive's total
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -199,12 +202,41 @@ def memory() -> dict:
         return {}
 
 
+GUARD_FRESH = 3600   # a disk.json older than this is left out (its guard stopped); the drive figures above stay
+
+
+def disk_guard(folder: Path) -> dict | None:
+    """LifeShare's disk guard report (<lease folder>/disk.json), or None when there is none or it is stale."""
+    f = folder / "disk.json"
+    try:
+        if time.time() - f.stat().st_mtime > GUARD_FRESH:
+            return None
+    except OSError:
+        return None
+    rec = _read_json(f)
+    if not isinstance(rec, dict):
+        return None
+    out = {}
+    for k in ("machine", "drive", "state", "updatedUtc", "lastCleanUtc"):
+        if rec.get(k) is not None:
+            out[k] = str(rec.get(k))[:60]
+    for k in ("freeGB", "totalGB", "wantGB", "minGB", "warnGB", "lastFreedGB"):
+        if isinstance(rec.get(k), (int, float)) and not isinstance(rec.get(k), bool):
+            out[k] = rec[k]
+    stopped = rec.get("runnerStopped")
+    out["runnerStopped"] = [str(x)[:80] for x in (stopped if isinstance(stopped, list) else [stopped] if stopped else [])][:10]
+    out["holders"] = [{"path": str(h.get("path") or "")[:260], "gb": h["gb"]} for h in (rec.get("holders") or [])[:10]
+                      if isinstance(h, dict) and isinstance(h.get("gb"), (int, float))]
+    return out
+
+
 def disks(roots) -> list:
     out = []
     for r in roots or []:
         try:
             u = shutil.disk_usage(r)
-            out.append({"name": str(r).rstrip("\\/") or "/", "free_gb": round(u.free / 1024 ** 3, 1)})
+            out.append({"name": str(r).rstrip("\\/") or "/", "free_gb": round(u.free / 1024 ** 3, 1),
+                        "total_gb": round(u.total / 1024 ** 3, 1)})
         except OSError:
             pass
     return out
@@ -254,6 +286,7 @@ class Reporter:
                 rec = _read_json(f)
                 if isinstance(rec, dict) and rec.get("title"):
                     acts.append({k: str(rec.get(k) or "")[:300] for k in ("title", "kind", "detail", "since")})
+        guard = disk_guard(self.lease.parent) if self.lease else None
         procs: dict[str, int] = {}
         for n in process_names():
             if n in TOOLS:
@@ -265,7 +298,7 @@ class Reporter:
         else:
             self.idle_since = 0.0
         return {"version": VERSION, "host": socket.gethostname(), "at": now_iso(), "lease": lease, "queue": queue[:10],
-                "activities": acts[:10], "procs": procs, "stats": stats,
+                "activities": acts[:10], "procs": procs, "stats": stats, "disk_guard": guard,
                 "idle_seconds": round(time.time() - self.idle_since) if self.idle_since else 0,
                 "busy": bool(lease or procs.get("runner") or acts)}
 

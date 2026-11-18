@@ -97,6 +97,35 @@ def _scrub(v, limit: int = 300) -> str:
     return PATHS.sub("[a folder]", _text(v, limit * 2))[:limit]
 
 
+DISK_WARN_GB = 50   # the disk guard's warnGB when its report has none
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _holder_name(path) -> str:
+    """A folder's last two parts ("lifeshare-scratch\\wt-bus-lines"): enough to know it, without the machine's path."""
+    parts = [p for p in re.split(r"[\\/]+", str(path or "")) if p and not re.fullmatch(r"[A-Za-z]:", p)]
+    return _text("\\".join(parts[-2:]) or "?", 80)
+
+
+def _disk_guard(g) -> dict | None:
+    """LifeShare's disk guard report (disk.json, sent by reporter.py 2+), cleaned for the page; None without one."""
+    if not isinstance(g, dict) or _num(g.get("freeGB")) is None:
+        return None
+    free, warn = float(g["freeGB"]), float(_num(g.get("warnGB")) or DISK_WARN_GB)
+    state = _text(g.get("state"), 10).lower()
+    return {"drive": _text(g.get("drive"), 8), "free_gb": round(free, 1), "total_gb": _num(g.get("totalGB")),
+            "state": state if state in ("ok", "low", "full") else "", "warn_gb": warn, "min_gb": _num(g.get("minGB")),
+            "low": free < warn or state in ("low", "full"),
+            "runner_stopped": [_text(x, 80) for x in (g.get("runnerStopped") or []) if x][:10],
+            "holders": [{"name": _holder_name(h.get("path")), "gb": round(float(h["gb"]), 1)} for h in (g.get("holders") or [])[:8]
+                        if isinstance(h, dict) and _num(h.get("gb")) is not None],
+            "updated": _text(g.get("updatedUtc"), 40), "last_clean": _text(g.get("lastCleanUtc"), 40),
+            "last_freed_gb": _num(g.get("lastFreedGB"))}
+
+
 BUILD_KINDS = ("building", "check", "proof", "merging", "importing")   # what "Building now" lists
 
 
@@ -700,7 +729,21 @@ class DevWatch:
             if procs.get("claude"):
                 acts.append({"kind": "coding", "title": f"Claude: {int(procs['claude'])} session" + ("s" if int(procs["claude"]) > 1 else ""),
                              "since": "", "detail": ""})
+            guard = _disk_guard(d.get("disk_guard"))
+            if guard:
+                drive, who = guard["drive"] or "The build drive", self.display(host)
+                if guard["state"] == "full" or guard["runner_stopped"]:
+                    block("stuck", f"{who}: PR runner offline: disk full",
+                          f"{drive} has {guard['free_gb']:.0f} GB free." + (f" Stopped: {', '.join(guard['runner_stopped'])}." if guard["runner_stopped"] else "")
+                          + " The disk guard starts it again once it has cleared enough space.",
+                          since=guard["updated"], key=f"diskfull:{host}")
+                elif guard["low"]:
+                    block("disk", f"{who}: {drive} has {guard['free_gb']:.0f} GB free",
+                          f"Under {guard['warn_gb']:.0f} GB. The disk guard clears old build output; the biggest folders are on the Machines card.",
+                          since=guard["updated"], key=f"disklow:{host}")
             for x in (stats.get("disks") or [])[:4]:
+                if guard and isinstance(x, dict) and _text(x.get("name"), 8).rstrip(":").upper() == (guard["drive"] or "").rstrip(":\\/").upper():
+                    continue   # the disk guard's drive is flagged from its own report, above
                 if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float)) and x["free_gb"] < self.disk_low:
                     block("stuck", f"{self.display(host)}: {_text(x.get('name'), 8)} has {x['free_gb']:.0f} GB free",
                           f"Below {self.disk_low:.0f} GB: builds and checks there may fail. Clear old worktrees or build output.",
@@ -713,8 +756,11 @@ class DevWatch:
             by[host.lower()] = {"name": self.display(host), "host": host, "online": not silent, "last_report": rep["at"],
                                 "busy": bool(acts and any(a["kind"] not in ("queued",) for a in acts)) or bool(procs.get("runner")),
                                 "stats": {k: stats.get(k) for k in ("cpu", "ram_used_gb", "ram_total_gb") if isinstance(stats.get(k), (int, float))},
-                                "disks": [{"name": _text(x.get("name"), 8), "free_gb": x.get("free_gb")} for x in (stats.get("disks") or [])[:4]
+                                "disks": [{"name": _text(x.get("name"), 8), "free_gb": x.get("free_gb"),
+                                           **({"total_gb": x["total_gb"]} if isinstance(x.get("total_gb"), (int, float)) else {})}
+                                          for x in (stats.get("disks") or [])[:4]
                                           if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float))],
+                                "disk_guard": guard,
                                 "procs": {k: int(v) for k, v in procs.items() if isinstance(v, (int, float)) and v}, "activities": acts,
                                 "runners": [], "version": _text(d.get("version"), 20)}
         for r in runners:
@@ -727,7 +773,7 @@ class DevWatch:
                 r["machine"] = m["name"]
             if m is None:
                 m = by.setdefault(key, {"name": r["machine"], "host": r["machine"], "online": r["online"], "last_report": "",
-                                        "busy": False, "stats": {}, "disks": [], "procs": {}, "activities": [], "runners": [], "version": ""})
+                                        "busy": False, "stats": {}, "disks": [], "disk_guard": None, "procs": {}, "activities": [], "runners": [], "version": ""})
             m["runners"].append(r["name"])
             if r["job"]:
                 m["busy"] = True
@@ -748,7 +794,7 @@ class DevWatch:
                 m = next((v for k, v in by.items() if k == key or v["name"].lower() == key), None)
                 if m is None:
                     m = by.setdefault(key, {"name": self.display(j["machine"]), "host": j["machine"], "online": True, "last_report": "",
-                                            "busy": False, "stats": {}, "disks": [], "procs": {}, "activities": [], "runners": [], "version": ""})
+                                            "busy": False, "stats": {}, "disks": [], "disk_guard": None, "procs": {}, "activities": [], "runners": [], "version": ""})
                 m["activities"].insert(0, {"kind": _text(j.get("kind") or "building", 20), "title": _text(j.get("title"), 200),
                                            "since": _text(j.get("since"), 30), "detail": _text(j.get("detail"), 200), "fletchery": True})
                 m["busy"] = m["busy"] or j.get("kind") != "queued"

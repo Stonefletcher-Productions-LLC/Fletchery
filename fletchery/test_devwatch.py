@@ -191,6 +191,32 @@ class Feed(unittest.TestCase):
                      "its process is gone"):
             self.assertIn(want, titles)
 
+    def test_the_disk_guard_shows_on_the_machine_and_flags_low_and_full(self):
+        guard = {"machine": "SF-NODE-01", "drive": "E:", "freeGB": 31.5, "totalGB": 250, "state": "low", "wantGB": 40, "minGB": 20,
+                 "warnGB": 50, "updatedUtc": ago(4), "runnerStopped": [],
+                 "holders": [{"path": r"E:\lifeshare-scratch\wt-bus-lines", "gb": 61.2}, {"path": r"E:\GitHubRunner\_work", "gb": 40}]}
+        w = self.watch()
+        w.report("NODE-01", {"host": "SF-NODE-01", "disk_guard": guard,
+                             "stats": {"disks": [{"name": "E:", "free_gb": 12, "total_gb": 250}, {"name": "C:", "free_gb": 80, "total_gb": 230}]}})
+        s = w.snapshot()
+        m = next(x for x in s["machines"] if x["host"] == "SF-NODE-01")
+        self.assertTrue(m["disk_guard"]["low"])
+        self.assertEqual(m["disk_guard"]["holders"][0], {"name": "lifeshare-scratch\\wt-bus-lines", "gb": 61.2})
+        self.assertNotIn("E:\\lifeshare-scratch", json.dumps(s))          # folder names, not the machine's paths
+        self.assertEqual(m["disks"][0]["total_gb"], 250)
+        disk = [b for b in s["blockers"] if "SF-NODE-01" in b["title"]]
+        self.assertEqual([b["kind"] for b in disk], ["disk"])              # the guard's drive once, not again from stats
+        self.assertIn("has 32 GB free", disk[0]["title"])
+
+        w.report("NODE-01", {"host": "SF-NODE-01", "disk_guard": {**guard, "freeGB": 4, "state": "full", "runnerStopped": ["actions.runner.unreal-pr"]}})
+        s = w.snapshot()
+        full = [b for b in s["blockers"] if "SF-NODE-01" in b["title"]]
+        self.assertEqual([(b["kind"], b["title"]) for b in full], [("stuck", "SF-NODE-01: PR runner offline: disk full")])
+        self.assertIn("actions.runner.unreal-pr", full[0]["detail"])
+
+        w.report("NODE-01", {"host": "SF-NODE-01", "disk_guard": {**guard, "freeGB": 120, "state": "ok"}})
+        self.assertFalse([b for b in w.snapshot()["blockers"] if "SF-NODE-01" in b["title"]])
+
     def test_runner_without_labels_joins_its_machine(self):
         w = self.watch(**{f"orgs/{ORG}/actions/runners": {"runners": [{"id": 9, "name": "ALEX_GAMING_PC-unreal-pr", "status": "online", "busy": False, "labels": []}]}})
         w.report("GAMING-PC", {"host": "Alex_Gaming_PC"})
@@ -331,6 +357,18 @@ class Reporter(unittest.TestCase):
         self.assertEqual(rep["activities"][0]["title"], "Proof run for #2263")
         self.assertTrue(rep["busy"])
         self.assertTrue(rep["stats"]["disks"])
+
+    def test_sends_the_disk_guard_report_when_fresh(self):
+        with tempfile.TemporaryDirectory() as d:
+            lease = Path(d) / "heavy.json"
+            r = reporter.Reporter({"leaseFile": str(lease), "disks": [d], "keyFile": "k", "coordinator": "x", "machine": "m"})
+            self.assertIsNone(r.collect()["disk_guard"])
+            (Path(d) / "disk.json").write_text(json.dumps({"drive": "E:", "freeGB": 12.5, "totalGB": 250, "state": "full",
+                                                           "runnerStopped": "actions.runner.x", "holders": [{"path": "E:\\a", "gb": 9}] * 20}))
+            g = r.collect()["disk_guard"]
+            self.assertEqual((g["freeGB"], g["state"], g["runnerStopped"], len(g["holders"])), (12.5, "full", ["actions.runner.x"], 10))
+            os.utime(Path(d) / "disk.json", (time.time() - 7200, time.time() - 7200))
+            self.assertIsNone(r.collect()["disk_guard"])          # a guard that stopped writing is not believed
 
     def test_dead_pid(self):
         self.assertFalse(reporter.alive(2 ** 22 + 12345))

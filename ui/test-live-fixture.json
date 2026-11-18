@@ -85,11 +85,13 @@
    "disks": [
     {
      "name": "C:",
-     "free_gb": 40
+     "free_gb": 40,
+     "total_gb": 465
     },
     {
      "name": "E:",
-     "free_gb": 140
+     "free_gb": 140,
+     "total_gb": 1863
     }
    ],
    "procs": {
@@ -115,7 +117,8 @@
    "runners": [
     "MY-PC-unreal-pr"
    ],
-   "version": ""
+   "version": "",
+   "disk_guard": null
   },
   {
    "name": "NODE",
@@ -130,7 +133,8 @@
    "runners": [
     "NODE-unreal-light"
    ],
-   "version": ""
+   "version": "",
+   "disk_guard": null
   },
   {
    "name": "SF-NODE-01",
@@ -146,7 +150,13 @@
    "disks": [
     {
      "name": "C:",
-     "free_gb": 88
+     "free_gb": 88,
+     "total_gb": 230
+    },
+    {
+     "name": "E:",
+     "free_gb": 31,
+     "total_gb": 250
     }
    ],
    "procs": {},
@@ -165,7 +175,34 @@
     }
    ],
    "runners": [],
-   "version": ""
+   "version": "",
+   "disk_guard": {
+    "drive": "E:",
+    "free_gb": 31.4,
+    "total_gb": 250,
+    "state": "low",
+    "warn_gb": 50,
+    "min_gb": 20,
+    "low": true,
+    "runner_stopped": [],
+    "holders": [
+     {
+      "name": "lifeshare-scratch\\wt-bus-lines",
+      "gb": 61.2
+     },
+     {
+      "name": "GitHubRunner\\_work",
+      "gb": 40.5
+     },
+     {
+      "name": "build-slots\\slot-1",
+      "gb": 22
+     }
+    ],
+    "updated": "2026-11-18T04:01:29Z",
+    "last_clean": "",
+    "last_freed_gb": null
+   }
   }
  ],
  "runners": [

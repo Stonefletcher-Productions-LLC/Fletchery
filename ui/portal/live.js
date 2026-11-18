@@ -68,7 +68,7 @@
     document.title = (c.blockers ? '(' + c.blockers + ') ' : '') + 'Fletchery';
   }
   function blockerRow(b) {
-    const label = {feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked'}[b.kind] || 'Look';
+    const label = {feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked', disk: 'Low disk'}[b.kind] || 'Look';
     return el('li', {class: 'blk'}, el('span', {class: 'chip needs', text: label}),
       el('div', {class: 'what'}, a(b.url, 't', b.title),
         b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null));
@@ -79,17 +79,28 @@
       el('div', {class: 'what'}, web(x.url) ? a(x.url, '', x.title) : el('span', {class: 't', text: x.title}),
         el('p', {class: 'sub'}, ...sep(join(x.detail, x.since ? since(x.since) : '')))));
   }
+  function diskRow(g) {
+    const full = g.state === 'full' || (g.runner_stopped || []).length;
+    const chip = full ? ['bad', 'PR runner offline: disk full'] : g.low ? ['wait', 'Under ' + Math.round(g.warn_gb) + ' GB'] : ['run', 'Disk OK'];
+    return el('div', {class: 'm-disk'},
+      el('p', {class: 'sub'}, el('span', {class: 'chip ' + chip[0], text: chip[1]}), ' ',
+        (g.drive || 'Build drive') + ' ' + Math.round(g.free_gb) + (g.total_gb ? '/' + Math.round(g.total_gb) : '') + ' GB free',
+        g.updated ? [' · checked ', ago(g.updated)] : ''),
+      (g.holders || []).length ? el('p', {class: 'sub', text: 'Biggest: ' + g.holders.slice(0, 5).map(h => h.name + ' ' + Math.round(h.gb) + ' GB').join(' · ')}) : null);
+  }
   function machineRow(m) {
-    const st = m.stats || {};
+    const st = m.stats || {}, g = m.disk_guard;
     const bits = join(
       typeof st.cpu === 'number' ? 'CPU ' + Math.round(st.cpu) + '%' : '',
       typeof st.ram_used_gb === 'number' ? 'RAM ' + st.ram_used_gb + '/' + st.ram_total_gb + ' GB' : '',
-      ...(m.disks || []).map(x => x.name + ' ' + Math.round(x.free_gb) + ' GB free'));
+      ...(m.disks || []).filter(x => !g || x.name.replace(/[:\\/]+$/, '').toUpperCase() !== (g.drive || '').replace(/[:\\/]+$/, '').toUpperCase())
+        .map(x => x.name + ' ' + Math.round(x.free_gb) + (x.total_gb ? '/' + Math.round(x.total_gb) : '') + ' GB free'));
     const state = !m.online ? ['off', 'Not reporting'] : m.busy ? ['busy', 'Busy'] : ['on', 'Idle'];
     const tools = Object.entries(m.procs || {}).filter(([k]) => k !== 'claude').map(([k, n]) => k + (n > 1 ? ' ×' + n : ''));
     return el('li', null,
       el('div', {class: 'm-head'}, el('span', {class: 'm-name'}, dot(state[0], state[1]), m.name),
         el('span', {class: 'm-stats', text: bits.join(' · ')})),
+      g ? diskRow(g) : null,
       !m.online ? el('p', {class: 'sub'}, m.last_report ? ['Last report ', ago(m.last_report)] : 'No reporter on this machine yet') : null,
       m.activities && m.activities.length ? el('ul', {class: 'acts'}, m.activities.map(actRow)) :
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
