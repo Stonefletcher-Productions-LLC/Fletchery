@@ -289,13 +289,21 @@
   const mine = x => !repo || !x.repo || x.repo === repo;
   function draw(full) {
     repoChips(full);
-    const d = repo ? {...full, blockers: (full.blockers || []).filter(mine), runs: (full.runs || []).filter(mine),
+    const d = repo ? {...full, blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
     stats(full);
     const blk = d.blockers || [];
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';
     fill($('liveBlockers'), blk.map(blockerRow), 'Nothing stuck. Everything is moving or idle.');
+    // Issues parked as blocked on other work: named under the card, not counted as stuck.
+    const parked = (d.parked || []).filter(mine);
+    const pk = $('liveParked');
+    if (pk) {
+      pk.hidden = !parked.length;
+      pk.replaceChildren(...(parked.length ? [parked.length + ' issue' + (parked.length > 1 ? 's' : '') + ' parked until other work lands (not stuck): ',
+        ...sep(parked.map(x => a(x.url, '', x.title.split(' ')[0])))] : []));
+    }
     const building = full.building || [];
     $('n-lbuild').textContent = building.length ? '(' + building.length + ')' : '';
     $('liveBuildingCard').classList.toggle('calm', !building.length);
