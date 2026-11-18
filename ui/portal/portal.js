@@ -292,7 +292,7 @@
       remember(body);
       $('dot').classList.add('pulse');
     } catch (e) {
-      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? (desktop ? 'The Fletchery backend is not answering.' : 'Can’t reach the PC. Is Tailscale on, and is the PC awake?') : String(e.message || e);
+      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? (desktop ? 'The Fletchery backend is not answering.' : 'Can’t reach the PC from this phone. Check that Tailscale is on (Connected) on the phone; if it is, Fletchery on the PC may have stopped.') : String(e.message || e);
     }
     clearTimeout(giveUp);
     freshness();

@@ -229,7 +229,7 @@
       draw(body);
       try { localStorage.setItem(KEEP, JSON.stringify({at: lastOk, body})); } catch (e) { /* private mode */ }
     } catch (e) {
-      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? 'Can’t reach the PC. Is Tailscale on, and is the PC awake?' : String(e.message || e);
+      failed = e instanceof TypeError || (e && e.name === 'AbortError') ? (document.body.classList.contains('desktop') ? 'The Fletchery backend is not answering.' : 'Can’t reach the PC from this phone. Check that Tailscale is on (Connected) on the phone; if it is, Fletchery on the PC may have stopped.') : String(e.message || e);
     }
     clearTimeout(giveUp);
     stale();
