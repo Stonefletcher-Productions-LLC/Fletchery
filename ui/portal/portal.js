@@ -1,6 +1,34 @@
 // Fletchery's page, on the phone and in the desktop window: reads /api/summary and draws Builds and Activity (live.js
 // draws Live). Controls (start, stop, pause, re-run, restart) show when the backend says this screen may use them: the
 // desktop window always, the phone unless workers.portal.controls is false. Queueing a new build is the window's only.
+
+// Theme: System (follows Windows / the phone), Light or Dark. The header button steps through them; the choice is kept
+// on this device. portal.css reads <html data-theme>.
+(function () {
+  'use strict';
+  const KEY = 'fletchery-theme', ORDER = ['system', 'light', 'dark'];
+  const NAME = {system: 'System', light: 'Light', dark: 'Dark'};
+  let pick = 'system';
+  try { pick = localStorage.getItem(KEY) || 'system'; } catch (e) { /* private mode */ }
+  if (!ORDER.includes(pick)) pick = 'system';
+  const next = () => ORDER[(ORDER.indexOf(pick) + 1) % ORDER.length];
+  function apply() {
+    if (pick === 'system') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.dataset.theme = pick;
+    const b = document.getElementById('themeTop');
+    if (!b) return;
+    const label = 'Theme: ' + NAME[pick] + '. Switch to ' + NAME[next()] + '.';
+    b.setAttribute('aria-label', label); b.title = label; b.dataset.mode = pick;
+  }
+  apply();
+  const b = document.getElementById('themeTop');
+  if (b) b.addEventListener('click', () => {
+    pick = next();
+    try { localStorage.setItem(KEY, pick); } catch (e) { /* private mode: this visit only */ }
+    apply();
+  });
+})();
+
 (function () {
   'use strict';
   const POLL_MS = 5000;      // while Builds or Activity is open
