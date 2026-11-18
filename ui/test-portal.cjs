@@ -52,7 +52,7 @@ const server = http.createServer((req, res) => {
   if (off) return req.socket.destroy();
   if (req.method !== 'GET') { posts.push(url); return send(404, '{}', 'application/json'); }
   if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify(data), 'application/json');
-  if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt}), 'application/json');
+  if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt, fresh: {...live.fresh, github: liveAt}}), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
   const file = path.join(__dirname, 'portal', url === '/' ? 'index.html' : path.basename(url));
   if (!fs.existsSync(file)) return send(404, '{}', 'application/json');
@@ -197,6 +197,21 @@ const server = http.createServer((req, res) => {
     // Read-only: the page never sent anything but reads.
     assert.deepEqual(posts, []);
     assert.deepEqual(errors.filter(e => !/Failed to load resource|ERR_|net::/.test(e)), []);
+    // Agents and merges switched off: only Live and Builds stay. Several projects: a chip shows one at a time.
+    data.workers_enabled = false;
+    live.prs.push({repo: 'Acme/Town', number: 7, title: 'Road decals', url: 'https://github.com/Acme/Town/pull/7', draft: false, author: 'dev',
+                   branch: 'roads', base: 'main', updated: new Date().toISOString(), created: '', labels: [], checks: {state: 'passed', total: 1, done: 1, failed: [], running: [], url: ''}});
+    const solo = await context.newPage();
+    await solo.goto(base + '/#tasks');
+    await solo.waitForSelector('#liveRepos button');
+    assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'builds']);
+    assert.equal(await solo.isVisible('#view-live'), true);
+    assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 3);
+    await solo.click('#liveRepos button:has-text("Town")');
+    assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 1);
+    assert.match(await solo.textContent('#livePrs'), /Road decals/);
+    await solo.click('#liveRepos button:has-text("All projects")');
+    data.workers_enabled = true;
     console.log('portal browser checks passed');
   } finally {
     await browser.close();

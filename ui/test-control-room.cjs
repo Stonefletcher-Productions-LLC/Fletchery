@@ -100,8 +100,12 @@ const server = http.createServer(async (req, res) => {
   const out = process.env.FLETCHERY_SCREENSHOTS || path.join(os.tmpdir(), 'fletchery-control-room-preview');
   fs.mkdirSync(out, {recursive: true});
   try {
+    // Live (the phone portal's Live tab in a frame) opens first; the rest of these checks start on the Overview.
     await page.goto(url);
     await page.waitForFunction(() => document.querySelector('#projName').textContent === 'Harbor');
+    assert.equal(await visible('#view-live'), true);
+    assert.match(await page.getAttribute('#liveFrame', 'src'), /^http:\/\/127\.0\.0\.1:\d+\/#live$/);
+    await page.click('a[data-view="overview"]');
     assert.equal(await visible('#workers'), true);
     // Overview lanes: coding, merging and building read at a glance.
     assert.equal(await page.locator('#lanes .lane-card').count(), 4);
@@ -117,7 +121,7 @@ const server = http.createServer(async (req, res) => {
     assert.equal(await visible('#agents'), false);
     assert.equal(await visible('#lowerBox'), false);
     assert.deepEqual(await page.locator('[data-view]').evaluateAll(links => links.map(link => link.dataset.view)),
-      ['overview', 'tasks', 'merge', 'test', 'build', 'agents', 'activity']);
+      ['live', 'overview', 'tasks', 'merge', 'test', 'build', 'agents', 'activity']);
     assert.equal(await page.locator('#slots details').count(), 2);
     assert.equal(await page.locator('#slots .free').count(), 1);
     assert.equal(await visible('#emergencyWorkers'), false, 'older payloads hide unavailable emergency controls');
@@ -855,9 +859,16 @@ const server = http.createServer(async (req, res) => {
     await storageOff.addInitScript(() => Object.defineProperty(window, 'localStorage', {get() { throw new Error('Storage unavailable'); }}));
     const privatePage = await storageOff.newPage();
     privatePage.on('pageerror', error => errors.push(error.message));
-    await privatePage.goto(url);
+    await privatePage.goto(url + '#overview');
     await privatePage.waitForFunction(() => document.querySelector('#projName').textContent === 'Harbor');
     assert.equal(await privatePage.locator('#workers').isVisible(), true);
+    // Agents and merge rounds switched off: their views leave the menu and Live leads.
+    data.workers_enabled = false;
+    await privatePage.reload();
+    await privatePage.waitForFunction(() => document.querySelector('[data-view="tasks"]').hidden);
+    assert.deepEqual(await privatePage.locator('[data-view]:visible').evaluateAll(l => l.map(a => a.dataset.view)), ['live', 'build', 'activity']);
+    assert.equal(await privatePage.locator('#view-live').isVisible(), true);
+    data.workers_enabled = true;
     await storageOff.close();
     assert.deepEqual(errors, []);
     console.log('PASS: navigation, themes, persistence, polling, actions, mobile, legacy links and unavailable storage');

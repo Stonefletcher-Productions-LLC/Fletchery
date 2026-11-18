@@ -1,7 +1,9 @@
-// Fletchery portal service worker: opens the page from the copy saved on the phone, so it appears at once even while
-// Tailscale is still connecting or the PC cannot be reached, and shows notifications. Status is never saved here:
+// Fletchery portal service worker: opens the newest page from the PC when it answers within a few seconds, else the copy
+// saved on the phone (Tailscale still connecting, PC asleep), and shows notifications. Network first since 2026-11-18:
+// cache first kept phones on an old page for several opens after an update. Status is never saved here:
 // the page asks the PC for it after it has opened.
-const CACHE = 'fletchery-portal-v3';
+const CACHE = 'fletchery-portal-v4';
+const NET_MS = 4000;
 const SHELL = ['/', '/portal.css', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', event => {
@@ -19,21 +21,21 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   const key = url.pathname === '/index.html' ? '/' : url.pathname;
   if (!SHELL.includes(key)) return;
-  // Saved copy first, so opening never waits for the network; a newer copy is fetched behind it for next time.
-  // With nothing saved yet (first open) the network answer is used, and a refusal (403) is shown as it is.
   const fresh = fetch(event.request, {cache: 'no-cache'}).then(response => {
     if (response.ok) {
       const copy = response.clone();
-      return caches.open(CACHE).then(cache => cache.put(key, copy)).then(() => response, () => response);
+      caches.open(CACHE).then(cache => cache.put(key, copy)).catch(() => {});
     }
     return response;
   });
-  event.respondWith(caches.match(key).then(hit => {
-    if (hit) {
-      event.waitUntil(fresh.catch(() => {}));
-      return hit;
-    }
-    return fresh.catch(() => Response.error());
+  const saved = () => caches.match(key);
+  // Newest first; the saved copy only when the PC is slow (NET_MS) or unreachable. A refusal (403) is shown as it is.
+  event.respondWith(new Promise(resolve => {
+    let done = false;
+    const use = r => { if (!done && r) { done = true; resolve(r); } };
+    const timer = setTimeout(() => saved().then(hit => use(hit)), NET_MS);
+    fresh.then(r => { clearTimeout(timer); use(r); },
+               () => { clearTimeout(timer); saved().then(hit => use(hit || Response.error())); });
   }));
 });
 
@@ -41,7 +43,7 @@ self.addEventListener('push', event => {
   let note = {};
   try { note = event.data ? event.data.json() : {}; } catch (e) { note = {}; }
   const title = typeof note.title === 'string' && note.title ? note.title : 'Fletchery';
-  const tab = ['now', 'tasks', 'merges', 'builds'].includes(note.tab) ? note.tab : 'now';
+  const tab = ['live', 'now', 'tasks', 'merges', 'builds'].includes(note.tab) ? note.tab : 'live';
   event.waitUntil(self.registration.showNotification(title, {
     body: typeof note.body === 'string' ? note.body : '',
     tag: typeof note.tag === 'string' && note.tag ? note.tag : undefined,
@@ -51,7 +53,7 @@ self.addEventListener('push', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const tab = (event.notification.data && event.notification.data.tab) || 'now';
+  const tab = (event.notification.data && event.notification.data.tab) || 'live';
   event.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(list => {
     for (const client of list) {
       if ('focus' in client) {

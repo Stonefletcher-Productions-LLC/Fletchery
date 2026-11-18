@@ -8,6 +8,8 @@
   const KEEP = 'fletchery-live-last';
   const $ = id => document.getElementById(id);
   let last = null, lastOk = 0, failed = '', timer = 0, tab = (location.hash.slice(1) || 'live');
+  let repo = '';                 // one project only ('' = all), remembered on this device
+  try { repo = localStorage.getItem('fletchery-live-repo') || ''; } catch (e) { /* private mode */ }
 
   function el(tag, props, ...kids) {
     const node = document.createElement(tag);
@@ -128,8 +130,24 @@
       ...(i.labels || []).slice(0, 4).map(l => el('span', {class: 'chip', text: l})),
       el('p', {class: 'sub'}, ...sep(join(i.repo.split('/')[1], ['updated ', ago(i.updated)]))));
   }
-  function draw(d) {
-    stats(d);
+  function repoChips(d) {
+    const names = [...new Set([...(d.runs || []), ...(d.prs || []), ...(d.issues || [])].map(x => x.repo).filter(Boolean))].sort();
+    if (repo && !names.includes(repo)) repo = '';
+    const box = $('liveRepos');
+    box.hidden = names.length < 2;
+    const chip = (value, label) => {
+      const b = el('button', {type: 'button', 'aria-pressed': String(repo === value), text: label});
+      b.addEventListener('click', () => { repo = value; try { localStorage.setItem('fletchery-live-repo', repo); } catch (e) { /* ignore */ } if (last) draw(last); });
+      return b;
+    };
+    box.replaceChildren(chip('', 'All projects'), ...names.map(n => chip(n, n.split('/')[1] || n)));
+  }
+  const mine = x => !repo || !x.repo || x.repo === repo;
+  function draw(full) {
+    repoChips(full);
+    const d = repo ? {...full, blockers: (full.blockers || []).filter(mine), runs: (full.runs || []).filter(mine),
+                      prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
+    stats(full);
     const blk = d.blockers || [];
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';

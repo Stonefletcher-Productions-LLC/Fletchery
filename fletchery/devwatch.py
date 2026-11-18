@@ -116,13 +116,16 @@ class GitHub:
         self.calls = 0          # requests that counted against the limit
         self.free = 0           # 304s
         self._token = ""
+        self._token_at = 0.0
         self._lock = threading.Lock()
         self.via = "https"          # or "gh" once direct HTTPS fails on this machine
         self.gh_cmd = "gh"          # None: never fall back (tests)
 
     def token(self) -> str:
-        if not self._token:
-            self._token = self.token_fn() or ""
+        """Read again every 10 minutes: a `gh auth refresh` (new scopes) must reach the feed without a restart."""
+        if not self._token or time.time() - self._token_at > 600:
+            self._token = self.token_fn() or self._token
+            self._token_at = time.time()
         return self._token
 
     def get(self, path: str):
@@ -426,7 +429,7 @@ class DevWatch:
     def _poll_runners(self, where: tuple):
         kind, name = where
         try:
-            data = self._try(f"{kind}/{name}/actions/runners?per_page=100", quiet_for=3600)
+            data = self._try(f"{kind}/{name}/actions/runners?per_page=100", quiet_for=600)
         except GitHubError:
             return self.runners.get(name)     # keep the last answer through a hiccup
         if data is None:
@@ -456,15 +459,18 @@ class DevWatch:
             runs_by, jobs_by, prs_by, checks_by, issues_by, runners_by = (self.runs, self.jobs, self.prs, self.checks,
                                                                            self.issues, self.runners)
 
-        def block(kind, title, detail="", url="", since=""):
-            blockers.append({"kind": kind, "title": _text(title, 200), "detail": _text(detail), "url": _web(url), "since": since})
+        def block(kind, title, detail="", url="", since="", key="", repo=""):
+            """`key` stays the same while the same thing is stuck (titles carry minutes that change), so a phone is
+            told once; `repo` lets the page filter by project."""
+            blockers.append({"kind": kind, "key": _text(key or f"{kind}:{title}", 200), "title": _text(title, 200), "detail": _text(detail),
+                             "url": _web(url), "since": since, "repo": _text(repo, 140)})
 
         # GitHub feed itself
         feed_age = _age(self.last_ok, at) if self.last_ok else _age(self.started, at)
         if self.error:
-            block("feed", "GitHub can't be read right now", self.error, since=self.last_ok)
+            block("feed", "GitHub can't be read right now", self.error, since=self.last_ok, key="feed")
         elif feed_age > max(180, self.interval * 4):
-            block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=self.last_ok)
+            block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=self.last_ok, key="feed")
 
         # jobs per runner (from runs still going)
         repo_of_run = {}
@@ -490,12 +496,12 @@ class DevWatch:
                 label = f"{row['name']}" + (f" · PR #{prn}" if prn else "")
                 if row["status"] == "queued" and _age(row["created"], at) > LIMITS["queued_run"]:
                     block("stuck", f"{label} has waited {int(_age(row['created'], at) // 60)} min for a runner",
-                          f"{repo}: no free runner with its labels picked it up.", row["url"], row["created"])
+                          f"{repo}: no free runner with its labels picked it up.", row["url"], row["created"], f"queued:{repo}:{row['id']}", repo)
                 if row["step"] and _age(row["step_started"], at) > LIMITS["step"]:
                     block("stuck", f"{label}: step \"{row['step']}\" has run {int(_age(row['step_started'], at) // 60)} min",
-                          f"{repo} on {row['runner'] or 'a runner'}", row["url"], row["step_started"])
+                          f"{repo} on {row['runner'] or 'a runner'}", row["url"], row["step_started"], f"step:{repo}:{row['id']}:{row['step']}", repo)
                 elif row["status"] == "in_progress" and _age(row["started"], at) > LIMITS["job"]:
-                    block("stuck", f"{label} has run {int(_age(row['started'], at) // 3600)} h", repo, row["url"], row["started"])
+                    block("stuck", f"{label} has run {int(_age(row['started'], at) // 3600)} h", repo, row["url"], row["started"], f"long:{repo}:{row['id']}", repo)
         runs_out.sort(key=lambda x: (x["status"] not in ACTIVE, -_ts(x["updated"])))
 
         running_by_runner = {r["runner"].lower(): r for r in runs_out if r["status"] in ACTIVE and r["runner"]}
@@ -516,7 +522,7 @@ class DevWatch:
                                 "step": job["step"], "url": job["url"], "started": job["started"]} if job else None)}
                 runners_out.append(row)
                 if not row["online"]:
-                    block("runner", f"Runner {row['name']} is offline", f"{row['machine']} · {', '.join(labels)}")
+                    block("runner", f"Runner {row['name']} is offline", f"{row['machine']} · {', '.join(labels)}", key=f"runner:{row['name']}")
         known = {r["name"].lower() for r in runners_out}
         for name, job in running_by_runner.items():   # runners seen only through their jobs (no admin:org)
             if name not in known:
@@ -548,13 +554,15 @@ class DevWatch:
                 prs_out.append(row)
                 if failed and not row["draft"]:
                     block("check", f"PR #{row['number']} check failed: {', '.join(row['checks']['failed'][:2])}",
-                          f"{repo} · {row['title']}", row["checks"]["url"] or row["url"], max((c.get("completed_at") or "") for c in failed))
+                          f"{repo} · {row['title']}", row["checks"]["url"] or row["url"], max((c.get("completed_at") or "") for c in failed),
+                          f"check:{repo}:{row['number']}:{sha}", repo)
                 for c in going:
                     if c.get("status") == "in_progress" and _age(c.get("started_at"), at) > LIMITS["check"]:
                         block("stuck", f"PR #{row['number']} check \"{_text(c.get('name'), 60)}\" has run {int(_age(c.get('started_at'), at) // 60)} min",
-                              repo, _web(c.get("html_url")) or row["url"], c.get("started_at") or "")
+                              repo, _web(c.get("html_url")) or row["url"], c.get("started_at") or "", f"checklong:{repo}:{c.get('id')}", repo)
                 if any(BLOCKED_LABEL.search(lab) for lab in labels):
-                    block("label", f"PR #{row['number']} is marked blocked", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"])
+                    block("label", f"PR #{row['number']} is marked blocked", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
+                          f"label:{repo}:{row['number']}", repo)
         order = {"failed": 0, "running": 1, "queued": 2, "none": 3, "passed": 4}
         prs_out.sort(key=lambda r: (r["draft"], order.get(r["checks"]["state"], 5), -_ts(r["updated"])))
 
@@ -567,7 +575,8 @@ class DevWatch:
                        "blocked": any(BLOCKED_LABEL.search(lab) for lab in labels)}
                 issues_out.append(row)
                 if row["blocked"]:
-                    block("label", f"#{row['number']} is blocked: {row['title']}", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"])
+                    block("label", f"#{row['number']} is blocked: {row['title']}", f"{repo} · {', '.join(labels[:3])}", row["url"], row["updated"],
+                          f"label:{repo}:{row['number']}", repo)
         issues_out.sort(key=lambda r: -_ts(r["updated"]))
 
         rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
@@ -605,20 +614,20 @@ class DevWatch:
                 held = _age(lease.get("since"), at)
                 if lease.get("alive") is False:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" holds the machine but its process is gone",
-                          "Nothing else can start there until the stale hold is cleared.", since=lease.get("since") or "")
+                          "Nothing else can start there until the stale hold is cleared.", since=lease.get("since") or "", key=f"deadhold:{host}:{lease.get('since')}")
                 elif held > LIMITS["lease"]:
-                    block("stuck", f"{self.display(host)}: \"{purpose}\" has held the machine {int(held // 3600)} h", "", since=lease.get("since") or "")
+                    block("stuck", f"{self.display(host)}: \"{purpose}\" has held the machine {int(held // 3600)} h", "", since=lease.get("since") or "", key=f"longhold:{host}:{lease.get('since')}")
                 idle = float(d.get("idle_seconds") or 0)
                 if idle > LIMITS["idle_lease"]:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" holds the machine but the CPU has been idle {int(idle // 60)} min",
-                          "It may be stuck waiting on something.", since=lease.get("since") or "")
+                          "It may be stuck waiting on something.", since=lease.get("since") or "", key=f"idlehold:{host}:{lease.get('since')}")
             for q in (d.get("queue") or [])[:10]:
                 if not isinstance(q, dict):
                     continue
                 purpose = _scrub(q.get("purpose"), 200)
                 acts.append({"kind": "queued", "title": purpose, "since": _text(q.get("since"), 30), "detail": "waiting for the machine"})
                 if _age(q.get("since"), at) > LIMITS["queue_wait"]:
-                    block("stuck", f"{self.display(host)}: \"{purpose}\" has waited {int(_age(q.get('since'), at) // 60)} min in the queue", since=q.get("since") or "")
+                    block("stuck", f"{self.display(host)}: \"{purpose}\" has waited {int(_age(q.get('since'), at) // 60)} min in the queue", since=q.get("since") or "", key=f"queue:{host}:{q.get('since')}:{purpose}")
             for a in (d.get("activities") or [])[:10]:
                 if isinstance(a, dict) and a.get("title"):
                     acts.append({"kind": _text(a.get("kind") or kind_of(a.get("title")), 20), "title": _scrub(a.get("title"), 200),
@@ -629,7 +638,7 @@ class DevWatch:
                              "since": "", "detail": ""})
             silent = age > REPORT_STALE
             if silent and age < REPORT_GONE:
-                block("machine", f"{self.display(host)} stopped reporting", f"Last report {int(age)} s ago.", since=rep["at"])
+                block("machine", f"{self.display(host)} stopped reporting", f"Last report {int(age)} s ago.", since=rep["at"], key=f"machine:{host}")
             by[host.lower()] = {"name": self.display(host), "host": host, "online": not silent, "last_report": rep["at"],
                                 "busy": bool(acts and any(a["kind"] not in ("queued",) for a in acts)) or bool(procs.get("runner")),
                                 "stats": {k: stats.get(k) for k in ("cpu", "ram_used_gb", "ram_total_gb") if isinstance(stats.get(k), (int, float))},

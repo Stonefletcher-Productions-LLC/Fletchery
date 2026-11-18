@@ -964,6 +964,7 @@
 <aside class="sidebar" aria-label="Main navigation">
   <div class="sidebar-brand"><span class="brandmark" aria-hidden="true">ϟ</span> Fletchery<button id="navToggle" type="button" aria-label="Collapse the menu" title="Collapse the menu to icons">«</button></div>
   <nav aria-label="Workspace">
+    <a href="#live" data-view="live"><span class="nav-icon" aria-hidden="true">◉</span>Live</a>
     <a href="#overview" data-view="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">⌂</span>Overview</a>
     <a href="#tasks" data-view="tasks"><span class="nav-icon" aria-hidden="true">☷</span>Tasks<span class="nav-count" id="navTasks" hidden></span></a>
     <a href="#merge" data-view="merge"><span class="nav-icon" aria-hidden="true">◆</span>Merging</a>
@@ -1014,6 +1015,7 @@
   <div class="banner hold" id="holdBanner" role="status"></div>
   <div class="banner down" id="downBanner" role="alert"></div>
 
+  <section class="view" id="view-live" aria-label="Live" hidden><iframe id="liveFrame" title="Live: every machine, runner, Actions run, PR and issue" style="display:block;width:100%;height:calc(100vh - 24px);border:0;border-radius:12px"></iframe></section>
   <section class="view" id="view-overview" aria-labelledby="overviewHeading">
     <div class="page-heading"><h2 id="overviewHeading">Overview</h2><p>Work in progress, at a glance.</p></div>
     <section class="needs-strip" id="needsStrip" aria-labelledby="needsHeading" hidden><h3 id="needsHeading">Needs you <span id="attentionCount"></span></h3><ul class="needs-list" id="attentionPreview"></ul><a href="#tasks">View all →</a></section>
@@ -1436,7 +1438,7 @@ $("agentsMount").append(document.querySelector(".usage"), $("agents"));
 $("activityMount").append($("lowerBox"));
 $("sidebarBottom").prepend($("settingsBtn"));
 const viewAliases = {testing: "test", queue: "tasks", board: "tasks", boardBox: "tasks", workers: "overview", lane: "build", log: "activity", lowerBox: "activity"};
-const viewNames = ["overview", "tasks", "merge", "test", "build", "agents", "activity"];
+const viewNames = ["live", "overview", "tasks", "merge", "test", "build", "agents", "activity"];
 let currentView = "";
 function showView(name, remember = true) {
   name = viewAliases[name] || name;
@@ -1444,12 +1446,13 @@ function showView(name, remember = true) {
   // A different view opens at its top, not at the previous view's scroll position.
   const changed = currentView && currentView !== name;
   currentView = name;
-  if (name === "merge") $("mergePageMount").append($("mergeCard"));  // the Overview shows its Merging lane card instead
+  if (name === "merge") $("mergePageMount").append($("mergeCard"));
+  if (name === "live" && !$("liveFrame").src) $("liveFrame").src = "http://127.0.0.1:" + (window.lastPortalPort || 8772) + "/#live";  // the Overview shows its Merging lane card instead
   document.querySelectorAll(".view").forEach(el => { el.hidden = el.id !== "view-" + name; });
   document.querySelectorAll("[data-view]").forEach(a => {
     if (a.dataset.view === name) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
   });
-  if (remember) { try { localStorage.setItem("fletchery.view", name); } catch (_) {} }
+  if (remember) { try { localStorage.setItem("fletchery.view2", name); } catch (_) {} }
   if (changed) window.scrollTo({left: 0, top: 0, behavior: "instant"});
 }
 function routeView() { showView(location.hash.slice(1)); }
@@ -1459,8 +1462,8 @@ document.addEventListener("click", e => {
   if (link) showView(link.getAttribute("href").slice(1));
   if (link && link.dataset.scroll) { e.preventDefault(); $(link.dataset.scroll).scrollIntoView({block: "start"}); }
 });
-let savedView = "overview";
-try { savedView = localStorage.getItem("fletchery.view") || savedView; } catch (_) {}
+let savedView = "live";   // Live first since 2026-11-18 (the coder agents are retired); "view2" so an old saved view doesn't hide it
+try { savedView = localStorage.getItem("fletchery.view2") || savedView; } catch (_) {}
 showView(viewAliases[location.hash.slice(1)] || location.hash.slice(1) || savedView, false);
 const systemTheme = matchMedia("(prefers-color-scheme: dark)");
 let themeChoice = "system";
@@ -1692,6 +1695,11 @@ function workerMergeWait(d) {
 }
 
 function render(d) {
+  if (d && d.portal_port) window.lastPortalPort = d.portal_port;
+  // Coder agents and merge rounds switched off (workers.enabled false): their views leave the menu; Live leads.
+  const engine = !d || d.workers_enabled !== false;
+  document.querySelectorAll('[data-view="overview"],[data-view="tasks"],[data-view="merge"],[data-view="test"],[data-view="agents"]').forEach(a => { a.hidden = !engine; });
+  if (!engine && ["overview", "tasks", "merge", "test", "agents"].includes(currentView)) showView("live");
   const {scrollX, scrollY} = window;
   const panels = [...document.querySelectorAll(".slots-scroll, .scroll, .hist, .log")]
     .filter(panel => panel.scrollTop || panel.scrollLeft)

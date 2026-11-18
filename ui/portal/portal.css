@@ -107,7 +107,7 @@ a.title::after { content: " ›"; color: var(--muted); }
 .log time { color: var(--muted); margin-right: 6px; }
 
 .tabs {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; display: grid; grid-template-columns: repeat(5, 1fr);
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
   background: var(--panel); border-top: 1px solid var(--rule); padding-bottom: env(safe-area-inset-bottom);
 }
 .tabs button {
@@ -166,3 +166,6 @@ dialog li { margin: 4px 0; }
 #liveBlockersCard.calm { border-color: var(--rule); }
 #liveBlockersCard:not(.calm) { border-color: var(--blocked); background: var(--blocked-bg); }
 #liveBlockersCard:not(.calm) h2 { color: var(--blocked); }
+.filters { display: flex; gap: 6px; overflow-x: auto; margin: 0 0 10px; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+.filters button { flex: none; min-height: 40px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); font-size: 14px; font-weight: 600; }
+.filters button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
