@@ -230,8 +230,9 @@ def kind_of(purpose: str) -> str:
 class GitHub:
     """GETs with ETags. A 304 is free and answers with the copy kept from last time."""
 
-    def __init__(self, token_fn, log=None, timeout: float = 20):
+    def __init__(self, token_fn, log=None, timeout: float = 20, cli_env=None):
         self.token_fn = token_fn
+        self.cli_env = cli_env or (lambda: None)
         self.log = log or (lambda line: None)
         self.timeout = timeout
         self.cache: dict[str, tuple[str, object]] = {}
@@ -320,7 +321,7 @@ class GitHub:
         if etag:
             cmd += ["-H", f"If-None-Match: {etag}"]
         try:
-            out = subprocess.run(cmd + [path], capture_output=True, timeout=self.timeout + 10,
+            out = subprocess.run(cmd + [path], capture_output=True, env=self.cli_env(), timeout=self.timeout + 10,
                                  creationflags=0x08000000 if os.name == "nt" else 0)
         except (OSError, subprocess.SubprocessError) as e:
             raise GitHubError(0, f"gh could not be run: {e}"[:300])

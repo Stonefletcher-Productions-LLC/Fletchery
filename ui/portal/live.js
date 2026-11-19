@@ -438,6 +438,7 @@
     const cur = list.find(p => key(p) === repo);
     if (repo && !cur) repo = '';
     picked = new Set(cur ? cur.repos : []);
+    $('scopeName').textContent = cur ? cur.name : 'All projects';
     const box = $('liveRepos');
     box.hidden = list.length < 2;
     const chip = (value, label) => {
@@ -449,6 +450,16 @@
   }
   const mine = x => !repo || !x.repo || picked.has(x.repo);
   function draw(full) {
+    if (full.github_login) {
+      try {
+        const previous = localStorage.getItem('fletchery-live-login');
+        if (previous && previous !== full.github_login) {
+          repo = '';
+          localStorage.removeItem('fletchery-live-repo');
+        }
+        localStorage.setItem('fletchery-live-login', full.github_login);
+      } catch (e) { /* storage unavailable */ }
+    }
     repoChips(full);
     const d = repo ? {...full, problems: (full.problems || []).filter(mine), blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
@@ -485,7 +496,7 @@
     $('n-lchg').textContent = changes.length ? '(' + changes.length + ')' : '';
     $('liveChangesCard').classList.toggle('calm', !changes.length);
     fill($('liveChanges'), changes.map(changeRow), 'No open or recently merged changes.');
-    const agents = (full.agents || []).filter(x => !repo || x.repo === repo);
+    const agents = (full.agents || []).filter(x => !repo || picked.has(x.repo));
     $('n-lagents').textContent = agents.length ? '(' + agents.length + ')' : '';
     $('liveAgentsCard').classList.toggle('calm', !agents.length);
     fill($('liveAgents'), agents.map(agentRow), 'No Claude or Codex agent is working right now.');

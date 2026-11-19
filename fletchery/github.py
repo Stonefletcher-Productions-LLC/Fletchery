@@ -30,9 +30,10 @@ _NEVER_CONNECTED = ("connectex", "connection refused", "no such host", "temporar
 
 
 class GitHub:
-    def __init__(self, repo: str, gh: str = "gh"):
+    def __init__(self, repo: str, gh: str = "gh", cli_env=None):
         self.repo = repo
         self.gh = gh
+        self.cli_env = cli_env or (lambda: None)
 
     # ---- raw ----
     def _request(self, path: str, method: str = "GET", body: dict | None = None, paginate: bool = False) -> str:
@@ -49,7 +50,7 @@ class GitHub:
             if attempt and method != "GET":
                 time.sleep(2 * attempt)
             try:
-                p = subprocess.run(cmd, input=json.dumps(body) if body is not None else None, capture_output=True, text=True,
+                p = subprocess.run(cmd, env=self.cli_env(), input=json.dumps(body) if body is not None else None, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace", timeout=15 if method == "GET" else 90)
             except subprocess.TimeoutExpired as e:
                 if method == "GET" and attempt + 1 < attempts:  # a write that timed out may have landed

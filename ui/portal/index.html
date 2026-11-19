@@ -19,7 +19,7 @@
 <body>
 <header class="top">
   <div class="top-row">
-    <h1 id="project">Fletchery</h1>
+    <h1 id="project"><button type="button" id="accountPick" aria-haspopup="dialog" hidden></button><span id="accountSep" aria-hidden="true" hidden> // </span>Fletchery // <span id="scopeName">All projects</span></h1>
     <button type="button" class="icon-btn" id="refreshTop" aria-label="Refresh now" title="Refresh now">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M17.7 6.3A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.3L13 11h7V4z" fill="currentColor"/></svg>
     </button>
@@ -121,6 +121,12 @@
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 
+<dialog id="accountDialog" aria-labelledby="accountTitle"><h2 id="accountTitle">Switch GitHub account</h2>
+  <p>This changes the sign-in for the dashboard on every screen.</p>
+  <label>Account <select id="accountList"></select></label>
+  <p role="status" id="accountMsg"></p>
+  <div class="actions"><button type="button" id="accountApply" disabled>Switch account</button><button type="button" id="accountClose">Close</button></div>
+</dialog>
 <dialog id="notify" aria-labelledby="h-notify">
   <h2 id="h-notify">Notifications</h2>
   <p id="notifyText">Checking…</p>

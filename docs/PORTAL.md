@@ -12,6 +12,8 @@ read-only, set `"controls": false` in `workers.portal`.
 <p><img src="images/fletchery/portal-live.png" width="260" alt="The phone portal's Live tab (demo data)">
   <img src="images/fletchery/portal-live-dark.png" width="260" alt="The same in dark mode"></p>
 
+The heading shows the backend’s GitHub sign-in, Fletchery, and the project selected on this screen. Choose **All projects** to return to the combined view. On a screen with controls, select the login to choose another account already signed into GitHub CLI on the backend PC. Confirming the switch reopens the supervised Fletchery backend under that login for every screen, including GitHub reads, Actions controls, and release publishing. Other applications keep their own sign-in. The backend saves the login name and reads its credential from GitHub CLI. Each additional account has a separate Live history. Build scheduling and machines still belong to the same project profile.
+
 ## How it is kept safe
 
 - **Private network only.** The portal listens on `127.0.0.1` on the PC. [Tailscale Serve](https://tailscale.com/kb/1312/serve)

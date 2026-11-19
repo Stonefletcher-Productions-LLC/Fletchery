@@ -154,7 +154,7 @@ def summary(status: dict) -> dict:
                          "paused": [_text(k, 20) for k in (x.get("paused_work") or [])[:8]],
                          "job": _job(x["job"]) if x.get("job") else None})
     jobs = [_job(j) for j in (m.get("jobs") or [])[:40]]
-    return {"project": _text(s.get("project"), 80), "repo": _text(s.get("repo"), 140),
+    return {"github_login": _text(s.get("github_login"), 39), "project": _text(s.get("project"), 80), "repo": _text(s.get("repo"), 140),
             "at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()), "started": _text(s.get("started"), 40),
             "version": _text(s.get("version"), 20),
             "base": _text(b.get("base"), 80), "build_machines": [_text(n, 60) for n in (b.get("nodes") or [])[:20]],
@@ -183,7 +183,7 @@ class Portal:
     action gets `_from` in its data: "the window" or "the phone (<login>)", for the activity log."""
 
     def __init__(self, status_fn, conf: dict, state_dir=None, log=None, repo: str = "", host: str = "127.0.0.1",
-                 desktop_port: int = 0, actions: dict | None = None, job_log=None, layout=None):
+                 desktop_port: int = 0, actions: dict | None = None, job_log=None, layout=None, accounts=None):
         self.status_fn = status_fn
         self.conf = conf
         self.port = int(conf.get("port") or 0)
@@ -191,6 +191,7 @@ class Portal:
         self.desktop_port = int(desktop_port or 0)
         self.actions = dict(actions or {})
         self.job_log = job_log
+        self.accounts = accounts
         self.layout = layout       # layout.Layout: where the cards sit (GET/POST /api/layout)
         self.host = host
         self.log = log or (lambda line: None)
@@ -202,7 +203,9 @@ class Portal:
         self.live = None
         if conf.get("live") is not None:
             import devwatch
-            self.live = devwatch.DevWatch(conf["live"], self.log, state_dir=state_dir)
+            client = devwatch.GitHub(accounts.token, self.log, cli_env=accounts.cli_env) if accounts else None
+            self.live = devwatch.DevWatch(conf["live"], self.log, github=client,
+                                          state_dir=accounts.live_directory() if accounts else state_dir)
         self.push = None
         if conf.get("push") is not None and state_dir is not None:
             import push
@@ -235,7 +238,10 @@ class Portal:
         with self._lock:
             at, body = self._live_cache
             if time.monotonic() - at > 2 or not body:
-                body = json.dumps(self.live.snapshot()).encode("utf-8")
+                snapshot = self.live.snapshot()
+                if self.accounts:
+                    snapshot["github_login"] = self.accounts.login
+                body = json.dumps(snapshot).encode("utf-8")
                 self._live_cache = (time.monotonic(), body)
             return body
 
@@ -394,6 +400,14 @@ class Portal:
                     if not desktop:
                         text = _scrub(text)   # folder paths stay on this PC
                     return self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
+                if path == "/api/github/accounts":
+                    may, _ = portal.can_act(self.headers, port, path)
+                    if not may or portal.accounts is None:
+                        return self._json(403, {"error": "This screen cannot switch GitHub accounts."})
+                    try:
+                        return self._json(200, {"logins": portal.accounts.choices()})
+                    except (ValueError, OSError):
+                        return self._json(503, {"error": "GitHub sign-ins are unavailable."})
                 if path == "/api/layout":
                     may, _ = portal.can_act(self.headers, port, path)
                     saved = portal.layout.read() if portal.layout is not None else None
