@@ -163,7 +163,7 @@ def summary(status: dict) -> dict:
             "restarting": _text(s.get("restarting"), 200),
             "builds": builds, "machines": machines, "jobs": jobs,
             "scratch": {k: (_text(_scrub(v), 200) if isinstance(v, str) else v) for k, v in (s.get("scratch") or {}).items()
-                        if k in ("checked_at", "mode", "error", "freed_gb", "trimmed", "quarantined", "removed")},
+                        if k in ("checked_at", "mode", "error", "waiting", "freed_gb", "trimmed", "quarantined", "removed")},
             "log": [{"at": _text(r.get("at"), 40), "line": _text(_scrub(r.get("line")), 300)}
                     for r in (s.get("log") or [])[-120:] if isinstance(r, dict)]}
 
