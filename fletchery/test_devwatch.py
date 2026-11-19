@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -523,6 +524,115 @@ class Feed(unittest.TestCase):
             w.poll()
         self.assertEqual(len(w.prs[REPO]), 2)
         self.assertIn("feed", [b["kind"] for b in w.snapshot()["blockers"]])
+
+    def test_pr_rows_survive_detail_timeout_and_a_truncated_later_inventory(self):
+        w = self.watch()
+        path = f"repos/{REPO}/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        details = f"repos/{REPO}/actions/runs?per_page=20"
+        unavailable = devwatch.GitHubError(0, "timed out")
+        first_page = [{"number": n} for n in range(1, 51)]
+        w.gh.answers = {path + "&page=2": [{"number": 51}], path: first_page, details: unavailable, **w.gh.answers}
+        w.gh.asked.clear()
+        with self.assertRaises(devwatch.GitHubError):
+            w.poll()
+        s = w.snapshot()
+        self.assertLess(w.gh.asked.index(path + "&page=2"), w.gh.asked.index(details))
+        self.assertEqual((s["open_pr_counts"], len(s["prs"]), s["counts"]["prs"]), ({REPO: 51}, 51, 51))
+        confirmed = s["pr_count_status"]["stale"][REPO]
+        self.assertTrue(confirmed)
+        for truncated in (unavailable, None, {"error": "missing page"}, [{"number": 2}]):
+            w.gh.answers[path + "&page=2"] = truncated
+            with self.assertRaises(devwatch.GitHubError):
+                w.poll()
+            s = w.snapshot()
+            self.assertEqual(s["open_pr_counts"], {REPO: 51})
+            self.assertEqual(len(s["prs"]), 51)
+            self.assertEqual(s["pr_count_status"], {"partial": True, "inventory_complete": True, "stale": {REPO: confirmed}})
+        w.gh.answers = {path: [], **world()}
+        w.poll()
+        s = w.snapshot()
+        self.assertEqual(s["open_pr_counts"], {REPO: 0})
+        self.assertEqual(s["pr_count_status"], {"partial": False, "inventory_complete": True, "stale": {}})
+        self.assertEqual((s["prs"], s["counts"]["prs"]), ([], 0))
+
+    def test_saved_count_requires_current_account_and_confirmed_repository_inventory(self):
+        unavailable = devwatch.GitHubError(0, "timed out")
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as opened:
+            def make(account, answers):
+                watch = devwatch.DevWatch({}, github=FakeGitHub(answers), state_dir=directory, count_account=account)
+                opened.callback(watch.store.close)
+                watch._backfilled.add(REPO)
+                return watch
+
+            w = make("first", world())
+            w.poll()
+            w.store.save_pr_counts("first", {"Acme/PrivateRemoved": (75, ago(5))})
+            w.store.save_pr_counts("second", {REPO: (7, ago(5))})
+            for account, expected in (("first", 2), ("second", 7), ("new", None)):
+                w = make(account, {"user/repos": unavailable})
+                with self.assertRaises(devwatch.GitHubError):
+                    w.poll()
+                s = w.snapshot()
+                self.assertEqual((s["open_pr_counts"], s["counts"]["prs"]), ({}, None))
+                self.assertEqual(s["pr_count_status"], {"partial": True, "inventory_complete": False, "stale": {}})
+                w.gh.answers = {f"repos/{REPO}/pulls?state=open": unavailable, **world()}
+                with self.assertRaises(devwatch.GitHubError):
+                    w.poll()
+                s = w.snapshot()
+                self.assertEqual(s["open_pr_counts"], {REPO: expected} if expected is not None else {})
+                self.assertEqual(s["counts"]["prs"], expected)
+                self.assertEqual(bool(s["pr_count_status"]["stale"][REPO]), expected is not None)
+
+    def test_runner_timeout_marks_only_the_affected_repository(self):
+        other = "Acme/Other"
+        github = world()
+        github["user/repos"].append({"full_name": other, "owner": {"login": ORG}, "pushed_at": ago(1)})
+        github[f"repos/{other}/pulls?state=open"] = []
+        github[f"repos/{REPO}/actions/runners"] = devwatch.GitHubError(0, "timed out")
+        w = devwatch.DevWatch(github=FakeGitHub(github))
+        w.poll()
+        s = w.snapshot()
+        self.assertEqual(s["open_pr_counts"], {REPO: 2, other: 0})
+        self.assertEqual(set(s["pr_count_status"]["stale"]), {REPO})
+
+    def test_inventory_timeout_then_removal_is_atomic_and_clears_stale_state(self):
+        w = self.watch()
+        w.repos_at = 0
+        w.gh.answers["user/repos"] = devwatch.GitHubError(0, "discovery timeout")
+        with self.assertRaises(devwatch.GitHubError):
+            w.poll()
+        old = w.snapshot()
+        self.assertEqual(old["open_pr_counts"], {REPO: 2})
+        self.assertFalse(old["pr_count_status"]["inventory_complete"])
+        self.assertTrue(old["pr_count_status"]["stale"][REPO])
+        other = "Acme/Other"
+        w.gh.answers = world(**{"user/repos": [{"full_name": other, "owner": {"login": ORG}, "pushed_at": ago(1)}],
+                                f"repos/{other}/pulls?state=open": []})
+        started, resume = threading.Event(), threading.Event()
+        read_repo = w._read_repo
+
+        def pending_details(repo, prs):
+            started.set()
+            if not resume.wait(10):
+                raise RuntimeError("test detail read timed out")
+            return read_repo(repo, prs)
+
+        w._read_repo = pending_details
+        worker = threading.Thread(target=w.poll)
+        worker.start()
+        try:
+            self.assertTrue(started.wait(5))
+            pending = w.snapshot()
+            for key in ("repos", "open_pr_counts", "prs", "pr_count_status"):
+                self.assertEqual(pending[key], old[key])
+        finally:
+            resume.set()
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        s = w.snapshot()
+        self.assertEqual(s["open_pr_counts"], {other: 0})
+        self.assertEqual(s["prs"], [])
+        self.assertEqual(s["pr_count_status"], {"partial": False, "inventory_complete": True, "stale": {}})
 
     def test_no_admin_scope_still_shows_runners_from_jobs(self):
         w = self.watch(**{f"orgs/{ORG}/actions/runners": devwatch.GitHubError(403, "Must have admin rights")})

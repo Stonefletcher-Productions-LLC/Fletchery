@@ -35,6 +35,7 @@ Profile, under `workers.portal` (all optional):
 Standard library only."""
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -295,7 +296,10 @@ class GitHub:
         with self._lock:
             self.calls += 1
         if 200 <= code < 300:
-            data = json.loads(body or b"null")
+            try:
+                data = json.loads(body or b"null")
+            except ValueError as e:
+                raise GitHubError(0, "GitHub returned an incomplete JSON response") from e
             if headers.get("ETag"):
                 with self._lock:
                     if len(self.cache) > 4000 and url not in self.cache:   # bounded: old URLs (finished runs) drop out
@@ -324,7 +328,7 @@ class GitHub:
                 return r.status, _Headers(r.headers.items()), r.read()
         except urllib.error.HTTPError as e:
             return e.code, _Headers((e.headers or {}).items()), e.read()
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
+        except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, OSError) as e:
             raise GitHubError(0, f"GitHub could not be reached: {getattr(e, 'reason', None) or e}"[:300])
 
     def _gh(self, url: str, etag: str):
@@ -437,7 +441,7 @@ def _runner_job(run: dict) -> dict:
 
 class DevWatch:
     def __init__(self, conf: dict | None = None, log=None, token_fn=gh_token, github: GitHub | None = None,
-                 state_dir=None):
+                 state_dir=None, count_account=""):
         conf = conf or {}
         self.log = log or (lambda line: None)
         self.owners = {str(o).lower() for o in conf.get("owners") or []}
@@ -466,6 +470,10 @@ class DevWatch:
         self._wake = threading.Event()
         self.repos: list[dict] = []
         self.repos_at = 0.0
+        self.count_account = count_account
+        self.pr_counts = {}                  # watched repo -> (last complete PR count, confirmation time)
+        self.stale_counts = {}               # affected watched repo -> confirmation time, or "" if unknown
+        self.inventory_complete = False
         self.runners: dict[str, list] = {}          # owner or repo -> runners
         self.runner_note = ""
         self.runs: dict[str, list] = {}             # repo -> recent runs
@@ -597,30 +605,58 @@ class DevWatch:
     def poll(self) -> None:
         self.last_try = now_iso()
         gh = self.gh
-        if time.time() - self.repos_at > 600 or not self.repos:
-            self.repos = self._discover()
-            self.repos_at = time.time()
-        names = [r["full_name"] for r in self.repos]
-        orgs = sorted({r["owner"] for r in self.repos if r.get("org")})
+        repos, discovered_at, known = self.repos, self.repos_at, self.pr_counts
+        if not self.inventory_complete or time.time() - discovered_at > 600:
+            try:
+                repos = self._discover()
+            except GitHubError as e:
+                with self._lock:
+                    self.inventory_complete = False
+                    self.stale_counts = {r["full_name"]: known.get(r["full_name"], (None, ""))[1] for r in repos}
+                    self.error = str(e)[:300]
+                raise
+            discovered_at = time.time()
+            # Current discovery authorizes which saved values can be published after a restart.
+            known = {**self.store.saved_pr_counts(self.count_account), **known}
+        names = [r["full_name"] for r in repos]
+        orgs = sorted({r["owner"] for r in repos if r.get("org")})
         with ThreadPoolExecutor(max_workers=6) as pool:
-            got = dict(zip(names, pool.map(self._poll_repo, names)))
+            inventories = dict(zip(names, pool.map(self._poll_open_prs, names)))
+            got = dict(zip(names, pool.map(self._poll_repo, names, (inventories[repo][0] for repo in names))))
             # Organisation runners need admin:org; runners registered on one repository are listed there, so every
             # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
-            places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
+            places = [("orgs", o) for o in orgs] + [("repos", repo) for repo in names]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
         runs, jobs, prs, checks, issues, pushes, closed, merged, releases, bases = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
-        errors = [g["error"] for g in got.values() if g.get("error")]
+        refreshed, counts, stale, errors = {}, {}, {}, []
         for repo, g in got.items():
+            rows, confirmed, pr_error = inventories[repo]
+            if confirmed:
+                counts[repo] = refreshed[repo] = (len(rows), confirmed)
+            elif repo in known:
+                counts[repo] = known[repo]
+            error = pr_error or g.get("error") or found[repo][1]
+            if error:
+                stale[repo] = counts.get(repo, (None, ""))[1]
+                errors.append(error)
+                g["error"] = error
             runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
             closed[repo], merged[repo], releases[repo] = g.get("closed") or [], g.get("merged") or [], g.get("releases") or []
             bases[repo] = g.get("bases", self.bases.get(repo, {}))
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
+            self.repos, self.repos_at, self.inventory_complete = repos, discovered_at, True
+            self.pr_counts, self.stale_counts = counts, stale
+            self.error = ("; ".join(errors))[:300]
+            if not errors or len(errors) < len(got):
+                self.last_ok = now_iso()
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
-            self.runners = {k: v for k, v in found.items() if v is not None}
+            self.runners = {k: rows for k, (rows, _) in found.items() if rows is not None}
+        if refreshed:
+            self.store.save_pr_counts(self.count_account, refreshed)
         for repo in names:          # nothing known about a repository's times yet: learn from its past runs, once
             if self.history.path and repo not in self._backfilled and not self.history.estimate(("build", repo))[1]:
                 self._backfilled.add(repo)
@@ -639,20 +675,21 @@ class DevWatch:
         if 0 <= gh.remaining < 300:      # running low: stretch until the hour resets
             self.interval = max(self.interval, min(600.0, max(60.0, gh.reset_at - time.time())))
         if errors and len(errors) == len(got):
-            self.error = errors[0][:300]
             raise GitHubError(0, errors[0])
-        self.error = ("; ".join(errors))[:300] if errors else ""
-        self.last_ok = now_iso()
 
     def _discover(self) -> list[dict]:
         out, page = [], 1
         cutoff = time.time() - self.active_days * 86400
-        while page <= 5:
+        seen = set()
+        while True:
             batch = self.gh.get(f"user/repos?affiliation=owner,collaborator,organization_member&sort=pushed&per_page=100&page={page}")
-            if not isinstance(batch, list) or not batch:
-                break
+            if not isinstance(batch, list) or any(not isinstance(r, dict) or not r.get("full_name") for r in batch):
+                raise GitHubError(0, "GitHub returned an incomplete repository list")
             for r in batch:
                 full = str(r.get("full_name") or "")
+                if full.lower() in seen:
+                    raise GitHubError(0, "The repository list changed during pagination. Retrying discovery.")
+                seen.add(full.lower())
                 owner = str((r.get("owner") or {}).get("login") or "")
                 if (not full or r.get("archived") or full.lower() in self.exclude
                         or (self.owners and owner.lower() not in self.owners)):
@@ -703,14 +740,33 @@ class DevWatch:
                 return missing_ref if missing else None
             raise
 
-    def _poll_repo(self, repo: str) -> dict:
-        """One repository's runs, jobs, PRs, checks and issues. One repository GitHub fails on keeps its last answers
-        (and says so) instead of blanking the rest."""
+    def _poll_open_prs(self, repo: str) -> tuple:
+        """Publish a repository's PR rows only after every page succeeds, including the terminal empty page."""
+        path = f"repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        pulls, page = {}, 1
         try:
-            return self._read_repo(repo)
+            while True:
+                batch = self.gh.get(path if page == 1 else f"{path}&page={page}")
+                if not isinstance(batch, list):
+                    raise GitHubError(0, "GitHub returned an incomplete open PR list")
+                for pr in batch:
+                    number = pr.get("number") if isinstance(pr, dict) else None
+                    if type(number) is not int or number <= 0 or number in pulls:
+                        raise GitHubError(0, "GitHub returned an inconsistent open PR list")
+                    pulls[number] = pr
+                if len(batch) < 50:
+                    return list(pulls.values()), now_iso(), ""
+                page += 1
+        except GitHubError as e:
+            return self.prs.get(repo, []), "", f"{repo}: {e}"
+
+    def _poll_repo(self, repo: str, prs: list) -> dict:
+        """A detail timeout keeps older check and issue data alongside the independent PR inventory."""
+        try:
+            return self._read_repo(repo, prs)
         except GitHubError as e:
             with self._lock:
-                old = {"runs": self.runs.get(repo, []), "prs": self.prs.get(repo, []), "issues": self.issues.get(repo, []),
+                old = {"runs": self.runs.get(repo, []), "prs": prs, "issues": self.issues.get(repo, []),
                        "pushes": self.pushes.get(repo, []), "closed": self.closed.get(repo, []),
                        "merged": self.merged.get(repo, []), "releases": self.releases.get(repo, []),
                        "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
@@ -768,8 +824,8 @@ class DevWatch:
                         samples.append((end - start, s["conclusion"]))
         return samples
 
-    def _read_repo(self, repo: str) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
+    def _read_repo(self, repo: str, prs: list) -> dict:
+        out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
                "merged_all": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
         if len(runs) == 20:
@@ -805,16 +861,6 @@ class DevWatch:
                 notes = self._try(f"repos/{repo}/check-runs/{job['id']}/annotations?per_page=20") or [] if job and job.get("id") else []
                 how, who = rules.cancel_reason(notes)
                 self.cancels[(repo, run["id"])] = {"how": how, "who": who}
-        path = f"repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50"
-        batch = self._try(path) or []
-        pulls = {p["number"]: p for p in batch}
-        page = 1
-        while len(batch) == 50:
-            page += 1
-            batch = self._try(f"{path}&page={page}") or []
-            pulls.update((p["number"], p) for p in batch)
-        prs = list(pulls.values())
-        out["prs"] = prs
         for pr in prs:
             sha = (pr.get("head") or {}).get("sha")
             if not sha:
@@ -948,15 +994,15 @@ class DevWatch:
         kind, name = where
         try:
             data = self._try(f"{kind}/{name}/actions/runners?per_page=100", quiet_for=RUNNER_REFUSED_RETRY)
-        except GitHubError:
-            return self.runners.get(name)     # keep the last answer through a hiccup
+        except GitHubError as e:
+            return self.runners.get(name), f"{name}: {e}"     # keep the last answer through a hiccup
         if data is None:
             if kind == "orgs":
                 self.runner_note = ("The GitHub sign-in on this PC cannot list the organisation's own runners (that needs "
                                     "`gh auth refresh -h github.com -s admin:org`). Runners added to a repository are listed; "
                                     "others show up through their jobs.")
-            return None
-        return data.get("runners") or []
+            return None, ""
+        return data.get("runners") or [], ""
 
     # ---- the snapshot ----
     def machine_of(self, runner_name: str, labels=()) -> str:
@@ -976,6 +1022,10 @@ class DevWatch:
         with self._lock:
             runs_by, jobs_by, prs_by, checks_by, issues_by, runners_by = (self.runs, self.jobs, self.prs, self.checks,
                                                                            self.issues, self.runners)
+            repos, inventory_complete, stale = self.repos, self.inventory_complete, self.stale_counts
+            counts = {repo: count for repo, (count, _) in self.pr_counts.items()}
+            last_ok, error = self.last_ok, self.error
+        projects = self.projects_now(repos)
 
         def block(kind, title, detail="", url="", since="", key="", repo=""):
             """`key` stays the same while the same thing is stuck (titles carry minutes that change), so a phone is
@@ -984,11 +1034,11 @@ class DevWatch:
                              "url": _web(url), "since": since, "repo": _text(repo, 140)})
 
         # GitHub feed itself
-        feed_age = _age(self.last_ok, at) if self.last_ok else _age(self.started, at)
-        if self.error:
-            block("feed", "GitHub can't be read right now", self.error, since=self.last_ok, key="feed")
+        feed_age = _age(last_ok, at) if last_ok else _age(self.started, at)
+        if error:
+            block("feed", "GitHub can't be read right now", error, since=last_ok, key="feed")
         elif feed_age > max(180, self.interval * 4):
-            block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=self.last_ok, key="feed")
+            block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=last_ok, key="feed")
 
         # jobs per runner (from runs still going)
         repo_of_run = {}
@@ -1175,7 +1225,7 @@ class DevWatch:
                       f"{repo} · {v.get('why') or ''}", since=now_iso_at(last["at"]) if last.get("at") else "", key=f"flow:{repo}", repo=repo)
         rank = {"feed": 0, "base": 1, "machine": 2, "disk": 3, "stuck": 3, "check": 4, "runner": 5, "flow": 6, "label": 7}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
-        project_of = {r.lower(): p["name"] for p in self.projects_now() if len(p["repos"]) > 1 for r in p["repos"]}
+        project_of = {r.lower(): p["name"] for p in projects if len(p["repos"]) > 1 for r in p["repos"]}
         for b in blockers:      # alerts group by project: one notification for a project's repositories
             if project_of.get(b["repo"].lower()):
                 b["project"] = project_of[b["repo"].lower()]
@@ -1200,16 +1250,19 @@ class DevWatch:
                     if a["kind"] in BUILD_KINDS or "progress" in a]
         building.sort(key=lambda a: _ts(a.get("since")) or 0)
         return {
-            "at": now_iso(), "fresh": {"github": self.last_ok, "tried": self.last_try, "every": round(self.interval),
-                                       "error": _text(self.error), "remaining": self.gh.remaining,
+            "at": now_iso(), "fresh": {"github": last_ok, "tried": self.last_try, "every": round(self.interval),
+                                       "error": _text(error), "remaining": self.gh.remaining,
                                        "free": self.gh.free, "calls": self.gh.calls, "runner_note": _text(self.runner_note, 400)},
             "schema": SCHEMA,
-            "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
-            "projects": self.projects_now(),
-            "open_pr_counts": {repo: len(prs) for repo, prs in prs_by.items()},
+            "repos": [{"name": r["full_name"], "url": r["url"]} for r in repos],
+            "projects": projects,
+            "open_pr_counts": counts,
+            "pr_count_status": {"partial": bool(stale) or not inventory_complete,
+                                "inventory_complete": inventory_complete, "stale": dict(stale)},
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
-                       "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
+                       "prs": sum(counts.values()) if counts or (inventory_complete and not repos) else None,
+                       "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
                        "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
             "flow": flow_out,
@@ -1378,9 +1431,9 @@ class DevWatch:
         self._base_cache = (at, out[:20])
         return out[:20]
 
-    def projects_now(self) -> list:
+    def projects_now(self, repos=None) -> list:
         """[{"name", "repos"}]: the profile's projects (only repositories being watched), then one per other repository."""
-        watched = {r["full_name"].lower(): r["full_name"] for r in self.repos}
+        watched = {r["full_name"].lower(): r["full_name"] for r in (self.repos if repos is None else repos)}
         out, used = [], set()
         for name, repos in self.projects.items():
             mine = [watched[r.lower()] for r in repos if r.lower() in watched]

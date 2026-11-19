@@ -30,6 +30,9 @@ RESULT = {"success": "success", "failure": "failure", "timed_out": "timeout", "c
 
 TABLES = """
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS pr_counts (
+  account TEXT NOT NULL, repo TEXT NOT NULL, count INTEGER NOT NULL, confirmed REAL NOT NULL,
+  PRIMARY KEY (account, repo));
 CREATE TABLE IF NOT EXISTS merges (
   repo TEXT NOT NULL, number INTEGER NOT NULL, base TEXT, title TEXT, author TEXT, agent TEXT,
   created REAL, merged REAL NOT NULL, PRIMARY KEY (repo, number));
@@ -110,6 +113,18 @@ class Store:
             return self.db.execute(sql, args).fetchall()
 
     # ---- recording (from devwatch's poll) ----
+    def saved_pr_counts(self, account: str) -> dict:
+        """Previously confirmed counts for this sign-in. The caller filters them to the current repository inventory."""
+        if not account:
+            return {}
+        rows = self.query("SELECT repo, count, confirmed FROM pr_counts WHERE account=?", (account.lower(),))
+        return {repo: (count, iso(confirmed)) for repo, count, confirmed in rows}
+
+    def save_pr_counts(self, account: str, counts: dict) -> None:
+        if account:
+            self._write("INSERT OR REPLACE INTO pr_counts (account, repo, count, confirmed) VALUES (?,?,?,?)",
+                        ((account.lower(), repo, count, ts(confirmed)) for repo, (count, confirmed) in counts.items()))
+
     def merges(self, repo: str, prs: list, agent_of=None) -> None:
         """Merged pull requests (from the closed-PR list)."""
         self._write("INSERT OR REPLACE INTO merges (repo, number, base, title, author, agent, created, merged, sha) "
@@ -215,6 +230,6 @@ class Store:
         cut = now - self.keep * 86400
         with self._lock:
             for table, col in (("merges", "merged"), ("runs", "finished"), ("jobs", "started"), ("base_checks", "at"),
-                               ("disks", "at"), ("events", "at")):
+                               ("disks", "at"), ("events", "at"), ("pr_counts", "confirmed")):
                 self.db.execute(f"DELETE FROM {table} WHERE {col} < ?", (cut,))
             self.db.commit()

@@ -62,17 +62,51 @@
   function sep(list) { const out = []; list.forEach((p, i) => { if (i) out.push(' · '); out.push(...[].concat(p)); }); return out; }
 
   // ---- drawing ----
-  function stats(d) {
+  function prCount(full, scopedRows) {
+    const counts = full.open_pr_counts || {}, status = full.pr_count_status;
+    if (!status) {
+      const total = repo ? (full.open_pr_counts ? [...picked].reduce((n, name) => n + (counts[name] || 0), 0) : scopedRows.length) :
+        full.counts?.prs ?? scopedRows.length;
+      return {total, partial: false};
+    }
+    const stale = status.stale || {};
+    const names = repo ? [...picked] : [...new Set([...Object.keys(counts), ...Object.keys(stale), ...(full.repos || []).map(r => r.name)])];
+    const known = names.filter(name => Number.isInteger(counts[name]));
+    const unconfirmed = names.filter(name => Object.hasOwn(stale, name) || !Number.isInteger(counts[name]));
+    const discovering = !repo && status.inventory_complete === false;
+    const partial = unconfirmed.length > 0 || discovering || (!repo && status.partial === true);
+    const total = known.length || !partial ? known.reduce((n, name) => n + counts[name], 0) : null;
+    return {total, partial, discovering, unconfirmed, counts, stale};
+  }
+  function countNote(pr) {
+    const box = $('prCountNote'), details = $('prCountDetails');
+    box.hidden = !pr.partial;
+    if (box.hidden) { details.open = false; return; }
+    const reasons = [];
+    for (const name of pr.unconfirmed) {
+      const n = pr.counts[name], at = pr.stale[name];
+      if (!Number.isInteger(n)) reasons.push([name + ' · open PR count unavailable']);
+      else reasons.push([name + ' · ' + n + (n === 1 ? ' open PR' : ' open PRs') + ' last confirmed', ...(at ? [' ', ago(at)] : [' by GitHub'])]);
+    }
+    if (pr.discovering) reasons.push(['GitHub’s repository list is incomplete.']);
+    $('prCountSummary').replaceChildren(...(reasons.shift() || ['Waiting for updated PR counts from GitHub.']));
+    details.hidden = !reasons.length;
+    if (!reasons.length) details.open = false;
+    $('prCountMore').textContent = reasons.length + ' more ' + (reasons.length === 1 ? 'detail' : 'details');
+    $('prCountRepos').replaceChildren(...reasons.map(reason => el('li', null, ...reason)));
+  }
+  function stats(d, pr) {
     const c = d.counts || {};
     const tile = (n, label, hot) => el('div', {class: 'stat' + (hot ? ' hot' : '')}, el('b', {text: String(n)}), el('span', {text: label}));
     $('liveStats').replaceChildren(
       tile((c.busy || 0) + '/' + (c.machines || 0), 'machines busy'),
       tile((c.runs || 0) - (c.queued || 0), 'running now' + (c.queued ? ' · ' + c.queued + ' queued' : '')),
-      tile(c.prs || 0, 'open PRs'),
+      tile(pr.total ?? '—', pr.partial ? 'open PRs · Partial' : 'open PRs'),
       tile(c.blockers || 0, 'stuck/blocked', c.blockers > 0));
     const b = $('b-live');
     if (b) { b.hidden = !c.blockers; b.textContent = c.blockers > 99 ? '99+' : String(c.blockers || ''); }
     document.title = (c.blockers ? '(' + c.blockers + ') ' : '') + 'Fletchery';
+    countNote(pr);
   }
   // ---- Flow: is work moving? (flow.py) ----
   const VERDICT = {moving: ['run', 'Moving'], idle: ['', 'Idle'], slow: ['wait', 'Slow'], stopped: ['bad', 'Stopped']};
@@ -527,8 +561,10 @@
   let picked = new Set();       // the chosen project's repositories
   function repoChips(d) {
     const seen = new Set([...(d.runs || []), ...(d.prs || []), ...(d.issues || [])].map(x => x.repo).filter(Boolean));
-    for (const [name, count] of Object.entries(d.open_pr_counts || {})) if (count) seen.add(name);
-    const projects = (d.projects || []).filter(p => (p.repos || []).some(r => seen.has(r)));
+    for (const [name, count] of Object.entries(d.open_pr_counts || {})) if (count || name === repo) seen.add(name);
+    for (const name of Object.keys(d.pr_count_status?.stale || {})) seen.add(name);
+    if (d.pr_count_status) for (const r of d.repos || []) if (!Object.hasOwn(d.open_pr_counts || {}, r.name)) seen.add(r.name);
+    const projects = (d.projects || []).filter(p => p.name === repo || (p.repos || []).some(r => seen.has(r)));
     const covered = new Set(projects.flatMap(p => p.repos));
     const list = [...projects, ...[...seen].filter(r => !covered.has(r)).sort().map(r => ({name: r.split('/')[1] || r, repos: [r]}))];
     const key = p => p.repos.length > 1 ? p.name : p.repos[0];
@@ -537,7 +573,7 @@
     picked = new Set(cur ? cur.repos : []);
     $('scopeName').textContent = cur ? cur.name : 'All projects';
     const box = $('liveRepos');
-    box.hidden = list.length < 2;
+    box.hidden = !list.length || (list.length === 1 && !repo && !d.pr_count_status?.partial);
     const chip = (value, label) => {
       const b = el('button', {type: 'button', 'aria-pressed': String(repo === value), text: label});
       b.addEventListener('click', () => { repo = value; try { localStorage.setItem('fletchery-live-repo', repo); } catch (e) { /* ignore */ } if (last) draw(last); });
@@ -560,10 +596,8 @@
     repoChips(full);
     const d = repo ? {...full, problems: (full.problems || []).filter(mine), blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
-    const scopedPrs = full.open_pr_counts
-      ? [...picked].reduce((n, name) => n + (full.open_pr_counts[name] || 0), 0)
-      : (d.prs || []).length;
-    stats(repo ? {...full, counts: {...full.counts, prs: scopedPrs}} : full);
+    const scopedPrs = d.prs || [], pr = prCount(full, scopedPrs);
+    stats(full, pr);
     drawBases(full);
     drawFlow(full);
     drawProblems(d, full);
@@ -609,9 +643,10 @@
     $('n-lrun').textContent = (d.runners || []).length ? '(' + d.runners.length + ')' : '';
     fill($('liveRunners'), (d.runners || []).map(runnerRow), 'No self-hosted runners found.');
     fill($('liveRuns'), (d.runs || []).slice(0, 25).map(runRow), 'No recent Actions runs.', (d.runs || []).length - 25);
-    $('n-lpr').textContent = (d.prs || []).length ? '(' + (repo ? d.prs.length : (full.counts || {}).prs || d.prs.length) + ')' : '';
+    $('n-lpr').textContent = '(' + (pr.total ?? '—') + (pr.partial ? ' · Partial' : '') + ')';
     const c = full.counts || {};
-    fill($('livePrs'), (d.prs || []).map(prRow), 'No open pull requests.', repo ? 0 : (c.prs || 0) - (d.prs || []).length);
+    fill($('livePrs'), scopedPrs.map(prRow), pr.partial || pr.total > 0 ? 'Waiting for pull request details from GitHub.' : 'No open pull requests.',
+      pr.partial || repo ? 0 : pr.total - scopedPrs.length);
     const nIss = repo ? (d.issues || []).length : (full.counts || {}).issues || (d.issues || []).length;
     $('n-liss').textContent = nIss ? '(' + nIss + ')' : '';
     fill($('liveIssues'), (d.issues || []).slice(0, 40).map(issueRow), 'No open issues.', nIss - Math.min(40, (d.issues || []).length));
