@@ -139,6 +139,45 @@ class Feed(unittest.TestCase):
         self.assertTrue(waiting["waiting_machine"])
         self.assertEqual(waiting["phase"]["label"], "Waiting for the machine reservation")
 
+    def test_machine_wait_uses_actual_holder_and_ordered_local_tickets(self):
+        w = self.watch()
+        dispatch = {"id": 91, "workflow_id": 56, "event": "workflow_dispatch", "status": "in_progress",
+                    "display_title": "Node checks " + "a"*40 + " LakePictures"}
+        job = {"name": "Capture", "runner_name": "ALEX-PC", "status": "in_progress",
+               "steps": [{"name": "Photograph lake", "status": "in_progress", "started_at": ago(20)}]}
+        past = {"id": 90, "display_title": "Node checks " + "b"*40 + " LakePictures", "conclusion": "failure"}
+        old_step = {"name": "Photograph lake", "started_at": ago(100), "completed_at": ago(60), "conclusion": "failure"}
+        route = f"repos/{REPO}/actions/workflows/56/runs"
+        w.gh.answers = {route: {"workflow_runs": [past, {**past, "id": 89, "conclusion": "cancelled"}]},
+                        f"repos/{REPO}/actions/runs/90/jobs": {"jobs": [{**job, "steps": [old_step]}]}}
+        holder = {"purpose": "Scenery lake pictures: Photograph the lake", "alive": True, "since": ago(10)}
+        ticket = {"purpose": "local run PR check #12 (GitHub run 7)", "since": ago(7)}
+        w.report("pc", {"host": "ALEX-PC", "lease": holder, "queue": [ticket]})
+        w._read_holder_times(REPO, [dispatch], {91: [job]})
+        w._read_holder_times(REPO, [dispatch], {91: [job]})
+        self.assertEqual(sum(path.startswith(route) for path in w.gh.asked), 1)
+        w.runs[REPO].append(dispatch)
+        w.jobs[91] = [job]
+        w.jobs[7][0]["steps"] = [{"status": "in_progress", "name": "Build and test", "started_at": ago(8)}]
+
+        def reservation():
+            return next(r for r in w.snapshot()["runs"] if r["id"] == 7)["progress"]["reservation"]
+
+        info = reservation()
+        self.assertEqual((info["holder"], info["ahead"], info["release"]["failed"]), (holder["purpose"], 0, 1))
+        self.assertAlmostEqual(info["start_in"], 20*60, delta=3)
+        w.report("pc", {"host": "ALEX-PC", "lease": holder, "queue": [{"purpose": "local run Earlier"}, ticket]})
+        self.assertEqual(reservation()["ahead"], 1)
+        self.assertIsNone(reservation()["start_in"])
+        w.history.add(devwatch._reservation_key("ALEX-PC", "Earlier"), 360, "earlier-hold")
+        self.assertAlmostEqual(reservation()["start_in"], 26*60, delta=3)
+        w.report("pc", {"host": "ALEX-PC", "queue": [ticket]})
+        self.assertIsNone(reservation()["start_in"])
+        self.assertNotIn("holder", reservation())
+        seconds, n = w.history.remaining_exact(devwatch._reservation_key("ALEX-PC", holder["purpose"]), 60)
+        self.assertEqual(n, 1)
+        self.assertAlmostEqual(seconds, 540, delta=3)
+
     def test_time_left_uses_job_runtime_and_excludes_shorter_or_cancelled_jobs(self):
         ledger = self.watch().store
         for i, (minutes, pr, result) in enumerate([(1, 12, "success"), (30, 12, "failure"), (50, 13, "success"), (80, 12, "cancelled")], 100):

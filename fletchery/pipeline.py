@@ -177,6 +177,12 @@ class History:
                     fallback = (statistics.median(s[0] for s in got), len(got), n)
             return fallback
 
+    def remaining_exact(self, parts: tuple, elapsed: float) -> tuple[int | None, int]:
+        """Time left in a reservation of this kind on this machine, among holds lasting at least this long."""
+        with self._lock:
+            longer = [s[0] for s in self.samples.get(self.key(*parts), ()) if s[0] > elapsed]
+        return (round(statistics.median(longer) - elapsed), len(longer)) if longer else (None, 0)
+
     def save(self) -> None:
         with self._lock:
             if not self._dirty or not self.path:

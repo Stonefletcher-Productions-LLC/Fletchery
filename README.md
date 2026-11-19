@@ -16,6 +16,8 @@ The open PR total follows the project selection. Building now shows each running
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
 During Build and test it also shows the phase reported by the machine and a rough time left based on
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
+When a PR waits for a machine reservation, the card names the holder, shows the PR's place in the machine's queue
+and estimates when it can start from earlier holds or comparable workflow timings when available.
 
 ![Fletchery on the desktop: the Live tab with Building now, Stuck or blocked, machines, runners, Actions runs, pull requests and issues (demo data)](docs/images/fletchery/desktop-live.png)
 
