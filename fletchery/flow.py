@@ -41,17 +41,24 @@ class Flow:
         except (TypeError, ValueError):
             self.slow, self.stop = 60 * SLOW_MINUTES, 3600 * STOP_HOURS
 
-    def compute(self, repos: list, waiting: dict, now: float | None = None) -> dict:
-        """{"all": {...}, "repos": {repo: {...}}}. `waiting` = {repo: open PRs on their way to merging (not drafts,
-        checks not failed)}."""
+    def compute(self, repos: list, waiting: dict, now: float | None = None, projects: dict | None = None) -> dict:
+        """{"all": {...}, "repos": {repo: {...}}, "projects": {name: {...}}}. `waiting` = {repo: open PRs on their way to
+        merging (not drafts, checks not failed)}; `projects` = {name: [repos]} for projects of several repositories."""
         now = now or time.time()
-        out = {"all": self._one(None, sum(waiting.values()), now), "repos": {}}
+        out = {"all": self._one(None, sum(waiting.values()), now), "repos": {}, "projects": {}}
         for r in repos:
             out["repos"][r] = self._one(r, waiting.get(r, 0), now)
+        for name, rs in (projects or {}).items():
+            out["projects"][name] = self._one(list(rs), sum(waiting.get(r, 0) for r in rs), now)
         return out
 
     def _one(self, repo, waiting: int, now: float) -> dict:
-        where, args = ("WHERE repo=?", (repo,)) if repo else ("", ())
+        """One repository (a name), several (a list), or all (None)."""
+        if isinstance(repo, list):
+            repo = repo or [""]
+            where, args = (f"WHERE repo IN ({','.join('?' * len(repo))})", tuple(repo))
+        else:
+            where, args = ("WHERE repo=?", (repo,)) if repo else ("", ())
         merges = self.store.query(f"SELECT repo, number, base, title, created, merged, agent FROM merges {where}"
                                   + (" AND" if where else " WHERE") + " merged > ? ORDER BY merged DESC", args + (now - 7 * 86400,))
         hours = [0] * 24
@@ -69,7 +76,7 @@ class Flow:
                 last.setdefault((m[0], m[2]), {"repo": m[0], "base": m[2], "number": m[1], "title": m[3], "at": m[5],
                                                "ago": round(now - m[5])})
         lead = [m[5] - m[4] for m in merges if m[4] and m[5] >= m[4]]
-        jw, ja = ("AND repo=?", (repo,)) if repo else ("", ())
+        jw, ja = (("AND " + where[len("WHERE "):]), args) if where else ("", ())
         waits = [r[0] - r[1] for r in self.store.query(
             f"SELECT started, created FROM jobs WHERE started > ? AND created IS NOT NULL {jw}", (now - 86400,) + ja)
             if r[0] and r[1] and r[0] >= r[1]]

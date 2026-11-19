@@ -47,6 +47,8 @@ MAX_KEYS = 2000
 
 def group_of(b: dict) -> str:
     """Which group a signal belongs to: its project, else its machine ("machine:SF-NODE-01"), else its kind."""
+    if b.get("project"):
+        return str(b["project"])
     if b.get("repo"):
         return str(b["repo"])
     key = str(b.get("key") or "")

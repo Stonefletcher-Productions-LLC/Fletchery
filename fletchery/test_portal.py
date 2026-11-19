@@ -137,6 +137,19 @@ class Served(unittest.TestCase):
     def remote(self, **extra):
         return {"Host": HOSTNAME, "X-Forwarded-For": "100.64.0.9", "Tailscale-User-Login": USER, **extra}
 
+    def test_the_stable_read_api(self):
+        self.p.live.snapshot = lambda: {"at": "x", "schema": 2, "machines": [{"name": "NODE", "online": True}]}
+        code, body, _ = self.ask("/api/v2/state", self.remote())
+        self.assertEqual((code, json.loads(body)["schema"]), (200, 2))
+        code, body, head = self.ask("/metrics", self.remote())
+        self.assertEqual(code, 200)
+        self.assertTrue(head["Content-Type"].startswith("text/plain; version=0.0.4"))
+        self.assertIn(b'fletchery_machine_online{machine="NODE"} 1', body)
+        code, body, _ = self.ask("/api/v2/history?table=merges&since=0", self.remote())
+        self.assertEqual((code, json.loads(body)["rows"]), (200, []))
+        self.assertEqual(self.ask("/api/v2/history?table=secrets", self.remote())[0], 400)
+        self.assertEqual(self.ask("/metrics", self.remote(**{"Tailscale-User-Login": "someone@else.example"}))[0], 403)
+
     def test_this_pc_reads_everything(self):
         for path in portal.STATIC:
             code, body, headers = self.ask(path)

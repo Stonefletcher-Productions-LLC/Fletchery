@@ -387,6 +387,13 @@ const server = http.createServer((req, res) => {
     await solo.click('#liveRepos button:has-text("Town")');
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 1);
     assert.match(await solo.textContent('#livePrs'), /Road decals/);
+    // A project of several repositories (workers.portal.live.projects) is one chip.
+    live.projects = [{name: 'Acme world', repos: ['Acme/Game', 'Acme/Town']}];
+    await solo.reload();
+    await solo.waitForSelector('#liveRepos button:has-text("Acme world")', {state: 'attached'});
+    assert.deepEqual(await solo.$$eval('#liveRepos button', l => l.map(b => b.textContent)), ['All projects', 'Acme world']);
+    assert.equal(await solo.isVisible('#liveRepos'), false);      // one project: nothing to choose
+    delete live.projects;
 
     assert.deepEqual(errors.filter(e => !/Failed to load resource|ERR_|net::/.test(e)), []);
     console.log('portal browser checks passed');

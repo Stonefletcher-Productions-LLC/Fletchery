@@ -87,6 +87,12 @@ The window and the phone have the same controls. Anything that stops work asks f
 
 `workers.portal.controls: false` in the profile makes the phone read-only; the window always has the controls.
 
+## Read API
+
+`/api/v2/state` (the whole Live snapshot, `"schema": 2`, fields only ever added), `/api/v2/history` (merges, runs,
+jobs, base-branch checks, disk readings and alerts from the last 90 days) and `/metrics` (Prometheus text, for Grafana)
+answer the same callers as the page. [API.md](docs/API.md).
+
 ## Install
 
 **You need:** Windows 10 or 11, [Python 3.10 or newer](https://www.python.org/downloads/) (tick *Add python.exe to
@@ -139,7 +145,7 @@ A small JSON file. Only `name` and `repo` are required; everything else is optio
 | `stateDir` | Where Fletchery keeps its state, logs and builds (empty = `%LOCALAPPDATA%\Fletchery\<name>`) |
 | `dashboardPort` | The desktop window's local port (`127.0.0.1` only) |
 | `heavyLeaseFile` | The heavy-work lease file on this PC ([RESERVATIONS.md](docs/RESERVATIONS.md)); what holds it shows on Live |
-| `portal` | The phone app and the Live feed: [PORTAL.md](docs/PORTAL.md). `live.owners` lists the GitHub organisations and users to watch; `live.names` gives machines friendly names; `live.diskFreeGb` flags a machine under that much free disk; `live.bases` (`{"owner/repo": ["main"]}`) watches branches no PR targets, `live.causes.machine` adds messages (regular expressions) that mean "the machine broke, not the code"; `live.fixLabels` and `live.redIssueLabels` name a project's base-fix PRs and base-red issues (defaults `tip-fix`, `tip-red` and similar); `live.alerts` changes a kind's rule in minutes, e.g. `{"disk": {"for": 10}, "flow": {"notify": false}, "runner": {"off": true}}` (kinds: feed, machine, runner, disk, base, check, stuck, label, flow; keys `for`, `keepFiring`, `notify`, `off`) |
+| `portal` | The phone app and the Live feed: [PORTAL.md](docs/PORTAL.md). `live.owners` lists the GitHub organisations and users to watch; `live.names` gives machines friendly names; `live.diskFreeGb` flags a machine under that much free disk; `live.bases` (`{"owner/repo": ["main"]}`) watches branches no PR targets, `live.causes.machine` adds messages (regular expressions) that mean "the machine broke, not the code"; `live.fixLabels` and `live.redIssueLabels` name a project's base-fix PRs and base-red issues (defaults `tip-fix`, `tip-red` and similar); `live.projects` (`{"Game": ["owner/game", "owner/game-art"]}`) groups repositories into one project for the chips, Flow and alerts; `live.agents` (`[{"name": "Claude", "branches": ["claude/"], "logins": ["claude[bot]"]}]`) names the coding agents by branch prefix or PR author (default Claude and Codex); `live.alerts` changes a kind's rule in minutes, e.g. `{"disk": {"for": 10}, "flow": {"notify": false}, "runner": {"off": true}}` (kinds: feed, machine, runner, disk, base, check, stuck, label, flow; keys `for`, `keepFiring`, `notify`, `off`) |
 | `machines` | The build machines' worker API on this PC's Tailscale address: [MACHINES.md](docs/MACHINES.md) |
 | `builds` | Where finished builds go, extra labels a machine needs to take one, and publishing to GitHub releases or Google Drive |
 | `scratch*` | Cleaning up session folders: [below](#session-folders-scratch-retention) |
@@ -228,7 +234,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). The quick ones:
 
 | Folder | What |
 |---|---|
-| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `pipeline.py` (where each change is in the process, and step times), `presence.py` and `agent_status.py` (which coding agents are working: [docs/AGENT-PRESENCE.md](docs/AGENT-PRESENCE.md)), `store.py` (history in SQLite), `flow.py`, `rules.py` (base health, failure causes, queue estimates, disk forecast), `alerts.py`, `builds.py`, `publish.py`, `push.py`, `scratch.py` |
+| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `pipeline.py` (where each change is in the process, and step times), `presence.py` and `agent_status.py` (which coding agents are working: [docs/AGENT-PRESENCE.md](docs/AGENT-PRESENCE.md)), `store.py` (history in SQLite), `flow.py`, `rules.py` (base health, failure causes, queue estimates, disk forecast), `alerts.py`, `api.py` (the read API), `builds.py`, `publish.py`, `push.py`, `scratch.py` |
 | `ui/portal/` | The page (no build step): `kit.js` (folding cards, long lists), `portal.js`, `live.js`, `portal.css`, `sw.js` |
 | `shell/` | `Fletchery.exe` (C# + WebView2), the supervisor and the install script |
 | `tools/` | The heavy-work reservation tool ([RESERVATIONS.md](docs/RESERVATIONS.md), [CANCELLATION.md](docs/CANCELLATION.md)) |

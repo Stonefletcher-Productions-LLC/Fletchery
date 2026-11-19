@@ -28,6 +28,9 @@
           "MY-PC": "Gaming PC"
         },
         "diskFreeGb": 30,
+        "agents": [{"name": "Claude", "branches": ["claude/"]}, {"name": "Codex", "branches": ["codex/"], "logins": ["codex"]}],
+        "bases": {"Stonefletcher-Productions-LLC/LifeShare": ["Test-Staging", "main"]},
+        "alerts": {"disk": {"for": 5}, "flow": {"keepFiring": 10}},
         "pipeline": {
           "kinds": {
             "Town change": ["area: town", "buildtown", "town ", "town,", "town:", "roads", "buses", "bus lines", "marina",

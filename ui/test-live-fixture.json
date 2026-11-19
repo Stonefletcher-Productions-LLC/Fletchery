@@ -1182,5 +1182,14 @@
     "notify": true
    }
   ]
- }
+ },
+ "schema": 2,
+ "projects": [
+  {
+   "name": "Game",
+   "repos": [
+    "Acme/Game"
+   ]
+  }
+ ]
 }
