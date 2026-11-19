@@ -64,13 +64,16 @@ class BaseHealthTest(unittest.TestCase):
         self.assertEqual(self.health(required=["Cheap checks"])["state"], "green")
 
     def test_fix_in_line_held_red_and_issue(self):
-        issues = [{"number": 50, "title": "Test-Staging is red", "url": "u", "labels": ["tip-red"]}]
+        issues = [{"number": 50, "title": "Test-Staging is red", "url": "u", "labels": ["tip-red"]},
+                  {"number": 51, "title": "main is red", "labels": ["tip-red"]},
+                  {"number": 52, "title": "archive/Test-Staging is red", "labels": ["tip-red"]}]
         prs = [pr(10, labels=["tip-fix"], checks="running", failed=()), pr(11, body="Fixes #50", checks="queued", failed=()),
-               pr(12), pr(13, failed=("Something else",)), pr(14, draft=True), pr(15, base="main")]
+               pr(12), pr(13, failed=("Something else",)), pr(14, draft=True), pr(15, base="main"),
+               pr(16, body="Fixes #51", checks="queued", failed=())]
         h = self.health(prs=prs, issues=issues)
         self.assertEqual([f["number"] for f in h["fixes"]], [10, 11])
         self.assertEqual(h["held"], 1)
-        self.assertEqual(h["issues"][0]["number"], 50)
+        self.assertEqual([i["number"] for i in h["issues"]], [50])
 
     def test_rerun_turns_green(self):
         self.s.base_checks(REPO, BASE, "r2", [check("Compile and test", "success", 10), check("Lint docs", "success", 9)])
@@ -98,7 +101,9 @@ class BaseHealthTest(unittest.TestCase):
 
 class HelpersTest(unittest.TestCase):
     def test_test_names(self):
-        notes = [{"annotation_level": "failure", "title": "LifeShare.Town.Fishing", "message": "x"},
+        notes = [{"annotation_level": "warning", "message": "Node.js 20 is deprecated."},
+                 {"annotation_level": "warning", "message": "No files were found with the provided path: result.json"},
+                 {"annotation_level": "failure", "title": "LifeShare.Town.Fishing", "message": "x"},
                  {"annotation_level": "failure", "title": "", "message": "RouteScale pedestrian 5.0 ms\nmore"},
                  {"annotation_level": "failure", "title": "", "message": "Process completed with exit code 1."},
                  {"annotation_level": "notice", "title": "fyi"},

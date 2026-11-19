@@ -388,6 +388,9 @@ def gh_token() -> str:
 
 
 # ---- the watcher ----
+_MISSING_REF = object()
+
+
 def _iso_after(iso: str, seconds: float) -> str:
     """`iso` plus `seconds`, as an ISO string that compares with GitHub's."""
     t = _ts(iso)
@@ -465,7 +468,7 @@ class DevWatch:
         self.cancels: dict[tuple, dict] = {}        # (repo, run id) -> {"how", "who"}: who or what cancelled a run
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
-        self.skip: dict[str, float] = {}            # path -> don't ask again before
+        self.skip: dict[str, tuple[float, bool]] = {}  # path -> retry time, GitHub explicitly reported a missing ref
         self.last_ok = ""
         self.last_try = ""
         self.error = ""
@@ -521,7 +524,7 @@ class DevWatch:
                 self.log(f"live: causes.machine pattern {str(x)[:60]!r} ignored: not a regular expression")
         self.red_issue_labels = [str(x) for x in conf.get("redIssueLabels") or rules.RED_ISSUE_LABELS][:20]
         self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
-        self.notes: dict[tuple, list] = {}          # (repo, check name) -> test names from a failed base check's annotations
+        self.notes: dict[int, list] = {}            # completed base check run id -> test names
         self._required: dict[tuple, tuple] = {}     # (repo, branch) -> (asked at, required check names)
         # Which blockers reach a person, and when (alerts.py): a wait before firing, a hold after, groups and snoozes.
         self.alerts = alertsmod.Alerts(Path(state_dir) / "alerts.json" if state_dir else None, conf.get("alerts"), self.store, self.log)
@@ -598,7 +601,7 @@ class DevWatch:
         for repo, g in got.items():
             runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
             closed[repo], merged[repo], releases[repo] = g.get("closed") or [], g.get("merged") or [], g.get("releases") or []
-            bases[repo] = g.get("bases") or self.bases.get(repo) or {}
+            bases[repo] = g.get("bases", self.bases.get(repo, {}))
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
@@ -651,12 +654,14 @@ class DevWatch:
             page += 1
         return out
 
-    def _statuses(self, repo: str, sha: str) -> list:
+    def _statuses(self, repo: str, sha: str, response=None) -> list:
         """A commit's statuses, shaped like check runs (newest per context)."""
         state = {"success": ("completed", "success"), "failure": ("completed", "failure"), "error": ("completed", "failure"),
                  "pending": ("in_progress", None)}
         out = []
-        for st in (self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}).get("statuses") or []:
+        if response is None:
+            response = self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}
+        for st in response.get("statuses") or []:
             if not isinstance(st, dict) or str(st.get("state")) not in state:
                 continue
             status, conclusion = state[str(st["state"])]
@@ -668,20 +673,22 @@ class DevWatch:
             out.append(row)
         return out
 
-    def _try(self, path: str, quiet_for: float = 1800):
+    def _try(self, path: str, quiet_for: float = 1800, *, missing_ref=None):
         """GET that remembers a 403/404 (no access, Actions off) or a 422 (a branch deleted since: "No commit found for
         SHA: <branch>") and stops asking for a while."""
-        if self.skip.get(path, 0) > time.time():
-            return None
+        retry_at, missing = self.skip.get(path, (0, False))
+        if retry_at > time.time():
+            return missing_ref if missing else None
         try:
             return self.gh.get(path)
         except GitHubError as e:
             if e.code in (403, 404, 410, 422) and "rate limit" not in str(e).lower():
                 now_s = time.time()
                 if len(self.skip) > 500:
-                    self.skip = {k: v for k, v in self.skip.items() if v > now_s}
-                self.skip[path] = now_s + quiet_for
-                return None
+                    self.skip = {k: v for k, v in self.skip.items() if v[0] > now_s}
+                missing = (e.code == 422 and "no commit found for sha:" in str(e).lower()) or str(e).lower() == "404 ref not found"
+                self.skip[path] = (now_s + quiet_for, missing)
+                return missing_ref if missing else None
             raise
 
     def _poll_repo(self, repo: str) -> dict:
@@ -853,36 +860,59 @@ class DevWatch:
         names = ({str((p.get("base") or {}).get("ref") or "") for p in prs if isinstance(p, dict)}
                  | {str((p.get("base") or {}).get("ref") or "") for p in out["merged_all"] if _ts(p.get("merged_at")) > week}
                  | set(self.bases_conf.get(repo.lower(), []))) - {""}
-        out["bases"] = {b: self._read_base(repo, b) for b in sorted(names)[:8]}
+        out["bases"] = {b: info for b in sorted(names)[:8] if (info := self._read_base(repo, b)) is not None}
         self._read_status_issue(repo)
         return out
 
-    def _read_base(self, repo: str, branch: str) -> dict:
+    def _read_base(self, repo: str, branch: str) -> dict | None:
         """A base branch's newest commit: its checks go to the store (rules.base_health reads the streak), the names of
         the tests a failed one reports are kept, and the branch's required checks are asked every 10 minutes."""
         ref = urllib.parse.quote(branch, safe="")
-        cr = (self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100") or {}).get("check_runs") or []
+        checks = self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100", missing_ref=_MISSING_REF)
+        if checks is _MISSING_REF:
+            return None
+        cr = (checks or {}).get("check_runs") or []
+        all_checks = isinstance(checks, dict) and checks.get("total_count", len(cr)) <= len(cr)
+        st = None
         if not cr:
-            st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100") or {}
+            st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100", missing_ref=_MISSING_REF) or {}
+            if st is _MISSING_REF:
+                return None
             # Only statuses that link to where they ran: an old local runner (LifeShare's retired Buildlane task) kept
             # posting failures with no link, from no workflow anyone can open or re-run, and turned main red (11-19).
-            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref) if c.get("html_url")] if st.get("sha") else []
-        sha = str((cr[0] if cr else {}).get("head_sha") or "")
+            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref, st) if c.get("html_url")] if st.get("sha") else []
+        sha = str((cr[0] if cr else {}).get("head_sha") or (st or {}).get("sha") or "")
         if sha:
+            if all_checks:
+                self._reconcile_base_statuses(repo, branch, sha, cr, st)
             self.store.base_checks(repo, branch, sha, cr)
+        notes = {}
         for c in cr:
             if c.get("conclusion") in FAILED and c.get("source") != "status" and isinstance(c.get("id"), int) \
-                    and (c.get("output") or {}).get("annotations_count") and (repo, c.get("name")) not in self.notes:
-                found = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50") or []
-                self.notes[(repo, c.get("name"))] = rules.test_names(found)
-            elif c.get("conclusion") == "success":
-                self.notes.pop((repo, c.get("name")), None)
+                    and (c.get("output") or {}).get("annotations_count"):
+                if c["id"] not in self.notes:
+                    found = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50") or []
+                    self.notes[c["id"]] = rules.test_names(found)
+                notes[c.get("name")] = self.notes[c["id"]]
         asked, req = self._required.get((repo, branch), (0.0, ()))
         if time.time() - asked > 600:
             req = rules.required_checks(self._try(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600) or [],
                                         self._try(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=6 * 3600) or {})
             self._required[(repo, branch)] = (time.time(), tuple(req))
-        return {"checking": any(c.get("status") != "completed" for c in cr), "required": list(req)}
+        return {"checking": any(c.get("status") != "completed" for c in cr), "required": list(req), "notes": notes}
+
+    def _reconcile_base_statuses(self, repo, branch, sha, checks, status_response):
+        """Drop older observations only when GitHub identifies their names as unlinked statuses on this exact commit."""
+        saved = self.store.query("SELECT name FROM base_checks WHERE repo=? AND branch=? AND sha=?", (repo, branch, sha))
+        unexplained = {row[0] for row in saved} - {str(c.get("name") or "")[:120] for c in checks}
+        if not unexplained:
+            return
+        if status_response is None:
+            status_response = self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}
+        if status_response.get("sha") == sha:
+            unlinked = {str(st.get("context") or "")[:120] for st in status_response.get("statuses") or []
+                        if not st.get("target_url")}
+            self.store.forget_base_checks(repo, branch, sha, unexplained & unlinked)
 
     def _read_status_issue(self, repo: str) -> None:
         """Cloud agents' heartbeats: comments on the repository's status issue edited in the last day. `since` is
@@ -1192,7 +1222,7 @@ class DevWatch:
             for run in g.get("runs") or []:
                 self.store.jobs(repo, run, (g.get("jobs") or {}).get(run.get("id")) or [])
         self.store.prune()
-        for cache in (self.no_result, self.fail_notes, self.fail_jobs):
+        for cache in (self.no_result, self.fail_notes, self.fail_jobs, self.notes):
             while len(cache) > 4000:      # oldest first (insertion order): finished checks never change, so re-asking is rare
                 cache.pop(next(iter(cache)))
         self._flow_cache = (0.0, {})
@@ -1322,11 +1352,10 @@ class DevWatch:
         for repo, branches in bases.items():
             prs = [{**p, "body": bodies.get((repo, p["number"]), "")} for p in prs_out if p["repo"] == repo]
             issues = [i for i in issues_out if i["repo"] == repo]
-            notes = {name: tests for (r, name), tests in self.notes.items() if r == repo}
             for branch, info in branches.items():
                 try:
                     h = rules.base_health(self.store, repo, branch, required=info.get("required"), prs=prs, issues=issues,
-                                          notes=notes, checking=info.get("checking"), fix_labels=self.fix_labels,
+                                          notes=info.get("notes"), checking=info.get("checking"), fix_labels=self.fix_labels,
                                           red_issue_labels=self.red_issue_labels, now=at)
                 except Exception as e:      # one branch's history never costs the feed
                     self.log(f"live: base health {repo} {branch}: {type(e).__name__}: {e}")
@@ -1627,7 +1656,15 @@ class DevWatch:
     def _reservations(self, at, machines, runs):
         for m in machines:
             tickets = sorted((a for a in m["activities"] if "position" in a), key=lambda a: a["position"])
-            if not m["online"] or not any((a.get("progress") or {}).get("waiting_machine") for a in tickets):
+            if not m["online"]:
+                continue
+            # The reporter knows who is waiting even during the first GitHub poll after startup.
+            for ticket in tickets:
+                if (not ticket.get("run") and _ts(ticket["since"]) and
+                        re.match(r"^(?:local run )?PR check #\d+ \(GitHub run \d+\)", ticket["title"], re.I)):
+                    ticket["progress"] = {"waiting_machine": True, "phase": {
+                        "label": "Waiting for the machine reservation", "since": ticket["since"]}}
+            if not any((a.get("progress") or {}).get("waiting_machine") for a in tickets):
                 continue
             holder = next((a for a in m["activities"] if a.get("reservation_holder")), None)
             release = self._release_estimate(at, m, holder, runs) if holder and holder.get("alive") and _ts(holder["since"]) else {}
@@ -1663,7 +1700,8 @@ class DevWatch:
                              "reservation_holder": True, "alive": lease.get("alive"),
                              "detail": "holds the machine" + ("" if lease.get("alive", True) else " (its process is gone)")})
                 output = lease.get("last_output")
-                if age <= REPORT_STALE and lease.get("alive") and isinstance(output, dict) and 0 <= at - _ts(output.get("at")) <= 180:
+                if (age <= REPORT_STALE and lease.get("alive") and isinstance(output, dict) and output.get("label")
+                        and 0 < _ts(lease.get("since")) <= _ts(output.get("at")) <= at):
                     acts[-1]["last_output"] = {"label": _scrub(output.get("label"), 80), "at": _text(output.get("at"), 40)}
                 held = _age(lease.get("since"), at)
                 if lease.get("alive") is False:
@@ -1775,10 +1813,13 @@ class DevWatch:
                         job["progress"].pop("eta", None)
                         job["progress"]["waiting_machine"] = True
                         job["progress"]["phase"] = {"label": "Waiting for the machine reservation", "since": lease["since"]}
-                    elif phase and 0 < _ts(job["step_started"]) <= _ts(phase["since"]) <= at + 5:
-                        job["progress"]["phase"] = phase
-                    elif lease.get("last_output") and 0 < _ts(job["step_started"]) <= _ts(lease["last_output"]["at"]):
-                        job["progress"]["last_output"] = lease["last_output"]
+                    else:
+                        observed_since = _ts(job["step_started"])
+                        if phase and 0 < observed_since <= _ts(phase["since"]) <= at + 5:
+                            job["progress"]["phase"] = phase
+                            observed_since = _ts(phase["since"])
+                        if lease.get("last_output") and 0 < observed_since <= _ts(lease["last_output"]["at"]):
+                            job["progress"]["last_output"] = lease["last_output"]
                     lease["progress"] = job["progress"]
         if self.own_builds is not None:
             try:

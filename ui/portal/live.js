@@ -111,7 +111,7 @@
       return el('section', {class: 'base-red', 'aria-label': name + ' is red'},
         el('h2', null, name + ' is red · for ', since(h.since), h.checking ? ' · a new commit is being checked' : ''),
         el('p', null, el('b', {text: 'Failing: '}), (h.failing || []).map(f => f.name + tests(f)).join(' · ') || 'a check'),
-        first ? el('p', null, el('b', {text: 'First bad: '}), prLink(first), ' ' + (first.title || '') + (first.agent ? ' (' + first.agent + ')' : ''),
+        first ? el('p', null, el('b', {text: first.first_bad ? 'First bad: ' : 'Merged before the failure: '}), prLink(first), ' ' + (first.title || '') + (first.agent ? ' (' + first.agent + ')' : ''),
           sus.length > 1 ? [' · also merged since the last green: ', ...sep(sus.filter(x => x !== first).map(prLink))] : '') : null,
         el('p', null, el('b', {text: 'Fix in line: '}), (h.fixes || []).length ? sep(h.fixes.map(f => [a(f.url, '', '#' + f.number), ' ' + (f.title || '') +
           ' (' + (CHK[f.state] || f.state || 'waiting') + (f.auto_merge ? ', merges by itself' : '') + ')'])) : 'none yet',
@@ -236,34 +236,48 @@
         release.basis === 'step' ? ' including any wait inside the step' : '',
         release.failed ? ' · ' + release.failed + ' ended in failure' : '') : null);
   }
-  function buildDetail(progress) {
+  function buildDetail(progress, job) {
     if (!progress) return null;
     const {phase, last_output: output, eta = {}} = progress;
+    const waiting = progress.waiting_machine;
+    const label = waiting ? 'Waiting for ' + (progress.reservation?.machine || job.machine || 'a machine') :
+      phase?.label || output?.label || job.step || 'Machine reserved for the PR check';
+    const observed = output && !waiting;
     const count = eta.samples + (eta.samples === 1 ? ' past check' : ' past checks') + (eta.same_pr ? ' on this PR' : '');
-    const estimate = progress.waiting_machine ? 'Finish time depends on when the machine becomes available' :
+    const estimate = waiting ? 'Start time unknown until the machine reports its reservation' :
       eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
-      eta.samples ? 'Running longer than the last ' + eta.samples + (eta.samples === 1 ? ' comparable job' : ' comparable jobs') :
-      'No timing history for this job yet';
-    return el('div', {class: 'build-detail'}, phase ?
-      el('p', {class: 'say'}, el('strong', {text: phase.label}), ' · ', since(phase.since)) :
-      output ? el('p', {class: 'say'}, 'Latest output: ', el('strong', {text: output.label}), ' · ', ago(output.at)) :
-      el('p', {class: 'sub', text: 'Waiting for the runner to report the inner phase.'}),
-      progress.waiting_machine && progress.reservation ? reservationDetail(progress.reservation) :
+      eta.samples ? 'Finish time unknown · this job has outlasted ' + count :
+      'Finish time unknown · no comparable timing yet';
+    let timing;
+    if (waiting && (phase?.since || job.since)) timing = ['Waiting for ', since(phase?.since || job.since)];
+    else if (phase?.since) timing = ['Phase started ', ago(phase.since)];
+    else if (job.step_started) timing = ['In this step for ', since(job.step_started)];
+    else if (job.reservation_holder && job.since) timing = ['Machine held for ', since(job.since)];
+    const status = join(timing, !waiting && !phase && !observed ? 'Waiting for a task update from the runner' : '');
+    return el('div', {class: 'build-detail'},
+      el('p', {class: 'task-title', text: label}),
+      observed ? el('p', {class: 'sub'}, phase ? ['Latest output · ', output.label, ' · '] : 'Last observed activity · ',
+        ago(output.at)) : null,
+      status.length ? el('p', {class: 'sub'}, ...sep(status)) : null,
+      waiting && progress.reservation ? reservationDetail(progress.reservation) :
         el('p', {class: 'sub', text: estimate}));
   }
-  function jobProgress(x) {
+  function githubSteps(x) {
     if (!x.steps_total) return null;
-    const detail = x.steps_done + ' of ' + x.steps_total + ' complete';
-    return el('div', null, buildDetail(x.progress), meter('GitHub job steps', Math.round(100 * x.steps_done / x.steps_total), detail, 'step'),
-      x.step ? el('p', {class: 'sub'}, ...sep(join(x.step, x.step_started ? since(x.step_started) : ''))) : null);
+    return el('p', {class: 'sub workflow-steps'}, ...sep(join('GitHub steps · ' + x.steps_done + ' of ' + x.steps_total + ' complete', x.step)));
   }
   function actRow(x, c) {
-    if (x.steps_total) {
-      const title = c ? '#' + c.number + ' ' + c.title : x.title;
+    const leasePR = /\bPR check #(\d+)\b/i.exec(x.title || '');
+    const fromReporter = leasePR && (x.reservation_holder || x.kind === 'queued' || x.last_output);
+    if (x.progress || x.steps_total || fromReporter) {
+      const title = c ? '#' + c.number + ' ' + c.title : leasePR ? 'PR #' + leasePR[1] : x.title;
+      const progress = x.progress || (fromReporter ? {waiting_machine: x.kind === 'queued', last_output: x.last_output} : null);
       return el('li', {class: 'mact'},
-        el('p', {class: 'say'}, web(x.url) ? a(x.url, 't', title) : title),
-        el('p', {class: 'sub'}, ...sep(join(x.machine, x.job_name))),
-        jobProgress(x));
+        x.alive === false ? el('p', {class: 'task-title', text: 'The check stopped while holding the machine'}) :
+          progress ? buildDetail(progress, x) : el('p', {class: 'task-title'}, x.step || x.job_name || 'GitHub job running'),
+        !progress && x.step_started ? el('p', {class: 'sub'}, 'In this step for ', since(x.step_started)) : null,
+        el('p', {class: 'sub task-context'}, ...sep(join(a(x.url || c?.url, '', title), x.machine, x.job_name))),
+        githubSteps(x));
     }
     if (c) return machineAct(x, c);
     const k = KIND[x.kind] ? x.kind : 'working';
@@ -409,13 +423,15 @@
     const j = r.job, stepFor = j && j.step_started ? (Date.now() - Date.parse(j.step_started)) / 60000 : 0;
     const chip = !r.online ? el('span', {class: 'chip needs', text: 'Offline'}) :
       j && j.pr_closed ? el('span', {class: 'chip needs', text: 'Not needed'}) :
-      stepFor > 60 ? el('span', {class: 'chip needs', text: 'Step too long'}) :
+      stepFor > 60 ? el('span', {class: 'chip needs', text: 'Step over 1 h'}) :
       r.busy || j ? el('span', {class: 'chip wait', text: 'Busy'}) : el('span', {class: 'chip run', text: 'Idle'});
     return el('li', null, el('div', {class: 'r-row'},
       el('div', null, el('div', {class: 'title', text: r.name}), el('p', {class: 'sub', text: join(r.machine, (r.labels || []).join(', ')).join(' · ')}),
-        j ? el('p', {class: 'sub'}, a(j.url, '', j.title), ...sep(['', ...join(j.step ? 'step "' + j.step + '"' + (j.step_started ? ' for ' : '') : '',
+        j ? buildDetail(j.progress, j) : null,
+        j && j.progress ? el('p', {class: 'sub'}, a(j.url, '', j.title)) :
+          j ? el('p', {class: 'sub'}, a(j.url, '', j.title), ...sep(['', ...join(j.step ? 'step "' + j.step + '"' + (j.step_started ? ' for ' : '') : '',
           j.step_started ? since(j.step_started) : j.started ? since(j.started) : '')])) : null,
-        j ? buildDetail(j.progress) : null,
+        j && j.progress ? githubSteps(j) : null,
         j && j.pr_closed ? el('p', {class: 'sub', text: 'Its pull request is closed: nothing needs this run.'}) : null,
         j && j.id && desk() ? el('div', {class: 'ctl'}, control('Cancel run', '/api/actions/cancel', {repo: j.repo, id: j.id}, 'Cancel this GitHub Actions run?')) : null),
       chip));
@@ -448,12 +464,12 @@
     const ico = going ? ['run', '◐', 'Running'] : waiting ? ['wait', '○', 'Queued'] :
       r.conclusion === 'success' ? ['ok', '✓', 'Passed'] : r.conclusion === 'skipped' || r.conclusion === 'neutral' ? ['wait', '–', 'Skipped'] :
       r.conclusion === 'cancelled' ? ['wait', '⊘', 'Cancelled'] : ['bad', '✕', 'Failed'];
-    const where = join(r.repo.split('/')[1], r.runner, going && r.step ? 'step ' + (r.steps_done + 1) + '/' + r.steps_total + ': ' + r.step : '');
+    const where = join(r.repo.split('/')[1], r.runner, going && r.step && !r.progress ? 'step ' + (r.steps_done + 1) + '/' + r.steps_total + ': ' + r.step : '');
     const when = going ? ['for ', since(r.started)] : waiting ? ['queued ', since(r.created)] : [ago(r.updated)];
     return el('li', null, el('div', {class: 'run-row'}, el('span', {class: 'ico ' + ico[0], role: 'img', 'aria-label': ico[2], text: ico[1]}),
       el('div', null, a(r.url, 'title', r.name + (r.pr ? ' · PR #' + r.pr : '')),
-        el('p', {class: 'sub'}, ...sep(where), where.length ? ' · ' : '', ...when),
-        buildDetail(r.progress), going && r.steps_total ? bar(r.steps_done / r.steps_total) : null, runControls(r))));
+        buildDetail(r.progress, r), el('p', {class: 'sub'}, ...sep(where), where.length ? ' · ' : '', ...when),
+        r.progress ? githubSteps(r) : going && r.steps_total ? bar(r.steps_done / r.steps_total) : null, runControls(r))));
   }
   function prRow(p) {
     const c = p.checks || {};

@@ -35,14 +35,16 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
-VERSION = "3"  # also reports recent build-tool output in the PR's reserved checkout
+VERSION = "4"  # includes substeps and photo progress from the reserved checkout
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -243,15 +245,105 @@ def disks(roots) -> list:
     return out
 
 
+# Only send descriptions of known outputs. Raw logs, paths and filenames stay on the machine.
+CHECK_OUTPUTS = {
+    "Logs/Build_LifeShareEditor.log": "Editor build",
+    "Logs/BuildContent.log": "Game data build",
+    "Logs/ValidateData.log": "Data validation",
+    "Logs/Specs.log": "Automation specs",
+    "Logs/CheckHomes.log": "Home checks",
+    "Logs/ImportEnvironment.log": "Environment import",
+    "Logs/ImportCharacters.log": "Character import",
+    "Logs/ImportAnimals.log": "Animal import",
+    "Logs/ImportFurniture.log": "Furniture import",
+    "Logs/ImportAudio.log": "Importing game audio",
+    "Logs/ImportIcons.log": "Importing interface icons",
+    "Logs/ImportActivityWardrobe.log": "Importing activity outfits",
+    "Logs/ImportQuaternius.log": "Importing character activity animations",
+    "Logs/ImportFolkClips.log": "Importing Folks' animations",
+    "Logs/ImportVehicles.log": "Importing vehicles",
+    "Logs/ImportHomeKit-stage.log": "Preparing home-building assets",
+    "Logs/ImportHomeKit.log": "Importing home-building assets",
+    "Logs/ImportSimReady.log": "Importing SimReady props",
+    "Logs/BuildMaps.log": "Building game maps",
+    "Logs/BuildTown_City.log": "Building the City map",
+    "Logs/NavBake_Bake.txt": "Baking walkable areas in City",
+    "Logs/NavBake_Game.txt": "Measuring walkable areas in the game",
+    "Logs/NavBake_Diff.txt": "Comparing walkable areas in City",
+    "LSMapShots/City.log": "Taking a City map photo",
+    "Logs/ImportMapShots.log": "Importing map photos",
+    "LSHomeCardShots/City.log": "Taking City home-selection photos",
+    "Logs/ImportHomeShots.log": "Importing home-selection photos",
+}
+SCENARIO_OUTPUTS = {
+    "LSNavCheck": ("navcheck_", "Checking walkable routes in City", ("host.log", "navcheck.txt")),
+    "LSFlowTest": ("flow_", "Testing the menus, family creation and save/load", ("Ava.log", "Ben.log")),
+    "LSFourPlayerSmoke": ("four_", "Testing a four-player game", ("Ava.log", "Ben.log", "Cleo.log", "Dana.log")),
+    "LSM3bTest": ("m3b_", "Testing multiplayer consent and spending", ("Ava.log", "Ben.log")),
+    "LSM4bTest": ("m4b_", "Testing multiplayer disconnect and rejoin", ("Ava.log", "Ben1.log", "Ben2.log")),
+    "LSM5aTest": ("m5a_", "Testing visits between player families", ("Ava.log", "Ben.log")),
+}
+
+
+def _output_time(path: Path) -> float:
+    try:
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode):
+            return info.st_mtime
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _check_observations(saved: Path, acquired: float, now: float):
+    for relative, label in CHECK_OUTPUTS.items():
+        yield _output_time(saved / relative), label
+
+    # Unreal may buffer its open log on Windows. Each separately written photo is a measured milestone.
+    photos = saved / "LSHomeCardShots"
+    latest_photo = 0
+    count = 0
+    try:
+        with os.scandir(photos) as entries:
+            for entry in islice(entries, 256):
+                if re.fullmatch(r"T_UI_Home_City_[A-Za-z0-9_-]+\.png", entry.name, re.I):
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISREG(info.st_mode) and info.st_size and acquired <= info.st_mtime <= now:
+                        latest_photo = max(latest_photo, info.st_mtime)
+                        count += 1
+            truncated = next(entries, None) is not None
+        if count:
+            log_time = _output_time(photos / "City.log")
+            stamp = max(latest_photo, log_time if acquired <= log_time <= now else 0)
+            amount = f"at least {count}" if truncated else str(count)
+            noun = "photo" if count == 1 else "photos"
+            yield stamp, f"City home-selection photos ({amount} {noun} saved)"
+    except (OSError, ValueError):
+        pass
+
+    # Test scripts create a new tagged directory per run. Ignore earlier runs and archived retries.
+    for folder, (prefix, label, filenames) in SCENARIO_OUTPUTS.items():
+        area = saved / folder
+        try:
+            if area.stat().st_mtime < acquired:
+                continue
+            with os.scandir(area) as entries:
+                for entry in islice(entries, 256):
+                    if not entry.name.startswith(prefix) or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if entry.stat(follow_symlinks=False).st_mtime >= acquired:
+                        for filename in filenames:
+                            yield _output_time(Path(entry.path) / filename), label
+        except (OSError, ValueError):
+            continue
+
+
 def latest_check_output(lease: dict, now: float) -> dict | None:
     """Older check scripts have no phase marker. Report the last known tool to write in this lease, by timestamp."""
     try:
         acquired = datetime.fromisoformat(lease["acquiredUtc"].replace("Z", "+00:00")).timestamp()
     except (KeyError, AttributeError, ValueError, OSError):
         return None
-    names = {"Build_LifeShareEditor": "Editor build", "BuildContent": "Game data build", "ValidateData": "Data validation",
-             "Specs": "Automation specs", "CheckHomes": "Home checks", "ImportEnvironment": "Environment import",
-             "ImportCharacters": "Character import", "ImportAnimals": "Animal import", "ImportFurniture": "Furniture import"}
     newest, label = 0, ""
     roots = lease.get("workspaces")
     if isinstance(roots, str):
@@ -259,12 +351,8 @@ def latest_check_output(lease: dict, now: float) -> dict | None:
     for root in roots[:4] if isinstance(roots, list) else []:
         if not isinstance(root, str) or root.startswith(("\\\\", "//")) or not Path(root).is_absolute():
             continue
-        for stem, task in names.items():
-            try:
-                stamp = (Path(root) / "Saved" / "Logs" / (stem + ".log")).stat().st_mtime
-            except (OSError, ValueError):
-                continue
-            if acquired <= stamp <= now and now - stamp <= FRESH and stamp > newest:
+        for stamp, task in _check_observations(Path(root) / "Saved", acquired, now):
+            if acquired <= stamp <= now and stamp >= newest and stamp > 0:
                 newest, label = stamp, task
     if label:
         return {"label": label, "at": datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}

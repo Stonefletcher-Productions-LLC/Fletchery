@@ -225,16 +225,32 @@ const server = http.createServer((req, res) => {
 
     // Live shows every build going on, on any machine, at the top.
     assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
-    assert.equal(await page.locator('#liveBuilding [role=progressbar]').getAttribute('aria-valuenow'), '40');
+    assert.equal(await page.locator('#liveBuilding [role=progressbar]').count(), 0);
+    assert.equal(await page.locator('#liveBuilding li p').first().textContent(), 'Importing environments');
     assert.match(await page.textContent('#liveBuilding'), /Importing environments[\s\S]*About 12 min left in this job · 3 past checks on this PR/);
-    const activeProgress = live.building[0].progress;
-    live.building[0].progress = {waiting_machine: true, phase: {label: 'Waiting for the machine reservation', since: liveAt},
+    const activeJob = live.building[0];
+    const latestOutput = {label: 'Building the town', at: ago(8)};
+    const rawJob = {kind: 'check', title: 'PR check #12 (GitHub run 7): PrCheckJob.ps1',
+      since: ago(45), reservation_holder: true, machine: 'Gaming PC', last_output: latestOutput};
+    const suspect = live.bases.find(b => b.state === 'red').suspects.find(s => s.first_bad);
+    suspect.first_bad = false;
+    live.building[0] = rawJob;
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    await page.waitForSelector('#liveBuilding [data-ago="' + latestOutput.at + '"]');
+    assert.match(await page.innerText('#liveBuilding'), /Building the town[\s\S]*Last observed activity · 8 min ago[\s\S]*Machine held for 45 min[\s\S]*Finish time unknown[\s\S]*PR #12 · Gaming PC/);
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /PrCheckJob|GitHub steps/);
+    assert.match(await page.innerText('#baseBanner'), /Merged before the failure/);
+    assert.doesNotMatch(await page.innerText('#baseBanner'), /First bad/);
+    suspect.first_bad = true;
+    live.building[0] = {...rawJob, kind: 'queued', progress: {waiting_machine: true, phase: {label: 'Waiting for the machine reservation', since: liveAt},
       reservation: {holder: 'Lake photographs', machine: 'Gaming PC', since: liveAt, ahead: 0, start_in: 900,
-        release: {basis: 'step', samples: 1, failed: 1, url: gh + '/actions/runs/91'}}};
+        release: {basis: 'step', samples: 1, failed: 1, url: gh + '/actions/runs/91'}}}};
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
     await page.waitForFunction(() => document.querySelector('#liveBuilding').textContent.includes('Rough start in ~15 min'));
     assert.match(await page.textContent('#liveBuilding'), /Gaming PC is held by Lake photographs · held for[\s\S]*Next in line[\s\S]*1 ended in failure/);
-    live.building[0].progress = activeProgress;
+    assert.equal(await page.locator('#liveBuilding .task-title').textContent(), 'Waiting for Gaming PC');
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /Building the town|GitHub steps/);
+    live.building[0] = activeJob;
 
     // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');
@@ -402,6 +418,7 @@ const server = http.createServer((req, res) => {
     await win.click('#tab-live');
     await win.waitForSelector('#liveMachines .m-name');
     assert.equal(await win.$$eval('#view-live .cols > .col', l => l.filter(c => c.offsetWidth > 0).length), 2, 'two columns on a wide window');
+    assert.equal(await win.locator('#liveBuilding .task-title').innerText(), 'Importing environments');
     assert.deepEqual(await where('liveBuildingCard'), [0, 0]);
     assert.deepEqual(await where('liveMachinesCard'), [1, 0]);
     const g = await win.$('#liveMachinesCard .grip');

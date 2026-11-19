@@ -87,7 +87,10 @@ def base_health(store, repo: str, branch: str, *, required=None, prs=(), issues=
     out["first_bad"] = first["sha"][:12]
     out["last_green"] = green["sha"][:12] if green else ""
     out["suspects"] = suspects(store, repo, branch, first, green)
-    red_issues = [i for i in issues if any(str(lab).lower() in {x.lower() for x in red_issue_labels} for lab in i.get("labels") or [])]
+    red_labels = {x.lower() for x in red_issue_labels}
+    branch_in_title = re.compile(r"(?<![\w./-])" + re.escape(branch) + r"(?![\w./-])")
+    red_issues = [i for i in issues if any(str(lab).lower() in red_labels for lab in i.get("labels") or [])
+                  and branch_in_title.search(str(i.get("title") or ""))]
     nums = {int(i["number"]) for i in red_issues if isinstance(i.get("number"), int)}
     fixes = []
     for p in prs:
@@ -129,7 +132,7 @@ def test_names(annotations: list) -> list:
     GitHub's own generic lines ("Process completed with exit code 1")."""
     out = []
     for n in annotations or []:
-        if not isinstance(n, dict) or n.get("annotation_level") not in (None, "failure", "warning"):
+        if not isinstance(n, dict) or n.get("annotation_level") not in (None, "failure"):
             continue
         lines = str(n.get("message") or "").strip().splitlines()
         text = re.sub(r"\s+", " ", str(n.get("title") or "").strip() or (lines[0] if lines else ""))[:100]

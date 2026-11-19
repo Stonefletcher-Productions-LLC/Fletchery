@@ -149,6 +149,10 @@ class Store:
              ts(c.get("completed_at")) or time.time())
             for c in checks if isinstance(c, dict) and c.get("status") == "completed" and c.get("name")))
 
+    def forget_base_checks(self, repo: str, branch: str, sha: str, names) -> None:
+        self._write("DELETE FROM base_checks WHERE repo=? AND branch=? AND sha=? AND name=?",
+                    ((repo, branch, sha, name) for name in names))
+
     def disk(self, machine: str, drive: str, free_gb: float, at: float | None = None) -> None:
         """One disk reading; at most one a minute is kept per drive."""
         t = at or time.time()

@@ -170,6 +170,9 @@ A build script can report the phase inside the GitHub **Build and test** step us
 Write a record with `kind` set to `pr-phase`, `title` set to `owner/repository@run_id/attempt`, a short
 human-readable `detail`, and the phase's UTC start time in `since`. Refresh the file while the phase is active
 and remove it at exit. The dashboard matches it to the current machine, run, attempt and step start time.
+For a check that predates phase reporting, the Gaming PC can identify the latest tool output in the reserved
+checkout. Its timestamp remains visible during quiet periods so you can see how recently the job produced evidence.
+The GitHub step count describes the outer workflow. Several imports, builds and tests can happen within one step.
 
 **Disk space.** When a disk guard writes `<lease folder>\disk.json` (LifeShare's `Tools/CI/DiskGuard.ps1`, every 10
 minutes: `drive`, `freeGB`, `totalGB`, `state` ok/low/full, `warnGB`, `runnerStopped`, `holders`), the reporter (version

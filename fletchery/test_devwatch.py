@@ -134,6 +134,14 @@ class Feed(unittest.TestCase):
             self.assertEqual(s["building"][0]["progress"], s["runs"][0]["progress"])
         w.reports["pc"]["at"] = ago(10)
         self.assertNotIn("phase", w.snapshot()["building"][0]["progress"])
+        for age, within_phase in ((8, False), (2, True)):
+            output = {"label": "Testing a four-player game", "at": ago(age)}
+            w.report("pc", {"host": "ALEX-PC", "activities": [phase],
+                            "lease": {"purpose": "PR check #12 (GitHub run 7)", "since": ago(12),
+                                      "alive": True, "last_output": output}})
+            progress = w.snapshot()["building"][0]["progress"]
+            self.assertEqual(progress["phase"]["label"], "Running specs")
+            self.assertEqual("last_output" in progress, within_phase)
         w.report("pc", {"host": "ALEX-PC", "queue": [{"purpose": "PR check #12 (GitHub run 7)", "since": ago(2)}]})
         waiting = w.snapshot()["building"][0]["progress"]
         self.assertTrue(waiting["waiting_machine"])
@@ -253,15 +261,65 @@ class Feed(unittest.TestCase):
         base = w.snapshot()["bases"][0]
         self.assertEqual((base["state"], [f["name"] for f in base["failing"]]), ("red", ["Nightly full"]))
 
+    def test_existing_history_reconciles_only_confirmed_unlinked_statuses_on_this_tip(self):
+        sha = "d" * 40
+        nightly = "Nightly full tests (node)"
+        check = {"head_sha": sha, "status": "completed", "conclusion": "failure", "name": nightly, "completed_at": ago(20)}
+        names = [nightly, "preview-receipt", "sync", "Published report"]
+        legacy = [dict(check, name=name) for name in names]
+        statuses = [{"context": name, "state": "failure", "target_url": "https://example.org/report" if name == "Published report" else None}
+                    for name in names]
+        check_path = f"repos/{REPO}/commits/main/check-runs"
+        status_path = f"repos/{REPO}/commits/{sha}/status"
+        w = self.watch_first({check_path: {"total_count": 2, "check_runs": [check]},
+                              status_path: {"sha": sha, "statuses": statuses}})
+        w.store.base_checks(REPO, "main", sha, legacy)
+        w.store.base_checks(REPO, "other", sha, legacy)
+        w.poll()  # One of two real checks was returned. The absent one might share an unlinked status name.
+        self.assertEqual({f["name"] for f in w.snapshot()["bases"][0]["failing"]}, set(names))
+        w.gh.answers[check_path]["total_count"] = 1
+        w.poll()
+        self.assertEqual({f["name"] for f in w.snapshot()["bases"][0]["failing"]}, {nightly, "Published report"})
+        self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks WHERE branch='other'"), [(4,)])
+
     def test_a_deleted_base_branch_is_not_a_feed_error(self):
-        # A PR merged this week into a branch deleted since: GitHub answers 422 "No commit found for SHA: <branch>".
-        gone = devwatch.GitHubError(422, "No commit found for SHA: claude/old-stack")
+        # The last watched base had a failure in history before it was deleted.
+        path = f"repos/{REPO}/commits/claude%2Fold-stack"
+        check = {"name": "Compile", "head_sha": "c" * 40, "status": "completed", "conclusion": "failure", "completed_at": ago(40)}
         merged = {"number": 30, "title": "Stacked", "merged_at": ago(60), "closed_at": ago(60), "base": {"ref": "claude/old-stack"},
                   "head": {"ref": "claude/top"}, "html_url": "https://github.com/Acme/Game/pull/30"}
-        w = self.watch_first({f"repos/{REPO}/pulls?state=closed": [merged],
-                              f"repos/{REPO}/commits/claude%2Fold-stack": gone})
+        w = self.watch_first({f"repos/{REPO}/pulls?state=open": [], f"repos/{REPO}/pulls?state=closed": [merged],
+                              path: {"check_runs": [check]}})
+        self.assertEqual(w.snapshot()["bases"][0]["state"], "red")
+        w.gh.answers[path] = devwatch.GitHubError(422, "No commit found for SHA: claude/old-stack")
+        w.poll()
+        self.assertEqual(w.snapshot()["bases"], [])
+        w.poll()  # a cached missing ref must also hide the branch
         self.assertEqual(w.error, "")
-        self.assertNotIn("feed", [b["kind"] for b in w.snapshot()["blockers"]])
+        self.assertFalse({"base", "feed"} & {b["kind"] for b in w.snapshot()["blockers"]})
+        # A generic permission failure is inconclusive. Preserve the last known check in that case.
+        w.skip.clear()
+        w.gh.answers[path] = devwatch.GitHubError(403, "Forbidden")
+        w.poll()
+        self.assertEqual(w.snapshot()["bases"][0]["state"], "red")
+
+    def test_base_failure_details_belong_to_the_current_check_run(self):
+        def check(cid):
+            return {"check_runs": [{"id": cid, "name": "Compile", "status": "completed", "conclusion": "failure",
+                                    "head_sha": str(cid) * 40, "completed_at": ago(10), "output": {"annotations_count": 1}}]}
+
+        main_path = f"repos/{REPO}/commits/main/check-runs"
+        w = self.watch_first({main_path: check(1), f"repos/{REPO}/commits/staging/check-runs": check(2),
+                              **{f"repos/{REPO}/check-runs/{i}/annotations": [{"annotation_level": "failure", "title": f"Test {i}"}]
+                                 for i in (1, 2, 3)}})
+        w.bases_conf[REPO.lower()] = ["staging"]
+        w.poll()
+        def details():
+            return {b["branch"]: b["failing"][0]["tests"] for b in w.snapshot()["bases"]}
+        self.assertEqual(details(), {"main": ["Test 1"], "staging": ["Test 2"]})
+        w.gh.answers[main_path] = check(3)
+        w.poll()
+        self.assertEqual(details(), {"main": ["Test 3"], "staging": ["Test 2"]})
 
     def test_red_checks_grouped_by_cause(self):
         # PR #13 fails the same check as its red base (inherited); PR #12 fails in a setup step (the machine).
@@ -491,7 +549,7 @@ class Feed(unittest.TestCase):
     def test_a_refused_runner_list_is_asked_again_after_an_hour(self):
         w = self.watch(**{f"orgs/{ORG}/actions/runners": devwatch.GitHubError(403, "Must have admin rights")})
         path = f"orgs/{ORG}/actions/runners?per_page=100"
-        self.assertAlmostEqual(w.skip[path] - time.time(), devwatch.RUNNER_REFUSED_RETRY, delta=5)
+        self.assertAlmostEqual(w.skip[path][0] - time.time(), devwatch.RUNNER_REFUSED_RETRY, delta=5)
         self.assertEqual(devwatch.RUNNER_REFUSED_RETRY, 3600)
 
     def test_a_run_for_a_closed_pull_request_is_flagged(self):
@@ -524,6 +582,26 @@ class Feed(unittest.TestCase):
         w.poll()
         self.assertFalse(any("b" * 40 in p for p in w.gh.asked))
         self.assertTrue(any("a" * 40 in p for p in w.gh.asked))
+
+    def test_latest_output_remains_during_a_quiet_lease_and_expires_with_the_report(self):
+        w = devwatch.DevWatch(github=FakeGitHub({}))
+        lease = {"purpose": "PR check #12 (GitHub run 7)", "since": ago(45), "alive": True}
+        out = {"label": "Checking navigation", "at": ago(12)}
+        for timestamp, expected in ((out["at"], True), (ago(50), False)):
+            w.report("node", {"host": "node", "lease": {**lease, "last_output": {**out, "at": timestamp}}})
+            self.assertEqual("last_output" in w.snapshot()["building"][0], expected)
+        w.report("node", {"host": "node", "lease": {**lease, "last_output": out}})
+        w.reports["node"]["at"] = ago(2)
+        self.assertNotIn("last_output", w.snapshot()["building"][0])
+
+    def test_reporter_alone_identifies_a_waiting_pr_and_its_holder(self):
+        w = devwatch.DevWatch(github=FakeGitHub({}))
+        w.report("node", {"host": "node", "lease": {"purpose": "City photos", "since": ago(30), "alive": True},
+                          "queue": [{"purpose": "local run PR check #12 (GitHub run 7)", "since": ago(25)}]})
+        row = next(a for a in w.snapshot()["building"] if a["kind"] == "queued")
+        self.assertEqual(row["progress"]["reservation"]["holder"], "City photos")
+        self.assertEqual(row["progress"]["reservation"]["ahead"], 0)
+        self.assertIsNone(row["progress"]["reservation"]["start_in"])
 
     def test_machine_reports(self):
         w = self.watch()
