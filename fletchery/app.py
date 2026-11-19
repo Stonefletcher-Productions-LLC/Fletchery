@@ -200,6 +200,7 @@ class App:
                 self.machines = None
                 self.errors["machines"] = f"Build machines not started: {type(e).__name__}: {e}"
                 self.log(self.errors["machines"])
+        import layout
         import portal
         try:
             conf = portal.settings(self.cfg.portal) or {"port": 0, "hosts": [], "users": [], "push": None, "live": {}}
@@ -209,7 +210,8 @@ class App:
             conf = {"port": 0, "hosts": [], "users": [], "push": None, "live": {}}
         port = self.cfg.dashboard_port if dashboard_port is None else dashboard_port
         self.portal = portal.Portal(self.status, conf, self.state_dir, self.log, self.cfg.repo, desktop_port=port,
-                                    actions=self.actions(), job_log=self.job_log)
+                                    actions=self.actions(), job_log=self.job_log,
+                                    layout=layout.Layout(layout.path_for(getattr(self.cfg, "_path", None), self.state_dir)))
         if self.portal.live is not None:
             self.portal.live.extra = self.machine_blockers
             self.portal.live.own_builds = self.machine_jobs

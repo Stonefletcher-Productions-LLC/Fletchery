@@ -37,6 +37,7 @@ let off = false;   // the whole PC is unreachable: not even the page's own files
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
 const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const posts = [];
+let layoutFile = null;   // what the backend keeps in <Name>.layout.json
 const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
   const send = (code, body, type) => { res.writeHead(code, {'Content-Type': type, 'Content-Security-Policy': csp, 'Cache-Control': 'no-store'}); res.end(body); };
@@ -47,6 +48,11 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       const parsed = JSON.parse(body || '{}');
       if (url.startsWith('/api/push')) return send(200, '{}', 'application/json');
+      if (url.startsWith('/api/layout')) {
+        if (mode === 'readonly') return send(403, JSON.stringify({error: 'read-only'}), 'application/json');
+        layoutFile = url === '/api/layout/reset' ? null : parsed.layout;
+        return send(200, JSON.stringify({layout: layoutFile}), 'application/json');
+      }
       posts.push([url, parsed]);
       if (mode === 'readonly') return send(403, JSON.stringify({error: 'Do this in the Fletchery window on the PC.'}), 'application/json');
       if (parsed.id === 'nope') return send(400, JSON.stringify({error: 'Build not found.'}), 'application/json');
@@ -57,6 +63,7 @@ const server = http.createServer((req, res) => {
   if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify({...data, desktop: mode === 'desktop', controls: mode !== 'readonly'}), 'application/json');
   if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt, fresh: {...live.fresh, github: liveAt}}), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
+  if (url === '/api/layout') return send(200, JSON.stringify({layout: layoutFile, can_save: mode !== 'readonly'}), 'application/json');
   if (url === '/api/jobs/log') return send(200, 'step 1\nstep 2', 'text/plain');
   const file = path.join(__dirname, 'portal', url === '/' ? 'index.html' : path.basename(url));
   if (!fs.existsSync(file)) return send(404, '{}', 'application/json');
@@ -318,7 +325,7 @@ const server = http.createServer((req, res) => {
     await ro.goto(base + '/#builds');
     await ro.waitForSelector('#buildsOpen .title');
     assert.equal(await ro.isVisible('#newBuildCard'), false);
-    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent && !b.classList.contains('fold')).length), 0);
+    assert.equal(await ro.$$eval('#view-builds button', l => l.filter(b => b.offsetParent && !b.classList.contains('fold') && !b.classList.contains('grip')).length), 0);
     await ro.click('#tab-activity');
     assert.equal(await ro.isVisible('#restart'), false);
     assert.equal(await ro.isVisible('#reload'), true);
@@ -372,6 +379,52 @@ const server = http.createServer((req, res) => {
       await win.waitForSelector('#health .title');
       await win.screenshot({path: path.join(shots, 'desktop-activity.png')});
     }
+
+    // Cards move: drag one by its grip, or arrow keys on the grip; the layout is saved on the PC and comes back.
+    const until = async (test, what) => { for (let i = 0; i < 50 && !test(); i++) await new Promise(r => setTimeout(r, 100)); assert.ok(test(), what); };
+    const where = id => win.evaluate(id => { const c = document.getElementById(id), col = c.parentElement;
+      return [[...col.parentElement.children].indexOf(col), [...col.children].indexOf(c)]; }, id);
+    await win.click('#tab-live');
+    await win.waitForSelector('#liveMachines .m-name');
+    assert.equal(await win.$$eval('#view-live .cols > .col', l => l.filter(c => c.offsetWidth > 0).length), 2, 'two columns on a wide window');
+    assert.deepEqual(await where('liveBuildingCard'), [0, 0]);
+    assert.deepEqual(await where('liveMachinesCard'), [1, 0]);
+    const g = await win.$('#liveMachinesCard .grip');
+    const gb = await g.boundingBox(), tb = await (await win.$('#liveBuildingCard')).boundingBox();
+    await win.mouse.move(gb.x + gb.width / 2, gb.y + gb.height / 2);
+    await win.mouse.down();
+    await win.mouse.move(tb.x + 40, tb.y + 30, {steps: 8});
+    await win.mouse.move(tb.x + 40, tb.y + 10, {steps: 4});
+    assert.equal(await win.evaluate(() => document.body.classList.contains('arranging')), true);
+    await win.mouse.up();
+    assert.deepEqual(await where('liveMachinesCard'), [0, 0], 'dropped above Building now');
+    assert.deepEqual(await where('liveBuildingCard'), [0, 1]);
+    await until(() => layoutFile && layoutFile.views.live[0][0] === 'liveMachinesCard', 'the drag is saved on the PC');
+    await win.focus('#liveMachinesCard .grip');
+    await win.keyboard.press('ArrowRight');
+    await win.keyboard.press('ArrowDown');   // already last in that column: stays
+    assert.deepEqual(await where('liveMachinesCard'), [1, (await win.$$eval('#view-live .col:nth-child(2) > .card', l => l.length)) - 1]);
+    assert.equal(await win.evaluate(() => document.activeElement.classList.contains('grip')), true, 'focus stays on the grip');
+    await until(() => layoutFile.views.live[1].includes('liveMachinesCard'), 'the key move is saved');
+    await win.evaluate(() => localStorage.clear());   // the file on the PC is what brings it back
+    await win.reload();
+    await win.waitForSelector('#liveMachines .m-name');
+    await win.waitForFunction(() => document.getElementById('liveMachinesCard').parentElement === document.querySelector('#view-live .col:nth-child(2)'));
+    await win.click('#tab-activity');
+    await win.click('.layout-cols button[data-cols="3"]');
+    await until(() => layoutFile.columns === 3, 'three columns saved');
+    assert.equal(await win.getAttribute('.layout-cols button[data-cols="3"]', 'aria-pressed'), 'true');
+    await win.click('#tab-live');
+    assert.equal(await win.$$eval('#view-live .cols > .col', l => l.length), 3);
+    await win.setViewportSize({width: 700, height: 900});
+    assert.equal(await win.$$eval('#view-live .cols > .col', l => new Set(l.filter(c => c.offsetWidth).map(c => c.getBoundingClientRect().left)).size), 1, 'one column when narrow');
+    await win.setViewportSize({width: 1400, height: 1000});
+    await win.click('#tab-activity');
+    await win.click('#layoutReset');
+    await until(() => layoutFile === null, 'reset clears the file');
+    await win.click('#tab-live');
+    assert.deepEqual(await where('liveBuildingCard'), [0, 0]);
+    assert.deepEqual(await where('liveMachinesCard'), [1, 0]);
 
     // Several projects on Live: a chip shows one at a time.
     mode = 'phone';

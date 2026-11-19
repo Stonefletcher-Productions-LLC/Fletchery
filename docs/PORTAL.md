@@ -115,6 +115,13 @@ the [README](../README.md#what-you-see). Code: `fletchery/devwatch.py` (the feed
 machine), `ui/portal/live.js`.
 
 Every card folds (tap its heading) and remembers that on the phone; long lists show a few rows and **Show N more**.
+
+Every card also moves. Drag it by the grip (⠿) at the left of its heading, up or down or into another column, or focus
+the grip and use the arrow keys (left and right change column). **Activity > Page layout** sets 1, 2 or 3 columns for a
+wide window (a narrow window and the phone stack them in one) and has **Reset the layout**. The arrangement and what is
+folded are saved on the PC in `<Name>.layout.json` beside the profile (`%APPDATA%\Fletchery\Projects`), so a new install
+keeps them, and every screen that opens the page uses the same layout. A read-only phone (`"controls": false`) can move
+cards too, but keeps that arrangement to itself.
 Several projects: chips under the numbers show one project at a time (remembered per device). The phone app loads the
 newest page from the PC whenever it answers within 4 seconds, and its saved copy only when the PC can't be reached, so
 an update shows on the next open.

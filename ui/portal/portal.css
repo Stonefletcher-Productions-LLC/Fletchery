@@ -254,11 +254,11 @@ body.desktop .toast { bottom: 24px; }
 /* and two columns when it is wide enough */
 @media (min-width: 900px) {
   body.desktop main { max-width: 1280px; padding-top: 16px; }
-  /* two columns that fill top to bottom, so a short card leaves no gap beside a long one */
-  body.desktop #view-live:not([hidden]), body.desktop #view-builds:not([hidden]) { columns: 2; column-gap: 14px; }
-  body.desktop .view > .card { break-inside: avoid; display: inline-block; width: 100%; }
-  body.desktop #view-live > .alert, body.desktop #view-live > .stats, body.desktop #view-live > .filters, body.desktop #view-live > .flow,
-  body.desktop #view-live > .fine { column-span: all; }
+  /* the person's columns (kit.js, Activity > Page layout): each fills top to bottom, so a short card leaves no gap */
+  body.desktop .cols { display: flex; align-items: flex-start; gap: 14px; }
+  body.desktop .col { flex: 1 1 0; min-width: 0; }
+  body.desktop .col:empty { display: none; }
+  body.desktop.arranging .col:empty { display: block; }
 }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 6px; }
 .toolbar .msg { margin: 0 0 0 6px; }
@@ -364,3 +364,17 @@ body.desktop .fresh { margin-top: -4px; }
 /* a step with no usual time yet: a striped bar that says it is running, without pretending to know how far */
 .pb .meter.learning > span { width: 100% !important; opacity: .55;
   background: repeating-linear-gradient(135deg, var(--running) 0 8px, transparent 8px 16px); }
+
+/* Moving cards (kit.js): a grip in each heading; while dragging, the card follows the pointer and a hole shows where it lands */
+.card h2 { display: flex; align-items: center; gap: 2px; }
+.card h2 .grip { all: unset; box-sizing: border-box; flex: none; display: grid; place-items: center; width: 28px; min-height: 32px; margin-left: -6px;
+  color: var(--muted); font-size: 16px; line-height: 1; cursor: grab; touch-action: none; border-radius: 6px; opacity: .55; }
+.card h2 .grip:hover, .card h2 .grip:focus-visible { opacity: 1; background: var(--soft); }
+.card h2 .grip:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
+.card.dragging { position: fixed; z-index: 30; margin: 0; pointer-events: none; opacity: .92; box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
+.card-hole { margin-bottom: 10px; border: 2px dashed var(--accent); border-radius: 12px; background: var(--soft); }
+body.arranging, body.arranging * { cursor: grabbing !important; user-select: none; }
+body.arranging .col:empty { min-height: 120px; margin-bottom: 10px; border: 2px dashed var(--rule); border-radius: 12px; }
+.layout-cols { display: inline-flex; gap: 4px; margin-left: 4px; }
+.layout-cols button[aria-pressed="true"] { background: var(--accent); color: var(--paper); border-color: var(--accent); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

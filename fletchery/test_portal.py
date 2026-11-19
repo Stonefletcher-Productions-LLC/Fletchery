@@ -9,6 +9,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import layout  # noqa: E402
 import portal  # noqa: E402
 import push  # noqa: E402
 from config import Config  # noqa: E402
@@ -116,7 +117,8 @@ class Served(unittest.TestCase):
             return run
         acts = {p: action(p) for p in ("/api/builds/add", "/api/builds/cancel", "/api/jobs/cancel", "/api/machines/hold", "/api/restart")}
         self.p = portal.Portal(lambda: STATUS, conf, self.tmp.name, desktop_port=self.desk, actions=acts,
-                               job_log=lambda job: f"job {job} ran in E:\\lifeshare-scratch\\slot-1")
+                               job_log=lambda job: f"job {job} ran in E:\\lifeshare-scratch\\slot-1",
+                               layout=layout.Layout(Path(self.tmp.name) / "Harbor.layout.json"))
         self.p.push.start = lambda: None
         self.p.live.start = lambda: None      # never reads the real GitHub in tests (test_devwatch.py fakes it)
         self.p.start()
@@ -214,6 +216,23 @@ class Served(unittest.TestCase):
         log = self.ask("/api/jobs/log?id=7", h, port=self.desk)[1].decode()
         self.assertIn("lifeshare-scratch", log)   # the window is on this PC: paths as they are
 
+    def test_the_layout_is_kept_in_a_file_beside_the_profile(self):
+        h = {"Host": f"127.0.0.1:{self.desk}"}
+        self.assertEqual(json.loads(self.ask("/api/layout", h, port=self.desk)[1]), {"layout": None, "can_save": True})
+        mine = {"columns": 3, "views": {"live": [["liveMachinesCard"], ["liveBuildingCard", "liveBuildingCard", "../x"], [], ["extra"]]},
+                "folded": ["h-liss"], "secret": "C:/Users"}
+        code, body, _ = self.desk_post("/api/layout", json.dumps({"layout": mine}).encode())
+        self.assertEqual(code, 200, body)
+        want = {"version": 1, "columns": 3, "views": {"live": [["liveMachinesCard"], ["liveBuildingCard"], []]}, "folded": ["h-liss"]}
+        self.assertEqual(json.loads(body)["layout"], want)            # names only; a fourth column and odd ids are dropped
+        self.assertEqual(json.loads((Path(self.tmp.name) / "Harbor.layout.json").read_text(encoding="utf-8")), want)
+        self.assertEqual(json.loads(self.ask("/api/layout", self.remote())[1])["layout"], want)   # the phone sees it too
+        self.assertEqual(self.desk_post("/api/layout", b'{"layout": {"columns": 9}}')[0], 400)
+        self.assertEqual(self.desk_post("/api/layout", b'{"layout": []}')[0], 400)
+        self.assertEqual(self.desk_post("/api/layout", Origin="https://evil.example.com")[0], 403)
+        self.assertEqual(self.desk_post("/api/layout/reset")[0], 200)
+        self.assertEqual(json.loads(self.ask("/api/layout", h, port=self.desk)[1])["layout"], None)
+
     def test_the_window_port_answers_only_this_pc(self):
         for headers in ({"Host": f"127.0.0.1:{self.desk}", "X-Forwarded-For": "100.64.0.9"},
                         {"Host": "evil.example.com"}, {"Host": f"127.0.0.1:{self.desk}", "Tailscale-User-Login": USER}):
@@ -269,6 +288,8 @@ class ReadOnlyPhone(Served):
         self.assertIn("read-only", json.loads(body)["error"])
         self.assertEqual(self.ask("/api/jobs/log?id=7", self.remote())[0], 404)
         self.assertEqual(self.desk_post("/api/restart")[0], 200)   # the window still can
+        self.assertEqual(json.loads(self.ask("/api/layout", self.remote())[1])["can_save"], False)
+        self.assertEqual(self.phone_post("/api/layout", b'{"layout": {"columns": 1}}')[0], 403)   # the phone keeps its own
 
     # the inherited tests below assume phone controls; they run in Served
     test_the_phone_has_every_control = None
@@ -276,6 +297,24 @@ class ReadOnlyPhone(Served):
 
 
 @unittest.skipUnless(push.crypto_ready(), "the cryptography package is not installed")
+class LayoutFile(unittest.TestCase):
+    def test_beside_the_profile_so_an_install_keeps_it(self):
+        self.assertEqual(layout.path_for(Path("C:/a/Projects/LifeShare.profile.json"), Path("E:/state")),
+                         Path("C:/a/Projects/LifeShare.layout.json"))
+        self.assertEqual(layout.path_for(Path("C:/a/odd.json"), Path("E:/state")), Path("C:/a/odd.layout.json"))
+        self.assertEqual(layout.path_for(None, Path("E:/state")), Path("E:/state/layout.json"))
+
+    def test_a_broken_file_is_no_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "x.layout.json"
+            lay = layout.Layout(f)
+            self.assertIsNone(lay.read())
+            f.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(lay.read())
+            lay.save({"views": {"live": [["a"]]}})
+            self.assertEqual(lay.read(), {"version": 1, "columns": 2, "views": {"live": [["a"]]}, "folded": []})
+
+
 class Notifications(unittest.TestCase):
     def setUp(self):
         from cryptography.hazmat.primitives import serialization
