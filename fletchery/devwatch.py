@@ -397,7 +397,8 @@ def _runner_job(run: dict) -> dict:
     """What a runner is doing, from its run row: enough to see a step that runs too long or a run nobody needs."""
     return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
             "step": run["step"], "step_started": run["step_started"], "url": run["url"], "started": run["started"],
-            "status": run["status"], "pr_closed": bool(run.get("pr_closed")), "pr": run["pr"]}
+            "status": run["status"], "pr_closed": bool(run.get("pr_closed")), "pr": run["pr"],
+            "steps_done": run["steps_done"], "steps_total": run["steps_total"], "name": run["job"]}
 
 
 class DevWatch:
@@ -675,6 +676,19 @@ class DevWatch:
         out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
                "merged_all": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
+        if len(runs) == 20:
+            # GitHub's recent list is ordered by creation time. A long check can disappear from it while still running.
+            by_id = {r["id"]: r for r in runs}
+            for status in ("in_progress", "queued"):
+                page = 1
+                while True:
+                    path = f"repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"
+                    batch = (self._try(path) or {}).get("workflow_runs") or []
+                    by_id.update((r["id"], r) for r in batch)
+                    if len(batch) < 100:
+                        break
+                    page += 1
+            runs = list(by_id.values())
         out["runs"] = runs
         for run in runs:
             before = self.jobs.get(run["id"])
@@ -694,7 +708,15 @@ class DevWatch:
                 notes = self._try(f"repos/{repo}/check-runs/{job['id']}/annotations?per_page=20") or [] if job and job.get("id") else []
                 how, who = rules.cancel_reason(notes)
                 self.cancels[(repo, run["id"])] = {"how": how, "who": who}
-        prs = self._try(f"repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50") or []
+        path = f"repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        batch = self._try(path) or []
+        pulls = {p["number"]: p for p in batch}
+        page = 1
+        while len(batch) == 50:
+            page += 1
+            batch = self._try(f"{path}&page={page}") or []
+            pulls.update((p["number"], p) for p in batch)
+        prs = list(pulls.values())
         out["prs"] = prs
         for pr in prs:
             sha = (pr.get("head") or {}).get("sha")
@@ -859,8 +881,9 @@ class DevWatch:
                 repo_of_run[r["id"]] = repo
                 prn = ((r.get("pull_requests") or [{}])[0] or {}).get("number") or 0
                 jobs = jobs_by.get(r["id"]) or []
-                live = [j for j in jobs if j.get("status") in ACTIVE] or jobs[:1]
-                job = live[0] if live else {}
+                job = next((j for j in jobs if j.get("status") == "in_progress"), None)
+                if job is None:
+                    job = next((j for j in jobs if j.get("status") in ACTIVE), jobs[0] if jobs else {})
                 steps = job.get("steps") or []
                 cur = next((s for s in steps if s.get("status") == "in_progress"), None)
                 done = sum(1 for s in steps if s.get("status") == "completed")
@@ -1056,6 +1079,7 @@ class DevWatch:
             "schema": SCHEMA,
             "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
             "projects": self.projects_now(),
+            "open_pr_counts": {repo: len(prs) for repo, prs in prs_by.items()},
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
@@ -1589,12 +1613,19 @@ class DevWatch:
             m["runners"].append(r["name"])
             if r["job"]:
                 m["busy"] = True
-                if not any(r["job"]["title"].split(" · ")[0].lower() in a["title"].lower() for a in m["activities"]):
+                job = r["job"]
+                lease = next((a for a in m["activities"] if f"(github run {job['id']})" in a["title"].lower()), None)
+                if lease is not None:
+                    lease.update(repo=job["repo"], pr=job["pr"], run=job["id"], url=job["url"])
+                else:
                     m["activities"].insert(0, {"kind": "check" if "check" in r["job"]["title"].lower() else "working",
                                                "title": r["job"]["title"], "since": r["job"]["started"],
                                                "detail": (f"step: {r['job']['step']} · " if r["job"]["step"] else "") + r["job"]["repo"],
                                                "url": r["job"]["url"], "repo": r["job"]["repo"], "pr": r["job"]["pr"],
                                                "run": r["job"]["id"]})
+                    lease = m["activities"][0]
+                lease.update(job_name=job["name"], step=job["step"], step_started=job["step_started"],
+                             steps_done=job["steps_done"], steps_total=job["steps_total"])
         if self.own_builds is not None:
             try:
                 own = list(self.own_builds() or [])
