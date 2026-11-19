@@ -1,11 +1,14 @@
 """Machines: the node registry, the job queue, the worker API and the node worker, end to end on this machine."""
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from email.message import Message
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).parent))
 import machines  # noqa: E402
@@ -243,6 +246,84 @@ class ApiTests(Base):
         code, body = api.handle("/v1/claim", "NODE-01", key, "ip", {"paused": True, "stats": {"paused": True}})
         self.assertEqual((code, body["job"]), (200, None))
         self.assertTrue(self.m.view()["machines"][0]["stats"]["paused"])
+
+
+class WorkerRequestTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.key = self.node()
+        self.api = WorkerApi(self.m, "127.0.0.1:0")
+        self.api.reports = Mock()
+        self.api.reports.report.return_value = {"ok": True}
+        self.api.start()
+        self.addCleanup(self.api.stop)
+        self.handler = object.__new__(self.api.server.RequestHandlerClass)
+        self.handler.headers = Message()
+        self.handler.headers["X-Fletchery-Machine"] = "NODE-01"
+        self.handler.headers["Authorization"] = "Bearer " + self.key
+        self.handler.client_address = ("127.0.0.1", 31000)
+        self.handler.path = "/v1/report"
+        self.handler._json = Mock()
+
+    def test_report_at_the_portal_limit_is_accepted(self):
+        import portal
+        self.assertEqual(self.handler.timeout, 30)
+        self.assertEqual(machines.MAX_BODY, portal.MAX_BODY)
+        body = b"{}" + b" " * (portal.MAX_BODY - 2)
+        self.handler.headers["Content-Length"] = str(len(body))
+        self.handler.rfile = io.BytesIO(body)
+        self.handler.do_POST()
+        self.handler._json.assert_called_once_with(200, {"ok": True})
+        self.api.reports.report.assert_called_once_with("NODE-01", {}, "127.0.0.1")
+
+    def test_existing_bulk_job_routes_keep_their_separate_limits(self):
+        self.api._dispatch = Mock(return_value=(200, {"ok": True}))
+        body = b"{}" + b" " * machines.MAX_BODY
+        for path, limit in (("/v1/log", 1024 * 1024), ("/v1/result", 1024 * 1024), ("/v1/upload", 8 * 1024 * 1024)):
+            with self.subTest(path=path):
+                self.handler.path = path
+                del self.handler.headers["Content-Length"]
+                self.handler.headers["Content-Length"] = str(len(body))
+                self.handler.rfile = io.BytesIO(body)
+                self.handler.do_POST()
+                self.assertEqual(self.handler._json.call_args.args[0], 200)
+                self.handler.headers.replace_header("Content-Length", str(limit + 1))
+                self.handler.rfile = Mock()
+                self.handler.do_POST()
+                self.assertEqual(self.handler._json.call_args.args[0], 413)
+                self.handler.rfile.read.assert_not_called()
+
+    def test_invalid_sizes_and_framing_are_rejected_before_a_read(self):
+        for lengths, encoding, status in [(["-1"], None, 400), (["invalid"], None, 400),
+                                          (["2", "2"], None, 400), (["2"], "chunked", 400),
+                                          ([str(machines.MAX_BODY + 1)], None, 413)]:
+            with self.subTest(lengths=lengths, encoding=encoding):
+                del self.handler.headers["Content-Length"], self.handler.headers["Transfer-Encoding"]
+                for value in lengths:
+                    self.handler.headers["Content-Length"] = value
+                if encoding:
+                    self.handler.headers["Transfer-Encoding"] = encoding
+                self.handler.rfile = Mock()
+                self.handler.do_POST()
+                self.assertEqual(self.handler._json.call_args.args[0], status)
+                self.handler.rfile.read.assert_not_called()
+        self.api.reports.report.assert_not_called()
+
+    def test_only_complete_authenticated_reports_reach_the_feed(self):
+        self.handler.headers["Content-Length"] = "2"
+        self.handler.rfile = Mock()
+        self.handler.rfile.read.side_effect = TimeoutError()
+        self.handler.do_POST()
+        self.assertEqual(self.handler._json.call_args.args[0], 408)
+        self.handler.rfile = io.BytesIO(b"{")
+        self.handler.do_POST()
+        self.assertEqual(self.handler._json.call_args.args[0], 400)
+        del self.handler.headers["Authorization"]
+        self.handler.rfile = Mock()
+        self.handler.do_POST()
+        self.assertEqual(self.handler._json.call_args.args[0], 401)
+        self.handler.rfile.read.assert_not_called()
+        self.api.reports.report.assert_not_called()
 
 
 class RoundMarkerTests(unittest.TestCase):

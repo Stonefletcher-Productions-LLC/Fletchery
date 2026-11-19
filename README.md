@@ -233,6 +233,7 @@ machines run the same pass from `node_worker.py` ([MACHINES.md](docs/MACHINES.md
   host names in `hosts`, and same-origin checks on every button. Folder paths on the PC are removed from what it shows.
 - **Machines run recipes, not commands.** A build machine has its own list of what it agrees to run and its own
   read-only deploy key. Fletchery holds no machine's key, only its hash.
+  Machine reports use the portal's 8 KiB request limit and 30-second inactivity timeout.
 - **No hidden credentials.** Fletchery uses your `gh` sign-in. No token is kept in a profile, the repository or the
   log.
 - **No windows.** Everything Fletchery starts runs hidden and below normal priority, so a game or a build always wins.

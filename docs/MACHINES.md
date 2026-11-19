@@ -167,7 +167,10 @@ python machines.py --state-dir <state> cancel <id>
 
 ## The worker API
 
-`POST`, JSON, `Authorization: Bearer <key>`, `X-Fletchery-Machine: <name>`; 1 MB per request.
+Send a JSON object by POST with `Authorization: Bearer <key>` and `X-Fletchery-Machine: <name>`.
+The worker checks the machine key before reading the body. Machine reports and control requests share the portal's
+8 KiB body limit and 30-second socket inactivity timeout. Log batches and structured job results allow up to 1 MiB
+per request. Build upload requests allow 8 MiB for the encoded chunk. Limits apply to the request body in bytes.
 
 | Path | Body | Answer |
 |---|---|---|
