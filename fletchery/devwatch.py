@@ -70,6 +70,7 @@ NEEDS_PERSON_LABEL = re.compile(r"^(?:[\w .-]{1,20}[:/]\s*)?(?:needs[\s_:-]*(?:a
 FAILED = ("failure", "timed_out", "action_required", "startup_failure")
 # A check that gave no verdict on the PR: cancelled, or a run whose machine stayed busy (LifeShare's PrCheckJob exits 2
 # with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
+RETIRED_STATUS = re.compile(r"(?:(?:Running|Passed|Failed) on the build PC|Cancelled|Skipped) \(run 900[0-9]{9}\)")
 NO_RESULT = re.compile(r"no result", re.I)
 # Coding agents' branches (and PR authors): one Agents row per branch with recent activity.
 AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))     # branch prefix -> agent (workers.portal.live.agents)
@@ -141,6 +142,44 @@ def _latest_checks(cr: list) -> list:
         if b is None or (c.get("id") or 0) > (b.get("id") or 0):
             best[k] = c
     return list(best.values())
+
+
+def _base_evidence(runs, statuses, sources):
+    """Keep the latest result per producer. A required context can have both a check run and a commit status."""
+    required = {name.casefold(): name for name in sources}
+    latest = {}
+    for row in [*runs, *statuses]:
+        name = str(row.get("name") or "").casefold()
+        if not name or (required and name not in required):
+            continue
+        app = (row.get("app") or {}).get("id")
+        context = required.get(name, row["name"])
+        pinned = sources.get(context, set()) - {None}
+        if pinned and app not in pinned:
+            continue
+        if row.get("source") == "status" and not required and not row.get("html_url"):
+            continue
+        key = (context.casefold(), row.get("source", "check"), app)
+        if key not in latest or (row.get("id") or 0) > (latest[key].get("id") or 0):
+            latest[key] = dict(row, name=context)
+    grouped = {}
+    for (name, _, _), row in latest.items():
+        grouped.setdefault(name, []).append(row)
+    result = []
+    for rows in grouped.values():
+        context = rows[0]["name"]
+        pinned = sources.get(context, set()) - {None}
+        observed = {(r.get("app") or {}).get("id") for r in rows}
+        # Show a genuine failure immediately. Otherwise all required producers must give a passing result.
+        failed = next((r for r in rows if r.get("status") == "completed" and r.get("conclusion") in FAILED), None)
+        unfinished = next((r for r in rows if r.get("status") != "completed" or r.get("conclusion") != "success"), None)
+        if failed:
+            result.append(failed)
+        elif pinned - observed:
+            result.append({"name": context, "status": "queued"})
+        else:
+            result.append(unfinished or rows[0])
+    return result
 
 
 def _ago_text(seconds: float) -> str:
@@ -543,9 +582,8 @@ class DevWatch:
             except re.error:
                 self.log(f"live: causes.machine pattern {str(x)[:60]!r} ignored: not a regular expression")
         self.red_issue_labels = [str(x) for x in conf.get("redIssueLabels") or rules.RED_ISSUE_LABELS][:20]
-        self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
+        self.bases: dict[str, dict] = {}            # branch tip, effective requirements and observations by repository
         self.notes: dict[int, list] = {}            # completed base check run id -> test names
-        self._required: dict[tuple, tuple] = {}     # (repo, branch) -> (asked at, required check names)
         # Which blockers reach a person, and when (alerts.py): a wait before firing, a hold after, groups and snoozes.
         self.alerts = alertsmod.Alerts(Path(state_dir) / "alerts.json" if state_dir else None, conf.get("alerts"), self.store, self.log)
 
@@ -715,6 +753,7 @@ class DevWatch:
                 continue
             status, conclusion = state[str(st["state"])]
             row = {"id": st.get("id"), "name": st.get("context"), "status": status, "conclusion": conclusion,
+                   "app": st.get("performed_via_github_app") or st.get("app"),
                    "html_url": st.get("target_url"), "started_at": st.get("created_at"),
                    "completed_at": st.get("updated_at") if status == "completed" else None, "source": "status"}
             if conclusion == "failure" and isinstance(st.get("id"), int):
@@ -735,7 +774,8 @@ class DevWatch:
                 now_s = time.time()
                 if len(self.skip) > 500:
                     self.skip = {k: v for k, v in self.skip.items() if v[0] > now_s}
-                missing = (e.code == 422 and "no commit found for sha:" in str(e).lower()) or str(e).lower() == "404 ref not found"
+                missing = (e.code == 422 and "no commit found for sha:" in str(e).lower()) or str(e).lower() in (
+                    "404 ref not found", "404 branch not found")
                 self.skip[path] = (now_s + quiet_for, missing)
                 return missing_ref if missing else None
             raise
@@ -919,55 +959,81 @@ class DevWatch:
         self._read_status_issue(repo)
         return out
 
-    def _read_base(self, repo: str, branch: str) -> dict | None:
-        """A base branch's newest commit: its checks go to the store (rules.base_health reads the streak), the names of
-        the tests a failed one reports are kept, and the branch's required checks are asked every 10 minutes."""
-        ref = urllib.parse.quote(branch, safe="")
-        checks = self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100", missing_ref=_MISSING_REF)
-        if checks is _MISSING_REF:
+    def _base_get(self, path, **kwargs):
+        try:
+            return self._try(path, **kwargs)
+        except GitHubError as exc:
+            self.log(f"live: incomplete branch health while reading {path}: {exc}")
             return None
-        cr = (checks or {}).get("check_runs") or []
-        all_checks = isinstance(checks, dict) and checks.get("total_count", len(cr)) <= len(cr)
-        st = None
-        if not cr:
-            st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100", missing_ref=_MISSING_REF) or {}
-            if st is _MISSING_REF:
-                return None
-            # Only statuses that link to where they ran: an old local runner (LifeShare's retired Buildlane task) kept
-            # posting failures with no link, from no workflow anyone can open or re-run, and turned main red (11-19).
-            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref, st) if c.get("html_url")] if st.get("sha") else []
-        sha = str((cr[0] if cr else {}).get("head_sha") or (st or {}).get("sha") or "")
-        if sha:
-            if all_checks:
-                self._reconcile_base_statuses(repo, branch, sha, cr, st)
-            self.store.base_checks(repo, branch, sha, cr)
+
+    def _base_pages(self, repo, sha, endpoint, field):
+        """Read check runs or combined statuses pinned to the tip SHA. Never certify a truncated collection."""
+        rows = []
+        ids = set()
+        path = f"repos/{repo}/commits/{sha}/{endpoint}?per_page=100"
+        for page in range(1, 11):
+            data = self._base_get(path if page == 1 else f"{path}&page={page}")
+            if not isinstance(data, dict) or not isinstance(data.get(field), list):
+                return rows, False
+            if field == "statuses" and data.get("sha") != sha:
+                return rows, False
+            batch = data[field]
+            if any(not isinstance(c, dict) for c in batch):
+                return rows, False
+            if field == "check_runs" and any(c.get("head_sha") != sha for c in batch):
+                return rows, False
+            batch_ids = [c["id"] for c in batch if c.get("id") is not None]
+            if ids.intersection(batch_ids) or len(batch_ids) != len(set(batch_ids)):
+                return rows, False
+            ids.update(batch_ids)
+            rows.extend(batch)
+            total = data.get("total_count")
+            if len(batch) < 100 or (total is not None and len(rows) >= total):
+                return rows, total is None or len(rows) == total
+        return rows, False
+
+    def _read_base(self, repo: str, branch: str) -> dict | None:
+        """Resolve the tip once. Both sources and every page must describe that exact revision."""
+        ref = urllib.parse.quote(branch, safe="")
+        head = self._base_get(f"repos/{repo}/branches/{ref}", missing_ref=_MISSING_REF)
+        if head is _MISSING_REF or (head and head.get("name", branch) != branch):
+            return None
+        sha = ((head or {}).get("commit") or {}).get("sha")
+        if not sha:
+            if branch in self.bases.get(repo, {}):
+                return {"sha": "", "checks": [], "required": [], "reason": "GitHub could not confirm the current branch commit."}
+            return None
+        ruleset = self._base_get(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600)
+        classic = (head.get("protection") or {}).get("required_status_checks")
+        if classic is None and head.get("protected") is not False:
+            classic = self._base_get(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=3600)
+        sources = rules.required_sources(ruleset, classic)
+        known_rules = head.get("protected") is False or (isinstance(classic, dict) and isinstance(ruleset, list))
+        runs, full_runs = self._base_pages(repo, sha, "check-runs", "check_runs")
+        statuses, full_statuses = self._base_pages(repo, sha, "status", "statuses")
+        # The retired Buildlane runner emitted this exact description with its private run-ID range.
+        # Its optional target_url could make an obsolete result look like a live check of the same name.
+        statuses = [st for st in statuses if not RETIRED_STATUS.fullmatch(str(st.get("description") or ""))]
+        status_rows = self._statuses(repo, sha, {"statuses": statuses})
+        checks = _base_evidence(runs, status_rows, sources)
+        reason = ""
+        if not known_rules:
+            reason = "GitHub has not returned the full set of branch rules."
+        elif not (full_runs and full_statuses):
+            reason = "GitHub has not returned all check results for this commit."
+        if not reason:
+            self.store.base_checks(repo, branch, sha, checks, complete=True, required_sources=sources)
         notes = {}
-        for c in cr:
+        for c in checks:
             if c.get("conclusion") in FAILED and c.get("source") != "status" and isinstance(c.get("id"), int) \
                     and (c.get("output") or {}).get("annotations_count"):
                 if c["id"] not in self.notes:
-                    found = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50") or []
-                    self.notes[c["id"]] = rules.test_names(found)
-                notes[c.get("name")] = self.notes[c["id"]]
-        asked, req = self._required.get((repo, branch), (0.0, ()))
-        if time.time() - asked > 600:
-            req = rules.required_checks(self._try(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600) or [],
-                                        self._try(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=6 * 3600) or {})
-            self._required[(repo, branch)] = (time.time(), tuple(req))
-        return {"checking": any(c.get("status") != "completed" for c in cr), "required": list(req), "notes": notes}
-
-    def _reconcile_base_statuses(self, repo, branch, sha, checks, status_response):
-        """Drop older observations only when GitHub identifies their names as unlinked statuses on this exact commit."""
-        saved = self.store.query("SELECT name FROM base_checks WHERE repo=? AND branch=? AND sha=?", (repo, branch, sha))
-        unexplained = {row[0] for row in saved} - {str(c.get("name") or "")[:120] for c in checks}
-        if not unexplained:
-            return
-        if status_response is None:
-            status_response = self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}
-        if status_response.get("sha") == sha:
-            unlinked = {str(st.get("context") or "")[:120] for st in status_response.get("statuses") or []
-                        if not st.get("target_url")}
-            self.store.forget_base_checks(repo, branch, sha, unexplained & unlinked)
+                    found = self._base_get(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50")
+                    if found is not None:
+                        self.notes[c["id"]] = rules.test_names(found)
+                notes[c.get("name")] = self.notes.get(c["id"], [])
+        return {"sha": sha, "checks": checks, "required": list(sources), "sources": sources, "known_rules": known_rules, "reason": reason,
+                "checking": any(c.get("status") != "completed" for c in checks), "notes": notes}
 
     def _read_status_issue(self, repo: str) -> None:
         """Cloud agents' heartbeats: comments on the repository's status issue edited in the last day. `since` is
@@ -1418,10 +1484,14 @@ class DevWatch:
                 try:
                     h = rules.base_health(self.store, repo, branch, required=info.get("required"), prs=prs, issues=issues,
                                           notes=info.get("notes"), checking=info.get("checking"), fix_labels=self.fix_labels,
+                                          tip_sha=info.get("sha"), tip_checks=info.get("checks"), required_sources=info.get("sources"),
                                           red_issue_labels=self.red_issue_labels, now=at)
                 except Exception as e:      # one branch's history never costs the feed
                     self.log(f"live: base health {repo} {branch}: {type(e).__name__}: {e}")
                     h = None
+                if info.get("reason") and (not h or h["state"] != "red" or not (info.get("known_rules") or info["required"])):
+                    h = {"repo": repo, "branch": branch, "sha": info["sha"][:12], "state": "checking", "checking": True,
+                         "required": bool(info["required"]), "waiting": (h or {}).get("waiting", []), "reason": info["reason"]}
                 if h:
                     out.append(h)
         out.sort(key=lambda h: (h["state"] != "red", -(h.get("for") or 0), h["repo"], h["branch"]))

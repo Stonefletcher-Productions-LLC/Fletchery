@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 2
+SCHEMA = 5
 KEEP_DAYS = 90
 
 # GitHub conclusion -> OpenTelemetry cicd.pipeline.result
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_at ON jobs (started);
 CREATE TABLE IF NOT EXISTS base_checks (
   repo TEXT NOT NULL, branch TEXT NOT NULL, sha TEXT NOT NULL, name TEXT NOT NULL, result TEXT, at REAL,
-  PRIMARY KEY (repo, branch, sha, name));
+  sources TEXT NOT NULL DEFAULT '', PRIMARY KEY (repo, branch, sha, name));
 CREATE INDEX IF NOT EXISTS base_checks_at ON base_checks (repo, branch, at);
 CREATE TABLE IF NOT EXISTS disks (machine TEXT NOT NULL, drive TEXT NOT NULL, at REAL NOT NULL, free_gb REAL,
   PRIMARY KEY (machine, drive, at));
@@ -75,6 +75,14 @@ def result_of(conclusion) -> str:
     return RESULT.get(str(conclusion or ""), "")
 
 
+def base_result(check) -> str:
+    """Keep non-passing terminal results distinct when evaluating a required check."""
+    conclusion = check.get("conclusion")
+    if check.get("status") != "completed":
+        return ""
+    return conclusion if conclusion in ("neutral", "stale") else result_of(conclusion) or "unknown"
+
+
 class Store:
     def __init__(self, path=None, keep_days: float = KEEP_DAYS, log=None):
         """`path` None keeps everything in memory (tests, or a backend with no state folder)."""
@@ -92,6 +100,8 @@ class Store:
             cols = {r[1] for r in self.db.execute("PRAGMA table_info(merges)")}
             if "sha" not in cols:      # schema 1 -> 2: the merge commit, to place a merge on its base branch
                 self.db.execute("ALTER TABLE merges ADD COLUMN sha TEXT")
+            if "sources" not in {r[1] for r in self.db.execute("PRAGMA table_info(base_checks)")}:
+                self.db.execute("ALTER TABLE base_checks ADD COLUMN sources TEXT NOT NULL DEFAULT ''")
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             self.db.commit()
         self._pruned = 0.0
@@ -157,16 +167,33 @@ class Store:
             for j in jobs if isinstance(j, dict) and isinstance(j.get("id"), int) and j.get("started_at")
             and j.get("status") in ("in_progress", "completed")))
 
-    def base_checks(self, repo: str, branch: str, sha: str, checks: list) -> None:
-        """The finished checks on a base branch's commit (base health reads the streak)."""
-        self._write("INSERT OR REPLACE INTO base_checks VALUES (?,?,?,?,?,?)", (
-            (repo, branch, sha, str(c.get("name") or "")[:120], result_of(c.get("conclusion")),
-             ts(c.get("completed_at")) or time.time())
-            for c in checks if isinstance(c, dict) and c.get("status") == "completed" and c.get("name")))
-
-    def forget_base_checks(self, repo: str, branch: str, sha: str, names) -> None:
-        self._write("DELETE FROM base_checks WHERE repo=? AND branch=? AND sha=? AND name=?",
-                    ((repo, branch, sha, name) for name in names))
+    def base_checks(self, repo: str, branch: str, sha: str, checks: list, *, complete=False, required_sources=None) -> None:
+        """Record the selected current attempts. Only a complete observation can retire absent names on this SHA."""
+        if not sha:
+            return
+        key = (repo, branch, sha)
+        sources = required_sources or {}
+        with self._lock, self.db:
+            saved = {n: (r, t) for n, r, t in self.db.execute(
+                "SELECT name, result, at FROM base_checks WHERE repo=? AND branch=? AND sha=?", key)}
+            seen = set()
+            rows = []
+            for c in checks:
+                if not isinstance(c, dict) or not c.get("name") or (c.get("head_sha") and c["head_sha"] != sha):
+                    continue
+                name = str(c["name"])
+                result = base_result(c)
+                old_result, old_at = saved.get(name, (None, None))
+                at = ts(c.get("completed_at")) or ts(c.get("started_at")) or ts(c.get("created_at"))
+                at = at or (old_at if old_result == result else None) or time.time()
+                pins = ",".join(str(i) for i in sorted(i for i in sources.get(name, ()) if i is not None))
+                rows.append((*key, name, result, at, pins))
+                seen.add(name)
+            self.db.executemany("INSERT OR REPLACE INTO base_checks (repo, branch, sha, name, result, at, sources) "
+                                "VALUES (?,?,?,?,?,?,?)", rows)
+            if complete:
+                self.db.executemany("DELETE FROM base_checks WHERE repo=? AND branch=? AND sha=? AND name=?",
+                                    ((*key, name) for name in saved.keys() - seen))
 
     def disk(self, machine: str, drive: str, free_gb: float, at: float | None = None) -> None:
         """One disk reading; at most one a minute is kept per drive."""

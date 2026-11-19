@@ -42,7 +42,7 @@ Fletchery's own builds ─┘     store.py (SQLite history, 90 days)      └─
 | Part | Question | File |
 |---|---|---|
 | Flow strip | Is work moving? Merges per hour and day, time since the last merge per base, PR-to-merge median, wait for a machine, how often a base goes red, and a verdict | `flow.py` |
-| Base health | Is a base branch red, since when, which merge broke it, and is a fix in line? Only the branch's required checks count when GitHub says which (rulesets need only read access). | `rules.py` |
+| Base health | The poller resolves the branch tip and reads checks and statuses by that commit SHA. Required contexts come from branch protection and rulesets, including any required GitHub App. Every required context needs a successful result for green. The banner shows outstanding checks and explains incomplete reads. | `devwatch.py`, `rules.py` |
 | Failure causes | Is this red PR its own bug, an inherited red base, flaky, a machine problem, or cancelled? | `rules.py` |
 | Queue | What waits for which machines, in what order, starting and finishing when, and who cancelled what? | `rules.py` |
 | Alerts | What needs a person now, told once, grouped, snoozable? Will a disk fill? | `alerts.py`, `rules.disk_forecast` |

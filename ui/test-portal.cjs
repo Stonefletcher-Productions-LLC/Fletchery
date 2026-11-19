@@ -231,6 +231,35 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
     const activeJob = live.building[0];
     const refreshLive = () => page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    // A branch with outstanding requirements has its own notice. A failure can also have outstanding requirements.
+    const originalBases = live.bases;
+    const failedBase = {...originalBases.find(h => h.state === 'red'), waiting: ['Package']};
+    const checkingBase = {repo: 'Acme/Game', branch: 'main', state: 'checking', sha: 'cafe12345678',
+      waiting: ['PR check / Compile and test'], required: true};
+    live.bases = [failedBase, checkingBase];
+    await refreshLive();
+    const pendingBase = page.locator('#baseBanner .base-pending');
+    await pendingBase.waitFor();
+    assert.match(await pendingBase.innerText(), /main is awaiting required checks[\s\S]*Awaiting a passing result: PR check \/ Compile and test/);
+    assert.doesNotMatch(await pendingBase.innerText(), /failing|first bad|fix in line|is red/i);
+    assert.equal(await pendingBase.locator('a').getAttribute('href'), 'https://github.com/Acme/Game/commit/cafe12345678');
+    assert.match(await page.innerText('#baseBanner .base-red'), /Failing: PR check \/ Compile and test[\s\S]*Awaiting a passing result: Package/);
+    if (shots) {
+      const fixedBars = page.locator('header.top, nav.tabs');
+      await fixedBars.evaluateAll(bars => bars.forEach(n => n.style.visibility = 'hidden'));
+      await page.locator('#baseBanner').screenshot({path: path.join(shots, 'portal-base-checking.png')});
+      await fixedBars.evaluateAll(bars => bars.forEach(n => n.style.visibility = ''));
+    }
+    live.bases = [{...checkingBase, waiting: [], reason: 'GitHub has not returned all check results for this commit.'}];
+    await refreshLive();
+    await page.waitForFunction(() => document.querySelector('#baseBanner').getAttribute('role') === 'status');
+    assert.match(await pendingBase.innerText(), /main · check status incomplete[\s\S]*GitHub has not returned all check results/);
+    live.bases = [{...checkingBase, state: 'green', waiting: []}];
+    await refreshLive();
+    await page.locator('#baseBanner').waitFor({state: 'hidden'});
+    live.bases = originalBases;
+    await refreshLive();
+    await page.locator('#baseBanner .base-red').waitFor();
     assert.equal(await page.locator('#liveBuilding li p').first().textContent(), 'Uploading generated assets');
     const meter = page.locator('#liveBuilding').getByRole('progressbar', {name: 'Files uploaded'});
     assert.equal(await meter.getAttribute('aria-valuetext'), '2,160 of 11,391 files uploaded');

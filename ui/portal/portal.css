@@ -169,15 +169,17 @@ dialog li { margin: 4px 0; }
 .chip.c-machine, .chip.c-cancelled { background: var(--hold-bg); color: var(--hold); }
 .chip.c-flaky { background: var(--queued-bg); color: var(--queued); }
 .prob .prs { margin: 2px 0 0; font-size: 13px; }
-/* Base health: a red base branch, on top of every tab */
+/* Required check results on base branches */
 .base-banner { margin: 0 0 10px; }
-.base-red { background: var(--failed-bg); color: var(--ink); border: 1px solid var(--failed); border-left-width: 5px; border-radius: 10px;
+.base-red, .base-pending { background: var(--failed-bg); color: var(--ink); border: 1px solid var(--failed); border-left-width: 5px; border-radius: 10px;
   padding: 10px 12px; margin-bottom: 8px; }
-.base-red h2 { all: unset; display: block; font-size: 16px; font-weight: 700; color: var(--failed); margin-bottom: 4px; }
-.base-red p { margin: 3px 0 0; font-size: 14px; line-height: 1.4; }
-.base-red p b { font-weight: 600; }
-.base-red a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
-.base-red .sub { color: var(--muted); font-size: 13px; }
+.base-pending { background: var(--soft); border-color: var(--rule); border-left-color: var(--queued); }
+.base-banner h2 { all: unset; display: block; font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.base-red h2 { color: var(--failed); }
+.base-banner p { margin: 3px 0 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
+.base-banner p b { font-weight: 600; }
+.base-banner a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.base-banner .sub { color: var(--muted); font-size: 13px; }
 /* Flow: is work moving? A verdict, a few numbers and 24 hourly bars of merges */
 .flow { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
 .flow .verdict { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 14px; }
