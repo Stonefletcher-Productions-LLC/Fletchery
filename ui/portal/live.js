@@ -216,6 +216,26 @@
         b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null,
         alertLine(b)));
   }
+  function reservationDetail(info) {
+    const release = info.release || {};
+    const holder = info.holder && web(release.url) ? a(release.url, '', info.holder) : info.holder;
+    const place = info.ahead ? info.ahead + (info.ahead === 1 ? ' reservation ahead' : ' reservations ahead') : 'Next in line';
+    let timing = 'Start time unknown';
+    if (info.dead) timing += ' · the holder process has stopped';
+    else if (info.start_in != null) timing = 'Rough start in ~' + mins(info.start_in);
+    else if (release.seconds != null) timing += ' · current holder may release in ~' + mins(release.seconds);
+    else timing += ' · no comparable duration yet';
+    const unit = {reservation: 'hold', job: 'job', step: 'workflow step'}[release.basis];
+    const basis = unit ? release.samples + ' earlier ' + unit + (release.samples === 1 ? '' : 's') :
+      '';
+    return el('div', null,
+      el('p', {class: 'sub'}, holder ? [info.machine + ' is held by ', holder] : info.machine + ' has not reported a holder',
+        holder && info.since ? [' · held for ', since(info.since)] : null),
+      el('p', {class: 'say'}, place, ' · ', timing),
+      basis ? el('p', {class: 'sub'}, 'Based on ', basis,
+        release.basis === 'step' ? ' including any wait inside the step' : '',
+        release.failed ? ' · ' + release.failed + ' ended in failure' : '') : null);
+  }
   function buildDetail(progress) {
     if (!progress) return null;
     const {phase, last_output: output, eta = {}} = progress;
@@ -228,7 +248,8 @@
       el('p', {class: 'say'}, el('strong', {text: phase.label}), ' · ', since(phase.since)) :
       output ? el('p', {class: 'say'}, 'Latest output: ', el('strong', {text: output.label}), ' · ', ago(output.at)) :
       el('p', {class: 'sub', text: 'Waiting for the runner to report the inner phase.'}),
-      el('p', {class: 'sub', text: estimate}));
+      progress.waiting_machine && progress.reservation ? reservationDetail(progress.reservation) :
+        el('p', {class: 'sub', text: estimate}));
   }
   function jobProgress(x) {
     if (!x.steps_total) return null;

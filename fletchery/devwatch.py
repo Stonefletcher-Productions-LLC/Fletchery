@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import statistics
 import subprocess
 import threading
 import time
@@ -393,6 +394,23 @@ def _iso_after(iso: str, seconds: float) -> str:
     return now_iso_at(t + seconds) if t else "~"
 
 
+def _workload(title: str) -> str:
+    """Recognize a dispatch's named task across checkout revisions (e.g. 'Node checks <sha> CityPictures')."""
+    suffix = re.split(r"\b[0-9a-fA-F]{7,40}\b\s*", title)[-1]
+    words = re.findall(r"[a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", suffix).lower())
+    return " ".join(words) if len(words) >= 2 else ""
+
+
+def _names_holder(workload: str, purpose: str) -> bool:
+    description = " ".join(re.findall(r"[a-z0-9]+", purpose.lower()))
+    return bool(workload and f" {workload} " in f" {description} ")
+
+
+def _reservation_key(host: str, purpose: str) -> tuple:
+    name = re.sub(r"\s*\(github run \d+\)", "", _scrub(purpose).lower()).removeprefix("local run ")
+    return "reservation", host.lower(), name
+
+
 def _runner_job(run: dict) -> dict:
     """What a runner is doing, from its run row: enough to see a step that runs too long or a run nobody needs."""
     return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
@@ -479,6 +497,7 @@ class DevWatch:
         self.rules = pipeline.Rules(conf.get("pipeline"))
         self.history = pipeline.History(Path(state_dir) / "step-times.json" if state_dir else None, log=self.log)
         self._backfilled: set = set()               # repositories whose past runs were read for step times
+        self._holder_times = {}                    # bounded historical reads, outside the snapshot/HTTP path
         self.merged: dict[str, list] = {}           # repo -> PRs merged in the last day (followed through staging)
         self.releases: dict[str, list] = {}         # repo -> its latest releases
         self.presence = presence.Presence(Path(state_dir) / "agent-presence.json" if state_dir else None, clean=_scrub,
@@ -516,10 +535,17 @@ class DevWatch:
         if len(body) > 64 * 1024:
             raise ValueError("report too large")
         with self._lock:
-            was = (self.reports.get(str(machine)) or {}).get("data") or {}
+            previous = self.reports.get(str(machine)) or {}
+            was = previous.get("data") or {}
             self.reports[str(machine)] = {"data": data, "at": now_iso(), "ip": ip}
         stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
         host = _text(data.get("host") or machine, 60)
+        old = was.get("lease")
+        current = data.get("lease")
+        if (isinstance(old, dict) and old.get("purpose") and old.get("alive") and _ts(old.get("since"))
+                and _age(previous.get("at")) <= REPORT_STALE
+                and (current is None or isinstance(current, dict) and current.get("since") != old["since"])):
+            self.history.add(_reservation_key(host, old["purpose"]), _age(old["since"]), old["since"])
         for x in (stats.get("disks") or [])[:4]:      # kept, so a drive that is filling is seen before it is full
             if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float)) and x.get("name"):
                 try:
@@ -673,6 +699,56 @@ class DevWatch:
             old["error"] = f"{repo}: {e}"
             return old
 
+    def _read_holder_times(self, repo, runs, jobs):
+        """Look up the same runner, dispatch workload, job and step, only while a reported reservation has waiters."""
+        with self._lock:
+            reports = [r["data"] for r in self.reports.values() if _age(r["at"]) <= REPORT_STALE and r["data"].get("queue")]
+        for run in runs:
+            if run.get("event") != "workflow_dispatch" or run.get("status") != "in_progress" or not run.get("workflow_id"):
+                continue
+            workload = _workload(run.get("display_title") or "")
+            for job in jobs.get(run["id"], []):
+                runner = str(job.get("runner_name") or "")
+                if job.get("status") != "in_progress" or not any(
+                        isinstance(d.get("lease"), dict) and d["lease"].get("alive") and isinstance(d.get("host"), str) and
+                        (runner.lower() == d["host"].lower() or runner.lower().startswith(d["host"].lower() + "-")) and
+                        _names_holder(workload, str(d["lease"].get("purpose") or "")) for d in reports):
+                    continue
+                step = next((s.get("name") for s in job.get("steps") or [] if s.get("status") == "in_progress"), None)
+                if not step:
+                    continue
+                key = (repo, run["id"], runner, step)
+                now = time.time()
+                with self._lock:
+                    if self._holder_times.get(key, (0, ()))[0] > now:
+                        continue
+                samples = []
+                ttl = 3600
+                try:
+                    samples = self._past_holder_steps(repo, run, workload, job, step)
+                except GitHubError:
+                    ttl = 180
+                with self._lock:
+                    self._holder_times = {k: v for k, v in self._holder_times.items() if v[0] > now}
+                    self._holder_times[key] = (now + ttl, samples)
+
+    def _past_holder_steps(self, repo, run, workload, job, step):
+        path = f"repos/{repo}/actions/workflows/{run['workflow_id']}/runs?status=completed&per_page=50"
+        past = (self._try(path) or {}).get("workflow_runs") or []
+        matches = [r for r in past if r.get("id") != run["id"] and r.get("conclusion") in ("success", "failure")
+                   and _workload(r.get("display_title") or "") == workload]
+        samples = []
+        for r in matches[:5]:
+            jobs = (self._try(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=50") or {}).get("jobs") or []
+            for j in jobs:
+                if j.get("runner_name") != job.get("runner_name") or j.get("name") != job.get("name"):
+                    continue
+                for s in j.get("steps") or []:
+                    start, end = _ts(s.get("started_at")), _ts(s.get("completed_at"))
+                    if s.get("name") == step and s.get("conclusion") in ("success", "failure") and end > start > 0:
+                        samples.append((end - start, s["conclusion"]))
+        return samples
+
     def _read_repo(self, repo: str) -> dict:
         out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
                "merged_all": []}
@@ -698,6 +774,7 @@ class DevWatch:
                 out["jobs"][run["id"]] = (self._try(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30") or {}).get("jobs") or []
             elif before is not None:
                 out["jobs"][run["id"]] = before
+        self._read_holder_times(repo, runs, out["jobs"])
         for run in runs:
             # A cancelled run in the last day: who or what cancelled it, from its job's annotations, asked once.
             if run.get("conclusion") == "cancelled" and (repo, run["id"]) not in self.cancels and _age(run.get("updated_at")) < 86400:
@@ -964,6 +1041,7 @@ class DevWatch:
             # else every runner that could take it is busy: a queue, shown with the runs, not stuck
 
         machines_out = self._machines(at, runners_out, block)
+        self._reservations(at, machines_out, runs_out)
 
         prs_out = []
         red_checks: list = []
@@ -1519,6 +1597,52 @@ class DevWatch:
             self.log(f"live: disk forecast: {type(e).__name__}: {e}")
             return None
 
+    def _release_estimate(self, at, machine, holder, runs):
+        """Prefer observed release times. Otherwise label a matching job or step as a proxy for release."""
+        seconds, n = self.history.remaining_exact(_reservation_key(machine["host"], holder["title"]), _age(holder["since"], at))
+        if seconds is not None:
+            return {"seconds": seconds, "samples": n, "basis": "reservation"}
+        eta = (holder.get("progress") or {}).get("eta") or {}
+        if eta.get("seconds") is not None:
+            return {**eta, "basis": "job", "url": holder.get("url")}
+        candidates = [r for r in runs if r["runner"] in machine["runners"] and r["status"] == "in_progress"
+                      and r["event"] == "workflow_dispatch" and r["step_started"] and r["step"]
+                      and (r["id"] == holder["run"] if holder.get("run") else
+                           _names_holder(_workload(r["title"]), holder["title"]))
+                      and 0 < _ts(r["step_started"]) <= _ts(holder["since"]) + 5]
+        if len(candidates) != 1:
+            return {}
+        run = candidates[0]
+        key = (run["repo"], run["id"], run["runner"], run["step"])
+        elapsed = _age(run["step_started"], at)
+        with self._lock:
+            _, samples = self._holder_times.get(key, (0, ()))
+        longer = [(duration, result) for duration, result in samples if duration > elapsed]
+        detail = {"url": run["url"], "step": run["step"]}
+        if longer:
+            detail.update(seconds=round(statistics.median(d for d, _ in longer) - elapsed), samples=len(longer),
+                          basis="step", failed=sum(result == "failure" for _, result in longer))
+        return detail
+
+    def _reservations(self, at, machines, runs):
+        for m in machines:
+            tickets = sorted((a for a in m["activities"] if "position" in a), key=lambda a: a["position"])
+            if not m["online"] or not any((a.get("progress") or {}).get("waiting_machine") for a in tickets):
+                continue
+            holder = next((a for a in m["activities"] if a.get("reservation_holder")), None)
+            release = self._release_estimate(at, m, holder, runs) if holder and holder.get("alive") and _ts(holder["since"]) else {}
+            delay = release.get("seconds")
+            for ticket in tickets:
+                progress = ticket.get("progress") or {}
+                if progress.get("waiting_machine"):
+                    info = {"machine": m["name"], "ahead": ticket["position"] - 1, "start_in": delay, "release": release}
+                    if holder:
+                        info.update(holder=holder["title"], since=holder["since"], dead=holder.get("alive") is False)
+                    progress["reservation"] = info
+                if delay is not None:
+                    duration, _ = self.history.remaining_exact(_reservation_key(m["host"], ticket["title"]), 0)
+                    delay = delay + duration if duration is not None else None
+
     def _machines(self, at: float, runners: list, block) -> list:
         with self._lock:
             reports = dict(self.reports)
@@ -1535,7 +1659,8 @@ class DevWatch:
             lease = d.get("lease") if isinstance(d.get("lease"), dict) else None
             if lease and lease.get("purpose"):
                 purpose = _scrub(lease.get("purpose"), 200)
-                acts.append({"kind": kind_of(purpose), "title": purpose, "since": _text(lease.get("since"), 30),
+                acts.append({"kind": kind_of(purpose), "title": purpose, "since": _text(lease.get("since"), 40),
+                             "reservation_holder": True, "alive": lease.get("alive"),
                              "detail": "holds the machine" + ("" if lease.get("alive", True) else " (its process is gone)")})
                 output = lease.get("last_output")
                 if age <= REPORT_STALE and lease.get("alive") and isinstance(output, dict) and 0 <= at - _ts(output.get("at")) <= 180:
@@ -1550,11 +1675,12 @@ class DevWatch:
                 if idle > LIMITS["idle_lease"]:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" holds the machine but the CPU has been idle {int(idle // 60)} min",
                           "It may be stuck waiting on something.", since=lease.get("since") or "", key=f"idlehold:{host}:{lease.get('since')}")
-            for q in (d.get("queue") or [])[:10]:
+            for position, q in enumerate((d.get("queue") or [])[:10], 1):
                 if not isinstance(q, dict):
                     continue
                 purpose = _scrub(q.get("purpose"), 200)
-                acts.append({"kind": "queued", "title": purpose, "since": _text(q.get("since"), 30), "detail": "waiting for the machine"})
+                acts.append({"kind": "queued", "title": purpose, "since": _text(q.get("since"), 40),
+                             "position": position, "detail": "waiting for the machine"})
                 if _age(q.get("since"), at) > LIMITS["queue_wait"]:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" has waited {int(_age(q.get('since'), at) // 60)} min in the queue", since=q.get("since") or "", key=f"queue:{host}:{q.get('since')}:{purpose}")
             for a in (d.get("activities") or [])[:10]:

@@ -227,6 +227,14 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
     assert.equal(await page.locator('#liveBuilding [role=progressbar]').getAttribute('aria-valuenow'), '40');
     assert.match(await page.textContent('#liveBuilding'), /Importing environments[\s\S]*About 12 min left in this job · 3 past checks on this PR/);
+    const activeProgress = live.building[0].progress;
+    live.building[0].progress = {waiting_machine: true, phase: {label: 'Waiting for the machine reservation', since: liveAt},
+      reservation: {holder: 'Lake photographs', machine: 'Gaming PC', since: liveAt, ahead: 0, start_in: 900,
+        release: {basis: 'step', samples: 1, failed: 1, url: gh + '/actions/runs/91'}}};
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    await page.waitForFunction(() => document.querySelector('#liveBuilding').textContent.includes('Rough start in ~15 min'));
+    assert.match(await page.textContent('#liveBuilding'), /Gaming PC is held by Lake photographs · held for[\s\S]*Next in line[\s\S]*1 ended in failure/);
+    live.building[0].progress = activeProgress;
 
     // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');
