@@ -319,3 +319,32 @@ def pool_of(labels, generic) -> str:
     """A pool's name: its custom labels, sorted ("unreal-pr")."""
     gen = {str(g).lower() for g in generic}
     return " + ".join(sorted({str(x) for x in labels or () if str(x).lower() not in gen})) or "any"
+
+
+# ---- disk forecast ----
+FORECAST_WINDOW = 2 * 3600    # readings looked at
+FORECAST_MIN_SPAN = 15 * 60   # ... spanning at least this long
+FORECAST_MIN_N = 5
+FORECAST_FLOOR_GB = 5.0       # "full" means under this much free
+FORECAST_HORIZON = 6 * 3600   # a forecast inside this is a signal
+
+
+def disk_forecast(readings: list, now: float | None = None, floor_gb: float = FORECAST_FLOOR_GB):
+    """Seconds until a drive has under `floor_gb` free at the rate it has been filling (least squares over the last
+    two hours of (at, free_gb) readings), or None when it is not filling or there is too little to go on."""
+    now = now or time.time()
+    pts = [(float(t), float(f)) for t, f in readings or () if t is not None and f is not None and now - FORECAST_WINDOW <= t <= now]
+    if len(pts) < FORECAST_MIN_N or max(p[0] for p in pts) - min(p[0] for p in pts) < FORECAST_MIN_SPAN:
+        return None
+    n = len(pts)
+    mt, mf = sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n
+    var = sum((p[0] - mt) ** 2 for p in pts)
+    if not var:
+        return None
+    slope = sum((p[0] - mt) * (p[1] - mf) for p in pts) / var     # GB per second; negative while filling
+    if slope >= -1e-6:                                              # under ~3.6 MB an hour: not filling
+        return None
+    latest = max(pts)[1]
+    if latest <= floor_gb:
+        return 0.0
+    return (latest - floor_gb) / -slope

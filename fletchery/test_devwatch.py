@@ -455,6 +455,31 @@ class Feed(unittest.TestCase):
         w.report("NODE-01", {"host": "SF-NODE-01", "disk_guard": {**guard, "freeGB": 120, "state": "ok"}})
         self.assertFalse([b for b in w.snapshot()["blockers"] if "SF-NODE-01" in b["title"]])
 
+    def test_a_filling_drive_is_forecast_and_alerts_wait_their_turn(self):
+        w = self.watch()
+        now = time.time()
+        for i in range(8):       # losing 20 GB every 10 min: full in about 2 h
+            w.store.disk("SF-NODE-01", "E:", 300 - 20 * i, now - 4200 + 600 * i)
+        w.report("NODE-01", {"host": "SF-NODE-01", "stats": {"disks": [{"name": "E:", "free_gb": 160, "total_gb": 500}]}})
+        s = w.snapshot()
+        m = next(x for x in s["machines"] if x["host"] == "SF-NODE-01")
+        self.assertTrue(3600 < m["disks"][0]["full_in"] < 3 * 3600)
+        fc = next(b for b in s["blockers"] if b["key"] == "diskfc:SF-NODE-01:E:")
+        self.assertEqual(fc["kind"], "disk")
+        self.assertIn("will be full in about", fc["title"])
+        self.assertEqual(fc["alert"]["state"], "pending")          # a disk waits 5 min before it alerts
+        self.assertEqual(fc["alert"]["group"], "machine:SF-NODE-01")
+        self.assertIn("diskfc:SF-NODE-01:E:", {a["key"] for a in s["alerts"]["pending"]})
+        self.assertTrue(all(b["alert"]["state"] in ("firing", "pending", "off") for b in s["blockers"]))
+
+    def test_nothing_merging_is_a_signal(self):
+        w = self.watch()
+        w.flow_now = lambda prs, at: {"all": {}, "repos": {REPO: {"since_merge": 4 * 3600, "last": [{"at": at - 4 * 3600}],
+                                                                  "verdict": {"state": "stopped", "why": "Nothing merged for 4 h while 3 changes wait."}}}}
+        b = next(x for x in w.snapshot()["blockers"] if x["kind"] == "flow")
+        self.assertEqual((b["key"], b["repo"]), (f"flow:{REPO}", REPO))
+        self.assertIn("for 4 h", b["title"])
+
     def test_runner_without_labels_joins_its_machine(self):
         w = self.watch(**{f"orgs/{ORG}/actions/runners": {"runners": [{"id": 9, "name": "ALEX_GAMING_PC-unreal-pr", "status": "online", "busy": False, "labels": []}]}})
         w.report("GAMING-PC", {"host": "Alex_Gaming_PC"})

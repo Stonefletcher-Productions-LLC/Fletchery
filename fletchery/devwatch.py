@@ -48,6 +48,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import alerts as alertsmod
 import flow as flowmod
 import pipeline  # beside this file, like every Fletchery module
 import presence
@@ -457,6 +458,8 @@ class DevWatch:
         self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
         self.notes: dict[tuple, list] = {}          # (repo, check name) -> test names from a failed base check's annotations
         self._required: dict[tuple, tuple] = {}     # (repo, branch) -> (asked at, required check names)
+        # Which blockers reach a person, and when (alerts.py): a wait before firing, a hold after, groups and snoozes.
+        self.alerts = alertsmod.Alerts(Path(state_dir) / "alerts.json" if state_dir else None, conf.get("alerts"), self.store, self.log)
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -469,6 +472,14 @@ class DevWatch:
         with self._lock:
             was = (self.reports.get(str(machine)) or {}).get("data") or {}
             self.reports[str(machine)] = {"data": data, "at": now_iso(), "ip": ip}
+        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        host = _text(data.get("host") or machine, 60)
+        for x in (stats.get("disks") or [])[:4]:      # kept, so a drive that is filling is seen before it is full
+            if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float)) and x.get("name"):
+                try:
+                    self.store.disk(host, _text(x.get("name"), 8), float(x["free_gb"]))
+                except Exception as e:      # history is a nicety
+                    self.log(f"live: disk history: {type(e).__name__}: {e}")
         if data.get("busy") and not was.get("busy"):
             self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
         return {"ok": True, "every": 10}
@@ -955,8 +966,27 @@ class DevWatch:
                       f"{h['repo']} · " + (f"fix in line: {fix}" if fix else "no fix in line yet") +
                       (f" · {h['held']} PRs held red by it" if h.get("held") else ""), "", h.get("since") or "",
                       f"base:{h['repo']}:{h['branch']}", h["repo"])
-        rank = {"feed": 0, "base": 1, "machine": 2, "stuck": 3, "check": 4, "runner": 5, "label": 6}
+        flow_out = self.flow_now(prs_out, at)
+        for repo, f in ((flow_out or {}).get("repos") or {}).items():
+            v = f.get("verdict") or {}
+            if v.get("state") == "stopped":
+                last = (f.get("last") or [{}])[0]
+                block("flow", f"Nothing has merged in {repo.split('/')[-1]} for {_ago_text(f.get('since_merge') or 0)}",
+                      f"{repo} · {v.get('why') or ''}", since=now_iso_at(last["at"]) if last.get("at") else "", key=f"flow:{repo}", repo=repo)
+        rank = {"feed": 0, "base": 1, "machine": 2, "disk": 3, "stuck": 3, "check": 4, "runner": 5, "flow": 6, "label": 7}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
+        try:
+            alerts_out = self.alerts.evaluate(blockers, at)
+        except Exception as e:      # the page still lists every blocker
+            self.log(f"live: alerts: {type(e).__name__}: {e}")
+            alerts_out = {"firing": [], "pending": [], "cleared": []}
+        state = {a["key"]: ("firing", a) for a in alerts_out["firing"]}
+        state.update({a["key"]: ("pending", a) for a in alerts_out["pending"]})
+        for b in blockers:      # what the page shows beside each: waiting to fire, fired, snoozed
+            st, a = state.get(b["key"], ("", {}))
+            b["alert"] = {"state": st or "off", "group": a.get("group") or alertsmod.group_of(b),
+                          **({"fires_in": a["fires_in"]} if "fires_in" in a else {}),
+                          **({"snoozed_until": a["snoozed_until"]} if a.get("snoozed_until") else {})}
         agents = self._agents(at, prs_out, runs_out, issues_out)
         changes = self._changes(at, prs_by, checks_by, runs_by, jobs_by)
         self._link_activities(machines_out, changes)
@@ -974,7 +1004,8 @@ class DevWatch:
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
                        "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
-            "flow": self.flow_now(prs_out, at),
+            "flow": flow_out,
+            "alerts": {k: v[:60] for k, v in alerts_out.items()},
             "bases": bases_out,
             "problems": problems[:40], "causes": rules.summary(problems),
             "queue": self._queue(at, runners_out, runs_out, jobs_by, machines_out),
@@ -1339,6 +1370,16 @@ class DevWatch:
         out.sort(key=lambda x: (not x["active"], x["source"] != "heartbeat", -_ts(x["last"])))
         return out
 
+    def _full_in(self, host: str, drive: str, at: float):
+        """Seconds until this drive is full at its recent rate (rules.disk_forecast), or None."""
+        try:
+            rows = self.store.query("SELECT at, free_gb FROM disks WHERE machine=? AND drive=? AND at > ?",
+                                    (host, drive, at - rules.FORECAST_WINDOW))
+            return rules.disk_forecast(rows, at)
+        except Exception as e:
+            self.log(f"live: disk forecast: {type(e).__name__}: {e}")
+            return None
+
     def _machines(self, at: float, runners: list, block) -> list:
         with self._lock:
             reports = dict(self.reports)
@@ -1397,6 +1438,19 @@ class DevWatch:
                     block("stuck", f"{self.display(host)}: {_text(x.get('name'), 8)} has {x['free_gb']:.0f} GB free",
                           f"Below {self.disk_low:.0f} GB: builds and checks there may fail. Clear old worktrees or build output.",
                           key=f"disk:{host}:{_text(x.get('name'), 8)}")
+            forecasts = {}
+            for x in (stats.get("disks") or [])[:4]:
+                if not (isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float))):
+                    continue
+                drive = _text(x.get("name"), 8)
+                full_in = self._full_in(host, drive, at)
+                if full_in is None:
+                    continue
+                forecasts[drive] = round(full_in)
+                if full_in < rules.FORECAST_HORIZON and x["free_gb"] >= self.disk_low:   # already low: flagged above
+                    block("disk", f"{self.display(host)}: {drive} will be full in about {_ago_text(full_in)}",
+                          f"{x['free_gb']:.0f} GB free and falling. Clear old build output or worktrees before it runs out.",
+                          key=f"diskfc:{host}:{drive}")
             silent = age > REPORT_STALE
             if silent:   # stays listed (and flagged) until it reports again or a week has passed
                 block("machine", f"{self.display(host)} stopped reporting",
@@ -1406,7 +1460,8 @@ class DevWatch:
                                 "busy": bool(acts and any(a["kind"] not in ("queued",) for a in acts)) or bool(procs.get("runner")),
                                 "stats": {k: stats.get(k) for k in ("cpu", "ram_used_gb", "ram_total_gb") if isinstance(stats.get(k), (int, float))},
                                 "disks": [{"name": _text(x.get("name"), 8), "free_gb": x.get("free_gb"),
-                                           **({"total_gb": x["total_gb"]} if isinstance(x.get("total_gb"), (int, float)) else {})}
+                                           **({"total_gb": x["total_gb"]} if isinstance(x.get("total_gb"), (int, float)) else {}),
+                                           **({"full_in": forecasts[_text(x.get("name"), 8)]} if _text(x.get("name"), 8) in forecasts else {})}
                                           for x in (stats.get("disks") or [])[:4]
                                           if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float))],
                                 "disk_guard": guard,

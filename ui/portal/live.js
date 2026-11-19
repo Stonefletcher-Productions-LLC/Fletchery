@@ -184,11 +184,37 @@
     const b = $('b-queue');
     if (b) { const w = q.waiting || 0; b.hidden = !w; b.textContent = w > 99 ? '99+' : String(w || ''); }
   }
+  // Whether a blocker reached the phone (alerts.py): waiting out its rule, alerted, snoozed, or never alerts.
+  const clock = t => new Date(t * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+  function snooze(body, hours, text) {
+    const b = el('button', {type: 'button', class: 'small', text});
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      if (await window.fletcheryAct('/api/alerts/snooze', {...body, hours}, hours ? 'Snoozed for ' + hours + ' h. It stays listed here.' : 'Alerts back on.')) setTimeout(refresh, 500);
+      b.disabled = false;
+    });
+    return b;
+  }
+  function alertLine(b) {
+    const x = b.alert || {};
+    const keyed = {key: b.key};
+    if (x.state === 'pending') return el('p', {class: 'sub alarm'}, el('span', {class: 'chip wait', text: 'Not alerted yet'}),
+      ' alerts in ' + dur(x.fires_in || 0) + ' if it lasts');
+    if (x.state === 'off') return el('p', {class: 'sub alarm', text: 'Shown here only: no alert for this kind'});
+    if (x.snoozed_until) return el('p', {class: 'sub alarm'}, el('span', {class: 'chip', text: 'Snoozed'}), ' until ' + clock(x.snoozed_until),
+      desk() ? el('span', {class: 'ctl'}, snooze(keyed, 0, 'Unsnooze'), snooze({group: x.group}, 0, 'Unsnooze group')) : null);
+    if (x.state !== 'firing') return null;
+    return el('p', {class: 'sub alarm'}, el('span', {class: 'chip bad', text: 'Alerted'}),
+      desk() ? el('span', {class: 'ctl'}, ' Snooze ', snooze(keyed, 1, '1 h'), snooze(keyed, 4, '4 h'), snooze(keyed, 24, '24 h'),
+        x.group ? snooze({group: x.group}, 4, 'Group 4 h') : null) : null);
+  }
   function blockerRow(b) {
-    const label = {base: 'Base red', feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked', disk: 'Low disk'}[b.kind] || 'Look';
+    const label = {base: 'Base red', feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked',
+                   disk: 'Disk', flow: 'Not merging'}[b.kind] || 'Look';
     return el('li', {class: 'blk'}, el('span', {class: 'chip needs', text: label}),
       el('div', {class: 'what'}, a(b.url, 't', b.title),
-        b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null));
+        b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null,
+        alertLine(b)));
   }
   function actRow(x) {
     const k = KIND[x.kind] ? x.kind : 'working';
@@ -196,12 +222,14 @@
       el('div', {class: 'what'}, web(x.url) ? a(x.url, '', x.title) : el('span', {class: 't', text: x.title}),
         el('p', {class: 'sub'}, ...sep(join(x.detail, x.since ? since(x.since) : '')))));
   }
-  function diskRow(g) {
+  // A drive that has been filling: when it will be full at that rate (rules.disk_forecast).
+  const fullIn = x => x && typeof x.full_in === 'number' ? ' (full in ~' + dur(x.full_in) + ')' : '';
+  function diskRow(g, d) {
     const full = g.state === 'full' || (g.runner_stopped || []).length;
     const chip = full ? ['bad', 'PR runner offline: disk full'] : g.low ? ['wait', 'Under ' + Math.round(g.warn_gb) + ' GB'] : ['run', 'Disk OK'];
     return el('div', {class: 'm-disk'},
       el('p', {class: 'sub'}, el('span', {class: 'chip ' + chip[0], text: chip[1]}), ' ',
-        (g.drive || 'Build drive') + ' ' + Math.round(g.free_gb) + (g.total_gb ? '/' + Math.round(g.total_gb) : '') + ' GB free',
+        (g.drive || 'Build drive') + ' ' + Math.round(g.free_gb) + (g.total_gb ? '/' + Math.round(g.total_gb) : '') + ' GB free' + fullIn(d),
         g.updated ? [' · checked ', ago(g.updated)] : ''),
       (g.holders || []).length ? el('p', {class: 'sub', text: 'Biggest: ' + g.holders.slice(0, 5).map(h => h.name + ' ' + Math.round(h.gb) + ' GB').join(' · ')}) : null);
   }
@@ -314,13 +342,13 @@
       typeof st.cpu === 'number' ? 'CPU ' + Math.round(st.cpu) + '%' : '',
       typeof st.ram_used_gb === 'number' ? 'RAM ' + st.ram_used_gb + '/' + st.ram_total_gb + ' GB' : '',
       ...(m.disks || []).filter(x => !g || x.name.replace(/[:\\/]+$/, '').toUpperCase() !== (g.drive || '').replace(/[:\\/]+$/, '').toUpperCase())
-        .map(x => x.name + ' ' + Math.round(x.free_gb) + (x.total_gb ? '/' + Math.round(x.total_gb) : '') + ' GB free'));
+        .map(x => x.name + ' ' + Math.round(x.free_gb) + (x.total_gb ? '/' + Math.round(x.total_gb) : '') + ' GB free' + fullIn(x)));
     const state = !m.online ? ['off', 'Not reporting'] : m.busy ? ['busy', 'Busy'] : ['on', 'Idle'];
     const tools = Object.entries(m.procs || {}).filter(([k]) => k !== 'claude').map(([k, n]) => k + (n > 1 ? ' ×' + n : ''));
     return el('li', null,
       el('div', {class: 'm-head'}, el('span', {class: 'm-name'}, dot(state[0], state[1]), m.name),
         el('span', {class: 'm-stats', text: bits.join(' · ')})),
-      g ? diskRow(g) : null,
+      g ? diskRow(g, (m.disks || []).find(x => x.name.replace(/[:\\/]+$/, '').toUpperCase() === (g.drive || '').replace(/[:\\/]+$/, '').toUpperCase())) : null,
       !m.online ? el('p', {class: 'sub'}, m.last_report ? ['Last report ', ago(m.last_report)] : 'No reporter on this machine yet') : null,
       m.activities && m.activities.length ? el('ul', {class: 'acts'}, (seen => m.activities.map(x => { const c = changeByKey[x.change]; if (c && seen.has(c.key)) return null; if (c) seen.add(c.key); return c ? machineAct(x, c) : actRow(x); }))(new Set())) :
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
@@ -425,6 +453,13 @@
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';
     fill($('liveBlockers'), blk.map(blockerRow), 'Nothing stuck. Everything is moving or idle.');
+    // Alerts that cleared in the last two hours: named under the card.
+    const gone = ((full.alerts || {}).cleared || []).filter(mine);
+    const cl = $('liveCleared');
+    if (cl) {
+      cl.hidden = !gone.length;
+      cl.replaceChildren(...(gone.length ? ['Cleared recently: ', ...sep(gone.slice(0, 6).map(x => el('span', null, x.title, ' (', clock(x.cleared), ')')))] : []));
+    }
     // Issues parked as blocked on other work: named under the card, not counted as stuck.
     const parked = (d.parked || []).filter(mine);
     const pk = $('liveParked');

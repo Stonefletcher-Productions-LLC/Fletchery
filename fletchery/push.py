@@ -1,8 +1,9 @@
 """Notifications on the phone for the portal (portal.py): Web Push, which iOS 16.4+ delivers to a web app that was added
 to the Home Screen.
 
-What is sent: a build that finished (with where to download it), and anything the Live tab lists as stuck or
-blocked (a failed check, an offline runner, a silent machine, a run that waits too long). Each message is encrypted for that one phone (RFC 8291, aes128gcm), so the
+What is sent: a build that finished (with where to download it), and every alert that fires (alerts.py: anything the
+Live tab lists as stuck or blocked that has lasted its rule's wait, and is not snoozed), one notification per group that
+fires together, plus a quiet "resolved" once it clears. Each message is encrypted for that one phone (RFC 8291, aes128gcm), so the
 push service (Apple, Google, Mozilla) relays it without being able to read it, and signed with this install's own key
 (VAPID, RFC 8292) so nobody else can send to the phone. The phone does not need to be on the private network to get one.
 
@@ -11,7 +12,7 @@ notifications are unavailable. State (the key, the subscribed phones, what was a
 the state folder; it never leaves this PC.
 
     "push": {"contact": "mailto:you@example.com",   # who the push service may contact about this sender (required by Apple)
-             "events": ["build", "stuck"]}   # default: both"""
+             "events": ["build", "stuck", "resolved"]}   # default: all three"""
 from __future__ import annotations
 
 import base64
@@ -25,8 +26,10 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-EVENTS = ("build", "stuck")
-SETTLE = 180   # a lost feed or a silent machine is announced only once it has lasted this long (no blips)
+EVENTS = ("build", "stuck", "resolved")
+SETTLE = 180   # without alerts (an older summary): a lost feed or a silent machine waits this long (no blips)
+WHAT = {"label": "Blocked", "check": "Check failed", "runner": "Runner offline", "base": "Base branch red",
+        "disk": "Disk", "machine": "Machine", "feed": "GitHub feed", "flow": "Nothing merging"}
 # Only real push services are ever contacted: a subscription cannot point Fletchery at another address.
 SERVICES = (".push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", ".notify.windows.com")
 MAX_SUBSCRIPTIONS = 10
@@ -161,13 +164,40 @@ def marks(view: dict) -> dict:
             "event": "build", "tab": "builds",
             "title": f"Build {b.get('version')} " + ("is ready to download" if ready and b.get("links") else "finished" if ready else str(b.get("state"))),
             "body": ("Open Fletchery for the download link." if ready and b.get("links") else str(b.get("reason") or ""))[:160]}
-    for b in view.get("live_blockers") or []:
+    for b in view.get("live_alerts") or []:
+        out[f"stuck:{b.get('key') or b.get('title')}"] = {"event": "stuck", "tab": "live", "group": str(b.get("group") or ""),
+                                                           "title": WHAT.get(b.get("kind"), "Stuck"),
+                                                           "body": " · ".join(x for x in (str(b.get("title") or ""), str(b.get("detail") or "")) if x)[:160]}
+    for b in view.get("live_cleared") or []:
+        out[f"resolved:{b.get('key') or b.get('title')}:{int(b.get('cleared') or 0)}"] = {
+            "event": "resolved", "tab": "live", "group": str(b.get("group") or ""), "title": "Resolved",
+            "body": str(b.get("title") or "")[:160]}
+    for b in view.get("live_blockers") or []:       # a summary from before alerts
         since = _seconds_ago(b.get("since"))
         if b.get("kind") in ("feed", "machine") and (since is None or since < SETTLE):
             continue
-        what = {"label": "Blocked", "check": "Check failed", "runner": "Runner offline"}.get(b.get("kind"), "Stuck")
-        out[f"stuck:{b.get('key') or b.get('title')}"] = {"event": "stuck", "tab": "live", "title": what,
+        out[f"stuck:{b.get('key') or b.get('title')}"] = {"event": "stuck", "tab": "live", "title": WHAT.get(b.get("kind"), "Stuck"),
                                                            "body": " · ".join(x for x in (str(b.get("title") or ""), str(b.get("detail") or "")) if x)[:160]}
+    return out
+
+
+def bundle(news: list) -> list:
+    """[(key, note)] -> [(tag, note)]: alerts of one group that are news together become one notification."""
+    out, groups = [], {}
+    for key, note in news:
+        g = note.get("group")
+        if note["event"] in ("stuck", "resolved") and g:
+            groups.setdefault((note["event"], g), []).append((key, note))
+        else:
+            out.append((key, note))
+    for (event, g), items in groups.items():
+        if len(items) == 1:
+            out.append(items[0])
+            continue
+        name = g.split("/")[-1].replace("machine:", "")
+        head = f"{len(items)} alerts: {name}" if event == "stuck" else f"Resolved: {len(items)} in {name}"
+        body = " · ".join(n["body"].split(" · ")[0] for _, n in items)
+        out.append((f"{event}-group:{g}", {"event": event, "tab": "live", "title": head, "body": body[:200]}))
     return out
 
 
@@ -286,14 +316,14 @@ class Push:
         private, public = self._keys()
         with self.lock:
             targets = list(self.state["subscriptions"] if subs is None else subs)
-        payload = json.dumps({k: note.get(k, "") for k in ("title", "body", "tab", "tag")}).encode("utf-8")
+        payload = json.dumps({**{k: note.get(k, "") for k in ("title", "body", "tab", "tag")}, "quiet": note.get("event") == "resolved"}).encode("utf-8")
         sent, gone = 0, []
         for sub in targets:
             try:
                 body = encrypt(payload, unb64(sub["p256dh"]), unb64(sub["auth"]))
                 code = self.send(sub["endpoint"], body, {
                     "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream", "TTL": "86400",
-                    "Urgency": "normal", "Authorization": vapid_header(sub["endpoint"], private, public, self.contact)})
+                    "Urgency": "low" if note.get("event") == "resolved" else "normal", "Authorization": vapid_header(sub["endpoint"], private, public, self.contact)})
             except Exception as e:
                 self.log(f"portal: a notification was not sent ({type(e).__name__}: {e})"[:200])
                 continue
@@ -329,10 +359,9 @@ class Push:
         if first or not has_phones:
             return []
         out = []
-        for key, note in news:
-            if note["event"] in self.events:
-                self.deliver({**note, "tag": key})
-                out.append(key)
+        for key, note in bundle([(k, n) for k, n in news if n["event"] in self.events]):
+            self.deliver({**note, "tag": key})
+            out.append(key)
         return out
 
     def start(self) -> None:

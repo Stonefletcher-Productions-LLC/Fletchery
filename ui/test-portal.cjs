@@ -187,6 +187,23 @@ const server = http.createServer((req, res) => {
     await page.waitForFunction(() => document.querySelector('#toast') && !document.querySelector('#toast').hidden);
     assert.deepEqual(lastPost(), ['/api/actions/rerun-job', {repo: 'Acme/Game', id: 41}]);
 
+    // Alerts: which blockers reached the phone, which wait their turn, which are snoozed; snooze from the row.
+    const blkText = await page.textContent('#liveBlockers');
+    assert.match(blkText, /Not yet alerted|Not alerted yet/);
+    assert.match(blkText, /alerts in 4 min if it lasts/);
+    assert.match(blkText, /Snoozed until/);
+    assert.match(blkText, /Shown here only: no alert for this kind/);
+    assert.match(await page.textContent('#liveCleared'), /Cleared recently: Gaming PC stopped reporting/);
+    assert.match(await page.textContent('#liveMachines'), /E: 31\/250 GB free \(full in ~2\.5 h\)/);
+    if (shots) {
+      await page.evaluate(() => document.querySelectorAll('header.top, nav.tabs').forEach(n => { n.style.visibility = 'hidden'; }));
+      await page.locator('#liveBlockersCard').screenshot({path: path.join(shots, 'portal-alerts.png')});
+      await page.evaluate(() => document.querySelectorAll('header.top, nav.tabs').forEach(n => { n.style.visibility = ''; }));
+    }
+    await page.click('#liveBlockers li.blk >> nth=0 >> button:has-text("4 h")');
+    await page.waitForFunction(() => /Snoozed for 4 h/.test(document.getElementById('toast').textContent));
+    assert.deepEqual(lastPost(), ['/api/alerts/snooze', {key: 'queued:Acme/Game:13', hours: 4}]);
+
     // A feed whose data is old says so at the top, in words.
     liveAt = new Date(Date.now() - 5 * 60000).toISOString();
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
