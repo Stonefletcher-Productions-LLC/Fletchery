@@ -764,8 +764,10 @@ class DevWatch:
 
     def _poll_repo(self, repo: str, prs: list) -> dict:
         """A detail timeout keeps older check and issue data alongside the independent PR inventory."""
+        out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
+               "merged_all": []}
         try:
-            return self._read_repo(repo, prs)
+            return self._read_repo(repo, prs, out)
         except GitHubError as e:
             with self._lock:
                 old = {"runs": self.runs.get(repo, []), "prs": prs, "issues": self.issues.get(repo, []),
@@ -774,6 +776,7 @@ class DevWatch:
                        "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
                        "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
             old["error"] = f"{repo}: {e}"
+            old["pr_build_queue"] = out.get("pr_build_queue")  # a later PR or branch lookup cannot invalidate the jobs read
             return old
 
     def _read_holder_times(self, repo, runs, jobs):
@@ -826,9 +829,7 @@ class DevWatch:
                         samples.append((end - start, s["conclusion"]))
         return samples
 
-    def _read_repo(self, repo: str, prs: list) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
-               "merged_all": []}
+    def _read_repo(self, repo: str, prs: list, out: dict) -> dict:
         recent = self._try(f"repos/{repo}/actions/runs?per_page=20") or {}
         complete = isinstance(recent.get("workflow_runs"), list)
         runs = recent.get("workflow_runs") or []

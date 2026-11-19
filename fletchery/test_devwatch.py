@@ -131,6 +131,11 @@ class Feed(unittest.TestCase):
         row = w.snapshot()["flow"]["all"]["build_queues"][0]
         self.assertEqual(row["waiting"], 1)
         self.assertAlmostEqual(row["oldest"], 45 * 60, delta=3)
+        w.gh.answers = {f"repos/{REPO}/commits/": devwatch.GitHubError(503, "detail timeout"), **w.gh.answers}
+        with self.assertRaises(devwatch.GitHubError):
+            w.poll()
+        self.assertEqual(len(w.pr_build_queues[REPO]["times"]), 1)
+        del w.gh.answers[f"repos/{REPO}/commits/"]
         w.gh.answers[path + "&page=2"] = devwatch.GitHubError(403, "forbidden")
         w.poll()
         self.assertIsNone(w.pr_build_queues[REPO])
@@ -627,11 +632,11 @@ class Feed(unittest.TestCase):
         started, resume = threading.Event(), threading.Event()
         read_repo = w._read_repo
 
-        def pending_details(repo, prs):
+        def pending_details(repo, prs, out):
             started.set()
             if not resume.wait(10):
                 raise RuntimeError("test detail read timed out")
-            return read_repo(repo, prs)
+            return read_repo(repo, prs, out)
 
         w._read_repo = pending_details
         worker = threading.Thread(target=w.poll)
