@@ -173,6 +173,14 @@ and remove it at exit. The dashboard matches it to the current machine, run, att
 For a check that predates phase reporting, the Gaming PC can identify the latest tool output in the reserved
 checkout. Its timestamp remains visible during quiet periods so you can see how recently the job produced evidence.
 The GitHub step count describes the outer workflow. Several imports, builds and tests can happen within one step.
+
+On **Live → Flow**, the **PR Compile and test** row gives each repository's build queue separately. Median and
+90th percentile use observed PR check job attempts that started within the last 24 hours, received a runner and
+finished with success or failure. Each wait runs from the compile job's creation to its start. A retry has its own
+job ID and wait. The sample count shows how many attempts supplied both timestamps. **Waiting now** counts queued
+compile jobs on current PR run attempts. **Oldest wait** uses the earliest of their creation times. An unavailable
+or stale GitHub queue read shows **Unavailable**. This row also appears in **All projects**.
+
 For Git LFS uploads that report completed batches, the card shows the uploaded and total file counts.
 Its upload estimate uses the rate of recent completed batches. During a quiet period the last count stays visible
 with its observation time, and the estimate expires.

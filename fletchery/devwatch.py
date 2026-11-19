@@ -478,6 +478,7 @@ class DevWatch:
         self.runner_note = ""
         self.runs: dict[str, list] = {}             # repo -> recent runs
         self.jobs: dict[int, list] = {}             # run id -> jobs
+        self.pr_build_queues = {}                   # repository -> queued PR compile jobs from a complete live read
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
         self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
@@ -652,6 +653,7 @@ class DevWatch:
             if not errors or len(errors) < len(got):
                 self.last_ok = now_iso()
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
+            self.pr_build_queues = {repo: g.get("pr_build_queue") for repo, g in got.items()}
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
             self.runners = {k: rows for k, (rows, _) in found.items() if rows is not None}
@@ -827,28 +829,65 @@ class DevWatch:
     def _read_repo(self, repo: str, prs: list) -> dict:
         out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
                "merged_all": []}
-        runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
-        if len(runs) == 20:
+        recent = self._try(f"repos/{repo}/actions/runs?per_page=20") or {}
+        complete = isinstance(recent.get("workflow_runs"), list)
+        runs = recent.get("workflow_runs") or []
+        if len(runs) == 20 or recent.get("total_count", len(runs)) > len(runs):
             # GitHub's recent list is ordered by creation time. A long check can disappear from it while still running.
             by_id = {r["id"]: r for r in runs}
             for status in ("in_progress", "queued"):
                 page = 1
+                seen = set()
                 while True:
                     path = f"repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"
-                    batch = (self._try(path) or {}).get("workflow_runs") or []
+                    response = self._try(path) or {}
+                    complete = complete and isinstance(response.get("workflow_runs"), list) and response.get("total_count", 0) <= 1000
+                    batch = response.get("workflow_runs") or []
                     by_id.update((r["id"], r) for r in batch)
-                    if len(batch) < 100:
+                    seen.update(r["id"] for r in batch)
+                    if len(batch) < 100 or page == 10:
+                        complete = complete and len(seen) >= response.get("total_count", len(seen))
                         break
                     page += 1
             runs = list(by_id.values())
         out["runs"] = runs
+        previous = {r["id"]: r for r in self.runs.get(repo, [])}
+        queued = {}
         for run in runs:
             before = self.jobs.get(run["id"])
-            if run.get("status") in ACTIVE or before is None and run.get("status") != "completed" or \
+            pr_build = run.get("event") == "pull_request" and run.get("name") == storemod.PR_WORKFLOW
+            old = previous.get(run["id"], {})
+            newly_finished = pr_build and run.get("conclusion") in ("success", "failure") and (
+                before is None or old.get("status") != "completed" or old.get("run_attempt") != run.get("run_attempt"))
+            if newly_finished or run.get("status") in ACTIVE or before is None and run.get("status") != "completed" or \
                     before and any(j.get("status") in ACTIVE for j in before):
-                out["jobs"][run["id"]] = (self._try(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30") or {}).get("jobs") or []
+                path = f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30"
+                response = self._try(path) or {}
+                jobs = list(response.get("jobs") or [])
+                if pr_build:
+                    expected = response.get("total_count", len(jobs))
+                    page = 1
+                    while len(jobs) < expected:
+                        page += 1
+                        more = (self._try(f"{path}&page={page}") or {}).get("jobs") or []
+                        if not more:
+                            break
+                        jobs.extend(more)
+                    if run.get("status") in ACTIVE:
+                        complete = complete and isinstance(response.get("jobs"), list) and len({j.get("id") for j in jobs}) >= expected
+                out["jobs"][run["id"]] = jobs
             elif before is not None:
                 out["jobs"][run["id"]] = before
+            if pr_build and run.get("status") in ACTIVE:
+                for job in out["jobs"].get(run["id"], []):
+                    if job.get("name") != storemod.PR_BUILD or job.get("status") != "queued" or job.get("runner_name"):
+                        continue
+                    if job.get("run_attempt", run.get("run_attempt", 1)) == run.get("run_attempt", 1):
+                        if not isinstance(job.get("id"), int):
+                            complete = False
+                            continue
+                        queued[job["id"]] = storemod.ts(job.get("created_at"))
+        out["pr_build_queue"] = {"times": list(queued.values()), "at": time.time()} if complete else None
         self._read_holder_times(repo, runs, out["jobs"])
         for run in runs:
             # A cancelled run in the last day: who or what cancelled it, from its job's annotations, asked once.
@@ -1454,7 +1493,9 @@ class DevWatch:
                 waiting[p["repo"]] = waiting.get(p["repo"], 0) + 1
         try:
             kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at,
-                                     projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1})
+                                     projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1},
+                                     build_queues={r: q for r, q in self.pr_build_queues.items()
+                                                   if q and at - q["at"] <= max(60, 2 * self.interval)})
         except Exception as e:
             self.log(f"live: flow: {type(e).__name__}: {e}")
             kept = {}

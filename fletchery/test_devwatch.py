@@ -119,6 +119,21 @@ class Feed(unittest.TestCase):
         self.assertEqual(s["building"][0]["steps_done"], 1)
         self.assertEqual(s["building"][0]["step"], "Build editor")
 
+    def test_build_queue_uses_current_attempt_and_complete_job_pages(self):
+        path = f"repos/{REPO}/actions/runs/7/jobs?per_page=30"
+        run = {**world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0], "run_attempt": 2}
+        job = {"name": devwatch.storemod.PR_BUILD, "status": "queued", "created_at": ago(45), "run_attempt": 2}
+        responses = {path + "&page=2": {"jobs": [{**job, "id": 99}]},
+                     path: {"total_count": 31, "jobs": [{**job, "id": i, "run_attempt": 1} for i in range(30)]},
+                     f"repos/{REPO}/actions/runs?per_page=20": {"workflow_runs": [run]}}
+        w = self.watch_first(responses)
+        row = w.snapshot()["flow"]["all"]["build_queues"][0]
+        self.assertEqual(row["waiting"], 1)
+        self.assertAlmostEqual(row["oldest"], 45 * 60, delta=3)
+        w.gh.answers[path + "&page=2"] = devwatch.GitHubError(403, "forbidden")
+        w.poll()
+        self.assertIsNone(w.pr_build_queues[REPO])
+
     def test_inner_phase_is_for_the_current_run_attempt_and_machine(self):
         run = world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0]
         job = {"id": 80, "name": "Compile and test", "runner_name": "ALEX-PC-unreal-pr", "status": "in_progress",

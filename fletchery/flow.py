@@ -12,6 +12,7 @@ Profile, under `workers.portal.live.flow` (all optional):
 Standard library only."""
 from __future__ import annotations
 
+import math
 import statistics
 import time
 
@@ -41,7 +42,8 @@ class Flow:
         except (TypeError, ValueError):
             self.slow, self.stop = 60 * SLOW_MINUTES, 3600 * STOP_HOURS
 
-    def compute(self, repos: list, waiting: dict, now: float | None = None, projects: dict | None = None) -> dict:
+    def compute(self, repos: list, waiting: dict, now: float | None = None, projects: dict | None = None,
+                build_queues: dict | None = None) -> dict:
         """{"all": {...}, "repos": {repo: {...}}, "projects": {name: {...}}}. `waiting` = {repo: open PRs on their way to
         merging (not drafts, checks not failed)}; `projects` = {name: [repos]} for projects of several repositories."""
         now = now or time.time()
@@ -50,6 +52,28 @@ class Flow:
             out["repos"][r] = self._one(r, waiting.get(r, 0), now)
         for name, rs in (projects or {}).items():
             out["projects"][name] = self._one(list(rs), sum(waiting.get(r, 0) for r in rs), now)
+        # Keep build attempts separate from the all-jobs tile, even when the page spans projects.
+        samples = {}
+        for repo, wait in self.store.query("""SELECT repo, started-pr_build_created FROM jobs
+            WHERE started>? AND started<=? AND pr_build_created IS NOT NULL AND started>=pr_build_created
+              AND runner<>'' AND finished>=started AND result IN ('success','failure') ORDER BY started-pr_build_created""",
+                                           (now - 86400, now)):
+            samples.setdefault(repo, []).append(wait)
+        builds = {}
+        for repo in repos:
+            waits = samples.get(repo, [])
+            current = (build_queues or {}).get(repo)
+            if not waits and not (current and current["times"]) and repo.rsplit("/", 1)[-1].lower() != "lifeshare":
+                continue
+            times = current["times"] if current else []
+            oldest = now - min(times) if times and all(t is not None and t <= now for t in times) else None
+            builds[repo] = {"repo": repo, "samples": len(waits), "median": _median(waits),
+                            "p90": waits[math.ceil(0.9 * len(waits)) - 1] if waits else None,
+                            "waiting": len(times) if current else None, "oldest": oldest}
+            out["repos"][repo]["build_queues"] = [builds[repo]]
+        out["all"]["build_queues"] = list(builds.values())
+        for name, rs in (projects or {}).items():
+            out["projects"][name]["build_queues"] = [builds[r] for r in rs if r in builds]
         return out
 
     def _one(self, repo, waiting: int, now: float) -> dict:
