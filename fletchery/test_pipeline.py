@@ -161,6 +161,27 @@ class OpenChanges(unittest.TestCase):
         running = self.change(pr(), [check(1, "Cheap checks", status="in_progress", start=T0 - 60)])
         self.assertNotIn("since", running)
 
+    def test_only_real_runs_are_timed_and_a_pr_uses_its_own(self):
+        # 2026-11-19: commit statuses (posted once, at the end) timed "Cheap checks" at seconds: "6 min of ~1 min".
+        h = pipeline.History()
+        status = dict(check(1, "Cheap checks", start=T0 - 30, end=T0 - 29), source="status")
+        pipeline.learn_checks(h, REPO, "Change", "s1", [status], [], {}, MACHINE)
+        skipped = check(2, "Cheap checks", conclusion="skipped", start=T0 - 30, end=T0 - 29)
+        pipeline.learn_checks(h, REPO, "Change", "s2", [skipped], [], {}, MACHINE)
+        self.assertEqual(h.estimate(("quick", REPO, "Change")), (None, 0))
+        for i in range(3):
+            pipeline.learn_checks(h, REPO, "Change", f"r{i}", [check(3 + i, "Cheap checks", start=T0 - 700, end=T0 - 640)], [], {}, MACHINE)
+        pipeline.learn_checks(h, REPO, "Town change", "mine", [check(9, "Cheap checks", start=T0 - 900, end=T0 - 180)], [], {}, MACHINE, 12)
+        c = pipeline.open_change(h, RULES, REPO, pr(), [check(10, "Cheap checks", status="in_progress", start=T0 - 240)], {}, MACHINE, T0)
+        self.assertEqual((c["step"]["avg"], c["step"]["own"], c["step"]["late"]), (720, True, False))   # its own 12 min
+
+    def test_version_1_quick_times_are_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "step-times.json"
+            path.write_text(json.dumps({"version": 1, "samples": {"quick|r|Change": [[30, "a"]], "staging|r|all": [[900, "b"]]}}))
+            h = pipeline.History(path)
+            self.assertEqual(sorted(h.samples), ["staging|r|all"])
+
     def test_draft_no_checks_and_still_learning(self):
         self.assertEqual(self.change(pr(draft=True), [])["stage"], "written")
         c = self.change(pr(), [])
