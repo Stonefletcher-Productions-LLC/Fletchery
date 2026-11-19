@@ -294,7 +294,7 @@
       const cls = c.status === 'failed' ? 'bad' : step.late ? 'late' : 'step';
       here = meter('This step', step.late ? 100 : step.pct, mins(step.elapsed) + ' of ~' + mins(step.avg), cls);
     } else if (step && step.elapsed) {
-      here = el('p', {class: 'sub', text: 'This step: ' + mins(step.elapsed) + ' so far (no usual time yet)'});
+      here = meter('This step', null, mins(step.elapsed) + ' so far · no usual time yet', 'learning');
     }
     return [overall, here];
   }
