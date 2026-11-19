@@ -934,7 +934,8 @@ class DevWatch:
                 kind = self.rules.kind(p.get("title"), [x.get("name") for x in p.get("labels") or [] if isinstance(x, dict)],
                                        (p.get("head") or {}).get("ref"))
                 pipeline.learn_checks(self.history, repo, kind, sha, [c for c in cr if self.rules.is_quick(c.get("name"))],
-                                      [c for c in cr if not self.rules.is_quick(c.get("name"))], jobs, self._runner_machine)
+                                      [c for c in cr if not self.rules.is_quick(c.get("name"))], jobs, self._runner_machine,
+                                      p.get("number"))
             bases = {str((p.get("base") or {}).get("ref") or "") for p in list(prs) + list(merged_by.get(repo, []))} - {""}
             for r in runs_by.get(repo, []):
                 if r.get("event") == "push" and r.get("head_branch") in bases:
