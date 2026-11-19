@@ -101,6 +101,9 @@ const server = http.createServer((req, res) => {
     const changesText = await page.textContent('#liveChanges');
     assert.match(changesText, /#12[\s\S]*Bus lines[\s\S]*Written[\s\S]*Quick checks[\s\S]*Build & test[\s\S]*Into Test-Staging[\s\S]*Staging build[\s\S]*In a release/);
     assert.match(changesText, /#13[\s\S]*Weather[\s\S]*Failed[\s\S]*Compile and test/);
+    // A failed step's clock stops: it says how long it ran and since when it waits, not "2 h 20 min of ~1 min".
+    assert.match(changesText, /#13[\s\S]*This step failed after 19 min[\s\S]*Waiting for a fix since/);
+    assert.doesNotMatch(changesText, /#13 Weather[^#]*Taking longer than usual/);
     assert.match(changesText, /#14[\s\S]*Shop signs[\s\S]*Queued[\s\S]*still learning/);
     assert.equal(await page.getAttribute('#liveChanges li.chg:nth-child(2) .st.now', 'aria-current'), 'step');
     assert.equal(await page.getAttribute('#liveChanges li.chg:nth-child(2) .pb .meter', 'aria-valuenow'), '48');

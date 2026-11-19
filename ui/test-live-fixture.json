@@ -502,7 +502,18 @@
      "state": "todo"
     }
    ],
-   "step": null,
+   "step": {
+    "elapsed": 1140,
+    "avg": 2400,
+    "samples": 12,
+    "machine": "NODE-01",
+    "parts": [],
+    "pct": 47,
+    "left": null,
+    "late": false,
+    "stopped": "2026-11-18T02:10:00Z"
+   },
+   "since": "2026-11-18T02:10:00Z",
    "overall": {
     "pct": 40,
     "left": null,

@@ -27,7 +27,13 @@
         "names": {
           "MY-PC": "Gaming PC"
         },
-        "diskFreeGb": 30
+        "diskFreeGb": 30,
+        "pipeline": {
+          "kinds": {
+            "Town change": ["area: town", "buildtown", "town ", "town,", "town:", "roads", "buses", "bus lines", "marina",
+                            "walk route", "nav bake", "sidewalk", "terrain", "woods", "city rebuild", "/town"]
+          }
+        }
       }
     },
     "machines": {
