@@ -194,8 +194,6 @@ class App:
                 from machines import Coordinator
                 self.machines = Coordinator(self.cfg, self.gh, self.log)
                 self.machines.start()
-                if self.machines.error:
-                    self.errors["machines"] = self.machines.error
             except Exception as e:   # a bad machines block must not stop the rest
                 self.machines = None
                 self.errors["machines"] = f"Build machines not started: {type(e).__name__}: {e}"
@@ -316,6 +314,11 @@ class App:
     def status(self) -> dict:
         builds = self.builds.view()
         machines = self.machines.machines.view(jobs=40) if self.machines else None
+        if self.machines:   # the worker API retries its bind after boot; show its problem only while it lasts
+            if self.machines.error:
+                self.errors["machines"] = self.machines.error
+            else:
+                self.errors.pop("machines", None)
         return {"project": self.cfg.name, "repo": self.cfg.repo, "pid": os.getpid(), "started": self.started,
                 "version": self.version,
                 "at": now_iso(), "errors": dict(self.errors), "builds": builds, "machines": machines,

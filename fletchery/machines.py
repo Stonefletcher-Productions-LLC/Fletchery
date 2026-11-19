@@ -955,21 +955,32 @@ class Coordinator:
         self.api = WorkerApi(self.machines, conf["listen"], log) if conf.get("listen") else None
         self._stop = threading.Event()
         self.error = ""
+        self._api_up = False
+
+    API_RETRY_SECONDS = 30
+
+    def _start_api(self) -> bool:
+        """Bind the worker API. The listen address is usually the Tailscale IP, which is not up yet right after a
+        reboot (WinError 10049), so a failed bind is retried from _run until it works, not given up for good."""
+        try:
+            self.api.start()
+        except (OSError, ValueError) as e:
+            if not self.error:
+                self.log(f"machines: worker API not started yet ({e}); retrying every {self.API_RETRY_SECONDS} s")
+            self.error = f"Worker API not started: {e} (retrying every {self.API_RETRY_SECONDS} s)"
+            return False
+        if self.error:
+            self.error = ""
+        self.log(f"machines: worker API on {self.api.host}:{self.api.port}")
+        return True
 
     def start(self) -> None:
-        if self.api:
-            try:
-                self.api.start()
-                self.log(f"machines: worker API on {self.api.host}:{self.api.port}")
-            except (OSError, ValueError) as e:
-                self.error = f"Worker API not started: {e}"
-                self.log("machines: " + self.error)
-                self.api = None
+        self._api_up = bool(self.api) and self._start_api()
         threading.Thread(target=self._run, name="fletchery-machines", daemon=True).start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self.api:
+        if self.api and self._api_up:
             self.api.stop()
 
     def resolve(self, ref: str) -> str:
@@ -986,7 +997,11 @@ class Coordinator:
             self.log(f"machines: job {job} lost its machine or ran past its limit")
 
     def _run(self) -> None:
+        last_try = time.monotonic()
         while not self._stop.wait(10):
+            if self.api and not self._api_up and time.monotonic() - last_try >= self.API_RETRY_SECONDS:
+                last_try = time.monotonic()
+                self._api_up = self._start_api()
             try:
                 self.tick()
             except Exception as e:  # never take the backend down

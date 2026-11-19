@@ -206,6 +206,26 @@ class CoordinatorTests(unittest.TestCase):
                     c.resolve(bad)
 
 
+    def test_worker_api_bind_is_retried_until_the_address_exists(self):
+        # After a reboot the Tailscale address is not up yet: WinError 10049. The API must come up once it is.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            cfg = type("C", (), {"state_dir": d, "repo": "o/r", "machines": {"listen": "127.0.0.1:0"}})()
+            c = machines.Coordinator(cfg, FakeGh(), log=lambda *_: None)
+            calls = []
+
+            def flaky():
+                calls.append(1)
+                if len(calls) == 1:
+                    raise OSError(10049, "The requested address is not valid in its context")
+            c.api.start = flaky
+            self.assertFalse(c._start_api())
+            self.assertIn("Worker API not started", c.error)
+            self.assertIn("retrying", c.error)
+            self.assertIsNotNone(c.api)
+            self.assertTrue(c._start_api())
+            self.assertEqual(c.error, "")
+
+
 class ApiTests(Base):
     def test_unknown_keys_are_refused_and_throttled(self):
         api = WorkerApi(self.m, "127.0.0.1:0")
