@@ -236,8 +236,9 @@
   // One coding agent working now. From its own heartbeat: what it is on, its step, where it runs, when it checked in.
   // From GitHub only (an agent that sends no heartbeat): its PR or branch and what that waits on, marked as a guess.
   const CHECKS = {failed: 'checks failing', rerun: 'checks need a re-run', running: 'checks running', queued: 'checks queued', passed: 'checks pass'};
+  // A Claude Code session open on a machine (its reporter): busy or idle, where it runs and since when.
   function agentRow(x) {
-    const said = x.source === 'heartbeat';
+    const said = x.source === 'heartbeat' || x.source === 'session';
     const head = a(x.url, 't', x.number ? el('span', {class: 'num', text: '#' + x.number}) : null, x.title);
     const repo = (x.repo || '').split('/')[1] || x.repo || '';
     return el('li', null, el('span', {class: 'chip k-' + (x.agent === 'Codex' ? 'codex' : 'coding'), text: x.agent}),
@@ -245,6 +246,7 @@
         el('p', {class: 'sub'}, el('span', {class: 'chip ' + (x.tone || ''), text: x.state}), ' ',
           said ? (x.step || '') : el('span', {class: 'guess', title: 'This agent sends no heartbeat: Fletchery guessed from its pushes and PR', text: 'seen on GitHub'})),
         el('p', {class: 'sub'}, ...sep(join(said ? x.where : '', repo, said && CHECKS[x.checks] ? CHECKS[x.checks] : '',
+          x.source === 'session' ? (x.since ? ['open since ', ago(x.since)] : '') :
           x.last ? [said ? 'checked in ' : 'active ', ago(x.last)] : '')))));
   }
   // ---- where a change is in the whole process (pipeline.py) ----

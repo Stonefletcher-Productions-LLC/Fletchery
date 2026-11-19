@@ -109,7 +109,8 @@ def full_work(work: str) -> str:
 def heartbeat(a) -> dict:
     branch = a.branch if a.branch is not None else git("rev-parse", "--abbrev-ref", "HEAD")
     return {"agent": a.agent, "session": a.session or default_session(), "work": full_work(a.work or ""),
-            "branch": "" if branch == "HEAD" else branch, "step": " ".join((a.step or "").split())[:200], "state": a.state}
+            "branch": "" if branch == "HEAD" else branch, "step": " ".join((a.step or "").split())[:200], "state": a.state,
+            "title": " ".join((getattr(a, "title", "") or "").split())[:120]}
 
 
 def send(cfg: dict, body: dict, timeout: float = 5) -> dict:
@@ -155,6 +156,7 @@ def main(argv=None) -> int:
         ap.add_argument("--work", default="", help="#123 or owner/repo#123")
         ap.add_argument("--branch", default=None)
         ap.add_argument("--step", default="", help="what you are doing now, one line (200 characters at most)")
+        ap.add_argument("--title", default="", help="the task's name, shown when no issue or PR is named (120 at most)")
         ap.add_argument("--state", default="working", choices=["working", "waiting", "done"])
         ap.add_argument("--config", default="")
         ap.add_argument("--dry-run", action="store_true", help="print the heartbeat, send nothing")

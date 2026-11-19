@@ -29,6 +29,7 @@ SESSION = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 WORK = re.compile(r"^(?:([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100}))?#([0-9]{1,9})$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,120}$")
 STEP_MAX = 200
+TITLE_MAX = 120
 KEEP_HOURS = 24              # a record with no heartbeat for this long is forgotten
 RATE_PER_MINUTE = 60         # heartbeats one machine may send in a minute
 MAX_SESSIONS = 50            # live sessions one machine (or one repository's status issue) may hold
@@ -83,7 +84,16 @@ def validate(data, clean=None) -> dict:
     state = data.get("state", "working")
     if state not in STATES:
         raise ValueError("state: one of " + ", ".join(STATES))
-    return {"agent": agent.lower(), "session": session, "work": work, "branch": branch, "step": step, "state": state}
+    title = data.get("title", "")
+    if title is None:
+        title = ""
+    if not isinstance(title, str) or len(title) > TITLE_MAX:
+        raise ValueError(f"title: text of at most {TITLE_MAX} characters")
+    title = " ".join(title.split())
+    if clean:
+        title = clean(title, TITLE_MAX)
+    return {"agent": agent.lower(), "session": session, "work": work, "branch": branch, "step": step, "state": state,
+            "title": title}
 
 
 class Presence:

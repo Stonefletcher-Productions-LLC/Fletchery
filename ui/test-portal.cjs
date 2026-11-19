@@ -120,6 +120,7 @@ const server = http.createServer((req, res) => {
     assert.match(agents, /Codex[\s\S]*#13[\s\S]*Weather[\s\S]*NODE-01[\s\S]*checks failing/);
     assert.match(agents, /#40[\s\S]*Hair import[\s\S]*Waiting[\s\S]*Waiting on PR checks[\s\S]*cloud/);
     assert.match(agents, /claude\/town-benches[\s\S]*Coding, no PR yet[\s\S]*seen on GitHub[\s\S]*active/);
+    assert.match(agents, /Cross-town travel[\s\S]*Working[\s\S]*Open session in wt-travel[\s\S]*Gaming PC[\s\S]*open since/);   // a running Claude Code session
     assert.equal(await page.$$eval('#liveAgents .guess', list => list.length), 1);
     assert.doesNotMatch(await page.textContent('#liveMachines'), /Claude: \d+ session/);
     assert.match(await page.textContent('#liveAgentsCard'), /12 more agents were active earlier today, but not in the last 15 minutes/);

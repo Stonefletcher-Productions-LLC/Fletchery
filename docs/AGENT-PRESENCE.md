@@ -10,7 +10,7 @@ in `fletchery/machines.py` and `DevWatch._agents()` in `fletchery/devwatch.py`.
 | Signal | Why it is not enough on its own |
 |---|---|
 | Pushes and PR updates | An agent can work an hour before its first push. A push says it *was* working, not that it *is*. |
-| `claude.exe` / `codex` processes on a machine | The Claude app runs ~15 processes whatever it is doing; cloud threads run on no machine of ours at all. |
+| `claude.exe` / `codex` processes on a machine | The Claude app runs ~15 processes whatever it is doing; cloud threads run on no machine of ours at all. (Claude Code's own `claude agents --json` does name each open session: see below.) |
 | Local worktree file changes | Only local agents, and scanning worktrees costs disk I/O on machines that build. |
 
 So agents **say** what they are doing (a heartbeat), and GitHub activity is only the fallback for an agent that does
@@ -19,7 +19,8 @@ not (yet) follow the instruction.
 ## Two ways in, one record
 
 Every heartbeat becomes the same record: `agent` (claude, codex), `session` (the thread or session id), `work`
-(`#123` or `owner/repo#123`), `branch` (optional, the git branch it works on), `step` (one line of text), `state`
+(`#123` or `owner/repo#123`), `branch` (optional, the git branch it works on), `step` (one line of text), `title` (optional,
+the task's name, shown when no issue or PR is named, 120 characters at most), `state`
 (`working`, `waiting` or `done`), and **the time Fletchery or GitHub received it** (never a time the agent claims).
 
 1. **Local agents (Codex, Claude Code on the PC or a node): `POST /v1/agent` on the machines worker API.**
@@ -47,6 +48,19 @@ Every heartbeat becomes the same record: `agent` (claude, codex), `session` (the
      not send notifications; only the first comment of a session does (people can unsubscribe from the status issue).
      Fletchery reads only the comments updated in the last day (`since=`, rounded to the hour so the ETag holds and an
      unchanged answer costs nothing).
+
+## Open Claude Code sessions on a machine (no heartbeat needed)
+
+Each machine's reporter (`fletchery/reporter.py`) also asks `claude agents --json` at most every 30 seconds and sends
+the answer with its report: every Claude Code session open on that machine (interactive, background and Remote
+Control), whether it is busy or idle, its name, the last folder name of its working folder (never the full path) and
+when it started. The card lists each one as a **Claude** row with **Working** (busy) or **Idle**, the machine, and
+"open since", until the session closes. A machine's list counts for two minutes after its report, so a reporter that
+stops takes its sessions off the card. This needs no instruction to the agent and no GitHub trace, so a session shows
+from its first minute. It is off when `reporter.json` says `"claudeSessions": false`; `"claude": "<path>"` names the
+program when it is not on the reporter's PATH.
+
+Cloud threads run on no machine of ours, so they still need the status issue below.
 
 ## Safety
 

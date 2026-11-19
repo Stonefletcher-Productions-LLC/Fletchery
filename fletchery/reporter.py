@@ -8,6 +8,8 @@ What it reads (nothing here starts, stops or changes anything):
     runs: {"title": "Proof run for #2263", "kind": "proof", "detail": "NavCheck", "since": "<UTC ISO>"}. A file not
     rewritten for 3 minutes is ignored (its script died);
   - which tools run (GitHub job, Unreal editor, compiler, shader workers, Claude, Blender), counted by process name;
+  - which Claude Code sessions are open on this machine, from `claude agents --json` (interactive, background and
+    Remote Control sessions, each busy or idle), asked at most every 30 seconds; the Live tab's Agents card lists them;
   - CPU, memory and free disk;
   - <lease folder>/disk.json, written by LifeShare's disk guard (Tools/CI/DiskGuard.ps1) every 10 minutes: the build
     drive's free and total space, its state (ok, low, full), the thresholds, the runner services it stopped and the
@@ -32,8 +34,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
@@ -41,11 +45,14 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "2"  # 2: sends disk.json (the disk guard) and each drive's total
+VERSION = "3"  # 2: sends disk.json (the disk guard) and each drive's total; 3: sends open Claude Code sessions
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
 LOCK_PORT = 8779                # one reporter per machine: the second one cannot bind and exits
+SESSIONS_EVERY = 30             # seconds between `claude agents --json` calls (it starts a program)
+MAX_SESSIONS = 40               # sessions sent in one report
+NO_WINDOW = 0x08000000 if WINDOWS else 0      # never flash a console window on the PC
 TOOLS = {                       # process names (lower case) -> what the Live tab calls them
     "runner.worker.exe": "runner", "runner.worker": "runner",
     "unrealeditor-cmd.exe": "unreal", "unrealeditor.exe": "unreal",
@@ -242,12 +249,57 @@ def disks(roots) -> list:
     return out
 
 
+def claude_sessions(exe: str | None = None, run=subprocess.run) -> list | None:
+    """The Claude Code sessions open on this machine, from `claude agents --json`: [{"id", "name", "folder", "kind",
+    "status", "since"}]. Only the last folder name of each session's working folder is kept (no full paths leave the
+    machine). None when Claude Code is not installed or did not answer (the report then says nothing about sessions)."""
+    exe = exe or shutil.which("claude")
+    if not exe:
+        return None
+    try:
+        out = run([exe, "agents", "--json"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                  creationflags=NO_WINDOW, cwd=str(Path.home()))
+        rows = json.loads(out.stdout or b"[]") if out.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    found = []
+    for r in rows[:MAX_SESSIONS]:
+        if not isinstance(r, dict):
+            continue
+        sid = re.sub(r"[^A-Za-z0-9._:-]", "", str(r.get("sessionId") or r.get("id") or ""))[:80]
+        if not sid:
+            continue
+        cwd = str(r.get("cwd") or "").rstrip("\\/")
+        folder = re.split(r"[\\/]", cwd)[-1] if cwd else ""
+        try:
+            since = datetime.fromtimestamp(float(r.get("startedAt")) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (TypeError, ValueError, OverflowError, OSError):
+            since = ""
+        found.append({"id": sid, "name": str(r.get("name") or "")[:120], "folder": folder[:120],
+                      "kind": str(r.get("kind") or "")[:20], "status": str(r.get("status") or "")[:20], "since": since})
+    return found
+
+
 class Reporter:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lease = Path(cfg["leaseFile"]) if cfg.get("leaseFile") else None
         self.cpu = Cpu()
         self.idle_since = 0.0
+        self.sessions: list | None = None
+        self.sessions_at = 0.0
+
+    def claude(self) -> list | None:
+        """Open Claude Code sessions, asked at most every SESSIONS_EVERY seconds; `"claudeSessions": false` in
+        reporter.json turns it off, `"claude": "<path>"` names the program."""
+        if self.cfg.get("claudeSessions") is False:
+            return None
+        if time.time() - self.sessions_at >= SESSIONS_EVERY:
+            self.sessions_at = time.time()
+            self.sessions = claude_sessions(self.cfg.get("claude") or None)
+        return self.sessions
 
     def collect(self) -> dict:
         lease = None
@@ -298,7 +350,7 @@ class Reporter:
         else:
             self.idle_since = 0.0
         return {"version": VERSION, "host": socket.gethostname(), "at": now_iso(), "lease": lease, "queue": queue[:10],
-                "activities": acts[:10], "procs": procs, "stats": stats, "disk_guard": guard,
+                "activities": acts[:10], "procs": procs, "stats": stats, "disk_guard": guard, "sessions": self.claude(),
                 "idle_seconds": round(time.time() - self.idle_since) if self.idle_since else 0,
                 "busy": bool(lease or procs.get("runner") or acts)}
 
