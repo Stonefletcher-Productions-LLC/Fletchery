@@ -25,6 +25,8 @@ reporter.json:
     {"coordinator": "http://100.64.0.10:8771", "machine": "SF-NODE-01", "keyFile": "C:\\StoneNode\\keys\\fletchery_node_key",
      "leaseFile": "E:\\GitHubRunner\\ResourceLeases\\heavy.json", "disks": ["C:\\", "E:\\"], "every": 10}
 or {"nodeConfig": "<the node worker's node.json>"}, which supplies coordinator, machine, keyFile and heavyLeaseFile.
+Set runnerRoots to the local GitHub runner installation paths if the PR runner is outside the default
+UnrealPR folder beside ResourceLeases. Only matched job progress is sent.
 
 Standard library only."""
 from __future__ import annotations
@@ -379,7 +381,7 @@ def _runner_pages(root, acquired):
                 if stat.S_ISREG(info.st_mode):
                     stream = streams.setdefault(match[1], [])
                     stream.append((int(match[2]), info.st_mtime, Path(entry.path)))
-    except OSError:
+    except (OSError, ValueError):
         return []
     recent = sorted(streams.items(), key=lambda pair: max(page[1] for page in pair[1]), reverse=True)
     return [(name, sorted(pages)) for name, pages in recent[:4] if max(p[1] for p in pages) >= acquired - 120]
@@ -457,8 +459,10 @@ class RunnerLogProgress:
     def __init__(self, roots):
         if isinstance(roots, str):
             roots = [roots]
-        self.roots = [Path(root) for root in roots[:4] if isinstance(root, str)
-                      and not root.startswith(("\\\\", "//")) and Path(root).is_absolute()] if isinstance(roots, list) else []
+        self.roots = []
+        for root in roots[:4] if isinstance(roots, list) else []:
+            if isinstance(root, str) and not root.startswith(("\\\\", "//")) and Path(root).is_absolute():
+                self.roots.append(Path(root))
         self.identity = None
         self.bound = set()
         self.events = set()
