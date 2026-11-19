@@ -37,6 +37,7 @@
 
 <nav class="tabs" aria-label="Sections">
   <button type="button" id="tab-live" data-tab="live" aria-current="page"><span class="glyph" aria-hidden="true">◉</span>Live<span class="badge" id="b-live" hidden></span></button>
+  <button type="button" id="tab-queue" data-tab="queue"><span class="glyph" aria-hidden="true">☰</span>Queue<span class="badge" id="b-queue" hidden></span></button>
   <button type="button" id="tab-builds" data-tab="builds"><span class="glyph" aria-hidden="true">▣</span>Builds<span class="badge" id="b-builds" hidden></span></button>
   <button type="button" id="tab-activity" data-tab="activity"><span class="glyph" aria-hidden="true">◷</span>Activity<span class="badge" id="b-activity" hidden></span></button>
 </nav>
@@ -61,6 +62,14 @@
     <section class="card" id="livePrsCard" aria-labelledby="h-lpr"><h2 id="h-lpr">Open pull requests <span class="count" id="n-lpr"></span></h2><ul class="rows" id="livePrs"></ul></section>
     <section class="card" id="liveIssuesCard" aria-labelledby="h-liss"><h2 id="h-liss">Tasks and issues <span class="count" id="n-liss"></span></h2><ul class="rows" id="liveIssues"></ul></section>
     <p class="fine" id="liveFoot"></p>
+  </section>
+
+  <section class="view" id="view-queue" aria-labelledby="tab-queue" hidden>
+    <section class="card" id="queuePoolsCard" aria-labelledby="h-qpool"><h2 id="h-qpool">Waiting for a machine <span class="count" id="n-qpool"></span></h2>
+      <p class="sub lead">Grouped by the kind of machine a job needs. Start and finish times are estimates from how long the same job took before.</p>
+      <div id="queuePools"></div></section>
+    <section class="card" id="queueHoldsCard" aria-labelledby="h-qhold"><h2 id="h-qhold">Waiting for a machine's hold <span class="count" id="n-qhold"></span></h2><ul class="rows acts" id="queueHolds"></ul></section>
+    <section class="card" id="queueCancelledCard" aria-labelledby="h-qcan"><h2 id="h-qcan">Cancelled today <span class="count" id="n-qcan"></span></h2><ul class="rows" id="queueCancelled"></ul></section>
   </section>
 
   <section class="view" id="view-builds" aria-labelledby="tab-builds" hidden>

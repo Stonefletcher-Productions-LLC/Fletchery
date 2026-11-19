@@ -132,6 +132,17 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#liveCauses'), /^4 red PRs: 1 own bug · 2 inherited from a red base · 1 machine problem\. Only own bugs count as stuck\.$/);
     assert.match(await page.textContent('#liveProblems'), /Own bug\s*PR #13 fails Compile and test \(LifeShare.Folk.Hair LOD 3\)[\s\S]*Base is red\s*2 PRs fail[\s\S]*#20 Lots · #21 Roads[\s\S]*Machine\s*PR #22/);
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing\s*Own bug/);
+    // Queue tab: pools with what runs and waits in order, estimated start and finish, and who cancelled what.
+    await page.click('#tab-queue');
+    await page.waitForSelector('#queuePools .pool');
+    assert.equal(await page.textContent('#b-queue'), '2');
+    assert.match(await page.textContent('#queuePools'), /unreal-prGaming PC, SF-NODE-01[\s\S]*2\/2 busy[\s\S]*2 waiting[\s\S]*wait today 7 min \(p90 55 min\)[\s\S]*in use 71% of the last day[\s\S]*▶PR check · PR #12 · Compile and test[\s\S]*~25 min left[\s\S]*1PR check · PR #13 · Compile and test[\s\S]*starts in 25 min, done in 75 min[\s\S]*2PR check · PR #20[\s\S]*starts in 40 min/);
+    assert.match(await page.textContent('#queuePools'), /unreal-light[\s\S]*No machine of this kind is online\./);
+    assert.match(await page.textContent('#queueCancelled'), /PR #12[\s\S]*cancelled by @ProjektPayne[\s\S]*PR #21[\s\S]*replaced by a newer run of the same check/);
+    assert.ok(await fits(), 'Queue fits the phone');
+    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); await page.screenshot({path: path.join(shots, 'portal-queue.png')}); }
+    await page.click('#tab-live');
+    await page.waitForSelector('#liveFlow:not([hidden])');
     // Flow: is work moving? A verdict with its reason, the numbers, 24 hourly bars.
     assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*Wait for a machine7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
     assert.equal(await page.$$eval('#liveFlow .hours i', l => l.length), 24);
@@ -353,7 +364,7 @@ const server = http.createServer((req, res) => {
     watch(solo);
     await solo.goto(base + '/#tasks');   // an old link to a tab that is gone opens Live
     await solo.waitForSelector('#liveRepos button');
-    assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'builds', 'activity']);
+    assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'queue', 'builds', 'activity']);
     assert.equal(await solo.isVisible('#view-live'), true);
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 3);
     await solo.click('#liveRepos button:has-text("Town")');

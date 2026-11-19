@@ -1020,5 +1020,118 @@
   "cancelled": 0,
   "red": 4,
   "problems_own": 1
+ },
+ "queue": {
+  "pools": [
+   {
+    "name": "unreal-pr",
+    "labels": [
+     "unreal-pr"
+    ],
+    "workers": 2,
+    "online": 2,
+    "busy": 2,
+    "offline": 0,
+    "machines": [
+     "Gaming PC",
+     "SF-NODE-01"
+    ],
+    "running": [
+     {
+      "repo": "Acme/Game",
+      "run": 7,
+      "name": "PR check",
+      "job": "Compile and test",
+      "pr": 12,
+      "url": "https://github.com/Acme/Game/actions/runs/7",
+      "runner": "MY-PC-unreal-pr",
+      "since": "2026-11-19T02:00:00Z",
+      "left": 1500,
+      "late": false
+     }
+    ],
+    "waiting": [
+     {
+      "repo": "Acme/Game",
+      "run": 8,
+      "name": "PR check",
+      "job": "Compile and test",
+      "pr": 13,
+      "branch": "wx",
+      "url": "https://github.com/Acme/Game/actions/runs/8",
+      "since": "2026-11-19T02:30:00Z",
+      "est": 3000,
+      "start_in": 1500,
+      "finish_in": 4500,
+      "waited": 1800
+     },
+     {
+      "repo": "Acme/Game",
+      "run": 11,
+      "name": "PR check",
+      "job": "Compile and test",
+      "pr": 20,
+      "branch": "lots",
+      "url": "https://github.com/Acme/Game/actions/runs/11",
+      "since": "2026-11-19T02:40:00Z",
+      "est": null,
+      "start_in": 2400,
+      "finish_in": null,
+      "waited": 1200
+     }
+    ],
+    "waiting_n": 2,
+    "wait_p50": 420,
+    "wait_p90": 3300,
+    "wait_n": 31,
+    "util": 0.71
+   },
+   {
+    "name": "unreal-light",
+    "labels": [
+     "unreal-light"
+    ],
+    "workers": 1,
+    "online": 0,
+    "busy": 0,
+    "offline": 1,
+    "machines": [
+     "NODE"
+    ],
+    "running": [],
+    "waiting": [],
+    "waiting_n": 0,
+    "wait_p50": null,
+    "wait_p90": null,
+    "wait_n": 0,
+    "util": null
+   }
+  ],
+  "cancelled": [
+   {
+    "repo": "Acme/Game",
+    "run": 9,
+    "name": "PR check",
+    "pr": 12,
+    "branch": "bus",
+    "url": "https://github.com/Acme/Game/actions/runs/9",
+    "at": "2026-11-19T01:00:00Z",
+    "how": "person",
+    "who": "ProjektPayne"
+   },
+   {
+    "repo": "Acme/Game",
+    "run": 10,
+    "name": "PR check",
+    "pr": 21,
+    "branch": "roads",
+    "url": "https://github.com/Acme/Game/actions/runs/10",
+    "at": "2026-11-19T00:30:00Z",
+    "how": "replaced",
+    "who": ""
+   }
+  ],
+  "holds": [],
+  "waiting": 2
  }
 }

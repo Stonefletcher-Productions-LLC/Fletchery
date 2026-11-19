@@ -146,5 +146,40 @@ class CausesTest(unittest.TestCase):
         self.assertEqual((sm["red"], sm["own"], sm["base"], sm["machine"], sm["problems_own"]), (8, 3, 3, 2, 2))
 
 
+class QueueTest(unittest.TestCase):
+    def test_schedule(self):
+        # two workers: one free now, one in 10 min; three jobs of 30, 20 and unknown minutes, then one more
+        got = rules.schedule([600, 0], [1800, 1200, None, 600])
+        self.assertEqual(got[0], (0, 1800))
+        self.assertEqual(got[1], (600, 1800))
+        self.assertEqual(got[2], (1800, None))
+        self.assertEqual(got[3], (None, None))
+        self.assertEqual(rules.schedule([], [60]), [(None, None)])
+
+    def test_cancel_reason(self):
+        self.assertEqual(rules.cancel_reason([{"message": "The run was canceled by @ProjektPayne."}]), ("person", "ProjektPayne"))
+        self.assertEqual(rules.cancel_reason([{"message": "Canceling since a higher priority waiting request for 'pr-12' exists"}]),
+                         ("replaced", ""))
+        self.assertEqual(rules.cancel_reason([{"message": "The operation was canceled."}]), ("", ""))
+
+    def test_pool_of(self):
+        self.assertEqual(rules.pool_of(["self-hosted", "Windows", "unreal-pr"], {"self-hosted", "windows"}), "unreal-pr")
+        self.assertEqual(rules.pool_of([], set()), "any")
+
+    def test_store_job_seconds_and_pool_stats(self):
+        s = store.Store(None)
+        self.addCleanup(s.close)
+        run = {"id": 1, "name": "PR check", "created_at": at(300)}
+        s.jobs(REPO, run, [{"id": i, "name": "Compile and test", "status": "completed", "conclusion": "success", "labels": ["self-hosted", "unreal-pr"],
+                            "created_at": at(300), "started_at": at(300 - 10 * i), "completed_at": at(300 - 10 * i - d)}
+                           for i, d in ((1, 40), (2, 60), (3, 50))])
+        self.assertEqual(s.job_seconds(REPO, "PR check", "Compile and test"), 50 * 60)
+        self.assertIsNone(s.job_seconds(REPO, "PR check", "Other"))
+        st = s.pool_stats({"unreal-pr"}, 2, NOW)
+        self.assertEqual((st["wait_p50"], st["wait_n"]), (20 * 60, 3))
+        self.assertAlmostEqual(st["util"], 150 * 60 / (2 * 86400), places=3)
+        self.assertEqual(s.pool_stats({"unreal-light"}, 1, NOW)["wait_n"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

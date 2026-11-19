@@ -272,3 +272,50 @@ def summary(problems_: list) -> dict:
     out["red"] = len(seen)
     out["problems_own"] = sum(1 for g in problems_ if g["cause"] == "own")
     return out
+
+
+# ---- Queue (proposal 3): what waits for which machines, when it should start and finish, and who cancelled what ----
+CANCEL_BY = re.compile(r"cancel+ed by @?([A-Za-z0-9][A-Za-z0-9-]{0,38})", re.I)
+SUPERSEDED = re.compile(r"higher priority waiting request|canceling since a|cancel+ed because a newer|concurrency", re.I)
+
+
+def cancel_reason(annotations: list) -> tuple[str, str]:
+    """(how, who) from a cancelled job's annotations: ("person", "octocat") for "The run was canceled by @octocat.",
+    ("replaced", "") for a concurrency group's newer run, ("", "") when they don't say."""
+    for n in annotations or []:
+        text = f"{(n or {}).get('title') or ''} {(n or {}).get('message') or ''}" if isinstance(n, dict) else str(n)
+        m = CANCEL_BY.search(text)
+        if m:
+            return "person", m.group(1)
+        if SUPERSEDED.search(text):
+            return "replaced", ""
+    return "", ""
+
+
+def schedule(free_in: list, waiting: list) -> list:
+    """When each waiting job should start and finish. `free_in` = seconds until each worker of the pool is free (0 when
+    idle); `waiting` = each job's expected seconds (None = not learned yet), oldest first, the order GitHub roughly
+    hands them out. Returns [(start_in, finish_in)] with None once an unknown duration makes later guesses meaningless."""
+    slots = sorted(max(0.0, float(x)) for x in free_in if x is not None)
+    out = []
+    blind = not slots
+    for est in waiting:
+        if blind:
+            out.append((None, None))
+            continue
+        start = slots.pop(0)
+        if est is None:
+            out.append((start, None))
+            blind = True           # this worker's free time is unknown from here on, so every later guess is too
+            continue
+        finish = start + float(est)
+        out.append((start, finish))
+        slots.append(finish)
+        slots.sort()
+    return out
+
+
+def pool_of(labels, generic) -> str:
+    """A pool's name: its custom labels, sorted ("unreal-pr")."""
+    gen = {str(g).lower() for g in generic}
+    return " + ".join(sorted({str(x) for x in labels or () if str(x).lower() not in gen})) or "any"

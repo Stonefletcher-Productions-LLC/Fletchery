@@ -167,6 +167,27 @@ class Feed(unittest.TestCase):
         g = next(g for g in s["problems"] if g["cause"] == "machine")
         self.assertEqual(g["runner"], "ALEX-PC-unreal-light")
 
+    def test_queue_pools_waiting_and_who_cancelled(self):
+        runs = world()[f"repos/{REPO}/actions/runs"]["workflow_runs"] + [
+            {"id": 9, "name": "PR check", "status": "completed", "conclusion": "cancelled", "event": "pull_request",
+             "created_at": ago(70), "updated_at": ago(60), "pull_requests": [{"number": 12}]}]
+        w = self.watch_first({
+            f"repos/{REPO}/actions/runs/8/jobs": {"jobs": [{"id": 80, "name": "Compile and test", "status": "queued",
+                                                            "labels": ["self-hosted", "unreal-pr"], "created_at": ago(30)}]},
+            f"repos/{REPO}/actions/runs/9/jobs": {"jobs": [{"id": 90, "name": "Compile and test", "status": "completed", "conclusion": "cancelled"}]},
+            f"repos/{REPO}/check-runs/90/annotations": [{"message": "The run was canceled by @ProjektPayne."}]},
+            **{f"repos/{REPO}/actions/runs": {"workflow_runs": runs}})
+        q = w.snapshot()["queue"]
+        pr_pool = next(p for p in q["pools"] if p["name"] == "unreal-pr")
+        self.assertEqual((pr_pool["online"], pr_pool["busy"], pr_pool["waiting_n"]), (1, 1, 1))
+        self.assertEqual(pr_pool["waiting"][0]["pr"], 13)
+        self.assertIsNone(pr_pool["waiting"][0]["start_in"])          # nothing learned yet: no made-up time
+        self.assertEqual(pr_pool["running"][0]["pr"], 12)
+        self.assertEqual([(c["run"], c["how"], c["who"]) for c in q["cancelled"]], [(9, "person", "ProjektPayne")])
+        w.note_cancel(REPO, 9, "from the phone")
+        w._base_cache = (0.0, None)
+        self.assertEqual(w.snapshot()["queue"]["cancelled"][0]["how"], "fletchery")
+
     def watch_first(self, first: dict, **over):
         """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
         answers = dict(first)

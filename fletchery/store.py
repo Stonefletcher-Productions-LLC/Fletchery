@@ -160,6 +160,34 @@ class Store:
         """Anything else worth remembering (an alert fired or cleared, a problem opened or closed)."""
         self._write("INSERT OR REPLACE INTO events VALUES (?,?,?,?)", [(kind, key, at or time.time(), data[:2000])])
 
+    def job_seconds(self, repo: str, workflow: str, name: str, keep: int = 20):
+        """The median time a job takes when it passes (its last `keep` runs), or None with fewer than 3."""
+        rows = [r[0] for r in self.query("SELECT finished - started FROM jobs WHERE repo=? AND workflow=? AND name=? AND result='success' "
+                                         "AND finished > started ORDER BY started DESC LIMIT ?", (repo, workflow, name, keep))]
+        if len(rows) < 3:
+            return None
+        rows.sort()
+        return rows[len(rows) // 2]
+
+    def pool_stats(self, labels: set, workers: int, now: float | None = None) -> dict:
+        """For jobs whose labels include all of `labels`, over the last day: wait p50 and p90 (queued to started) and how
+        busy the pool's workers were (job time / (workers x 24 h))."""
+        now = now or time.time()
+        waits, busy = [], 0.0
+        for created, started, finished, labs in self.query(
+                "SELECT created, started, finished, labels FROM jobs WHERE started > ? OR finished > ?", (now - 86400, now - 86400)):
+            have = {x.strip().lower() for x in str(labs or "").split(",") if x.strip()}
+            if labels and not {x.lower() for x in labels} <= have:
+                continue
+            if started and created and started >= created and started > now - 86400:
+                waits.append(started - created)
+            if started:
+                busy += max(0.0, min(finished or now, now) - max(started, now - 86400))
+        waits.sort()
+        pick = lambda q: waits[min(len(waits) - 1, int(round(q * (len(waits) - 1))))] if waits else None
+        return {"wait_p50": pick(0.5), "wait_p90": pick(0.9), "wait_n": len(waits),
+                "util": round(busy / (workers * 86400), 3) if workers else None}
+
     def prune(self, now: float | None = None) -> None:
         """Delete rows older than `keep` days; once a day."""
         now = now or time.time()

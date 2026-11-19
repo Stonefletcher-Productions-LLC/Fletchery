@@ -144,6 +144,18 @@ dialog li { margin: 4px 0; }
 .fine { font-size: 13px; color: var(--muted); margin-top: 12px; }
 
 @media (max-width: 340px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+/* Queue: one block per pool of machines */
+.pool { border-top: 1px solid var(--rule); padding: 10px 0 4px; }
+.pool:first-child { border-top: 0; padding-top: 4px; }
+.pool h3 { margin: 0; font-size: 15px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pool h3 small { font-weight: 400; color: var(--muted); font-size: 13px; }
+.pool .nums { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 6px; font-size: 13px; color: var(--muted); }
+.pool .nums b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.pool ol { list-style: none; margin: 0; padding: 0; counter-reset: q; }
+.pool li { display: grid; grid-template-columns: 28px 1fr; gap: 2px 8px; padding: 6px 0; border-top: 1px dashed var(--rule); }
+.pool li .pos { font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.pool li.now .pos { color: var(--running); }
+.pool li .sub { grid-column: 2; margin: 0; }
 /* Why PRs are red: one row per problem, its cause as a chip */
 .chip.c-own { background: var(--failed-bg); color: var(--failed); }
 .chip.c-base { background: var(--blocked-bg); color: var(--blocked); }
