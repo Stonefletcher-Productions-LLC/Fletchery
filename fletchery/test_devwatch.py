@@ -121,7 +121,8 @@ class Feed(unittest.TestCase):
 
     def test_build_queue_uses_current_attempt_and_complete_job_pages(self):
         path = f"repos/{REPO}/actions/runs/7/jobs?per_page=30"
-        run = {**world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0], "run_attempt": 2}
+        run = {**world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0], "run_attempt": 2,
+               "name": "#12 Bus lines", "path": ".github/workflows/pr-check.yml"}
         job = {"name": devwatch.storemod.PR_BUILD, "status": "queued", "created_at": ago(45), "run_attempt": 2}
         responses = {path + "&page=2": {"jobs": [{**job, "id": 99}]},
                      path: {"total_count": 31, "jobs": [{**job, "id": i, "run_attempt": 1} for i in range(30)]},

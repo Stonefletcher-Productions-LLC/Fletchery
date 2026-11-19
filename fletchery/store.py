@@ -21,8 +21,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 3
-PR_WORKFLOW = "PR check"
+SCHEMA = 4
 PR_BUILD = "PR check / Compile and test"
 KEEP_DAYS = 90
 
@@ -96,10 +95,11 @@ class Store:
                 self.db.execute("ALTER TABLE merges ADD COLUMN sha TEXT")
             if "pr_build_created" not in {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN pr_build_created REAL")
+            if self.db.execute("SELECT v FROM meta WHERE k='schema'").fetchone() != (str(SCHEMA),):
                 # Older rows substituted the run creation time if the job omitted its own. Recover only unambiguous times.
-                self.db.execute("""UPDATE jobs SET pr_build_created=created WHERE name=? AND workflow=?
+                self.db.execute("""UPDATE jobs SET pr_build_created=created WHERE name=?
                     AND EXISTS (SELECT 1 FROM runs r WHERE r.repo=jobs.repo AND r.id=jobs.run
-                                AND r.event='pull_request' AND r.created<>jobs.created)""", (PR_BUILD, PR_WORKFLOW))
+                                AND r.event='pull_request' AND r.created<>jobs.created)""", (PR_BUILD,))
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             self.db.commit()
         self._pruned = 0.0
@@ -156,7 +156,7 @@ class Store:
     def jobs(self, repo: str, run: dict, jobs: list) -> None:
         """Jobs that started (queue wait = started - created) or finished."""
         created_run = ts((run or {}).get("created_at"))
-        pr_build = (run or {}).get("event") == "pull_request" and (run or {}).get("name") == PR_WORKFLOW
+        pr_build = (run or {}).get("event") == "pull_request"
         self._write("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
             (repo, int(j["id"]), int((run or {}).get("id") or j.get("run_id") or 0), str(j.get("name") or "")[:120],
              str((run or {}).get("name") or j.get("workflow_name") or "")[:120], str(j.get("runner_name") or "")[:80],

@@ -855,7 +855,10 @@ class DevWatch:
         queued = {}
         for run in runs:
             before = self.jobs.get(run["id"])
-            pr_build = run.get("event") == "pull_request" and run.get("name") == storemod.PR_WORKFLOW
+            # Actions can put the PR title in name. The workflow path survives re-runs and custom run-name expressions.
+            path = str(run.get("path") or "").split("@")[0]
+            pr_build = run.get("event") == "pull_request" and (
+                path == ".github/workflows/pr-check.yml" or not path and run.get("name") == "PR check")
             old = previous.get(run["id"], {})
             newly_finished = pr_build and run.get("conclusion") in ("success", "failure") and (
                 before is None or old.get("status") != "completed" or old.get("run_attempt") != run.get("run_attempt"))

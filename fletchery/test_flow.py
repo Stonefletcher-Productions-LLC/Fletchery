@@ -128,7 +128,7 @@ class FlowTest(unittest.TestCase):
 
     def test_build_wait_uses_real_pr_job_times_and_observed_attempts(self):
         repo = "Acme/LifeShare"
-        run = {"id": 1, "name": "PR check", "event": "pull_request", "created_at": at(220)}
+        run = {"id": 1, "name": "#12 Bus lines", "path": ".github/workflows/pr-check.yml", "event": "pull_request", "created_at": at(220)}
         job = {"id": 1, "name": store.PR_BUILD, "status": "completed", "conclusion": "success",
                "runner_name": "node", "created_at": at(110), "started_at": at(100), "completed_at": at(70)}
         self.s.jobs(repo, run, [job, job, {**job, "id": 2, "created_at": at(190), "conclusion": "failure"},
