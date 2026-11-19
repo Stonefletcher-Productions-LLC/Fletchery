@@ -15,6 +15,7 @@ Standard library only."""
 from __future__ import annotations
 
 import sqlite3
+import statistics
 import threading
 import time
 from datetime import datetime, timezone
@@ -159,6 +160,19 @@ class Store:
     def event(self, kind: str, key: str, data: str = "", at: float | None = None) -> None:
         """Anything else worth remembering (an alert fired or cleared, a problem opened or closed)."""
         self._write("INSERT OR REPLACE INTO events VALUES (?,?,?,?)", [(kind, key, at or time.time(), data[:2000])])
+
+    def job_remaining(self, repo: str, name: str, pr: int, elapsed: float) -> dict:
+        """Time remaining among comparable finished jobs that ran at least this long. Never use queue time."""
+        rows = self.query("""SELECT j.finished-j.started,
+                             EXISTS(SELECT 1 FROM runs r WHERE r.repo=j.repo AND r.id=j.run AND r.pr=?)
+                             FROM jobs j WHERE j.repo=? AND j.name=? AND j.result IN ('success','failure')
+                             AND j.finished>j.started ORDER BY j.started DESC LIMIT 100""", (pr or -1, repo, name))
+        longer = [d for d, own in rows if d > elapsed and own]
+        same_pr = bool(longer)
+        if not longer:
+            longer = [d for d, _ in rows if d > elapsed]
+        return {"seconds": round(statistics.median(longer) - elapsed) if longer else None,
+                "samples": len(longer) if longer else len(rows), "same_pr": same_pr}
 
     def job_seconds(self, repo: str, workflow: str, name: str, keep: int = 20):
         """The median time a job takes when it passes (its last `keep` runs), or None with fewer than 3."""

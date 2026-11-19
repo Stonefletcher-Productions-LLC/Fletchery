@@ -216,10 +216,24 @@
         b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null,
         alertLine(b)));
   }
+  function buildDetail(progress) {
+    if (!progress) return null;
+    const {phase, last_output: output, eta = {}} = progress;
+    const count = eta.samples + (eta.samples === 1 ? ' past check' : ' past checks') + (eta.same_pr ? ' on this PR' : '');
+    const estimate = progress.waiting_machine ? 'Finish time depends on when the machine becomes available' :
+      eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
+      eta.samples ? 'Running longer than the last ' + eta.samples + (eta.samples === 1 ? ' comparable job' : ' comparable jobs') :
+      'No timing history for this job yet';
+    return el('div', {class: 'build-detail'}, phase ?
+      el('p', {class: 'say'}, el('strong', {text: phase.label}), ' · ', since(phase.since)) :
+      output ? el('p', {class: 'say'}, 'Latest output: ', el('strong', {text: output.label}), ' · ', ago(output.at)) :
+      el('p', {class: 'sub', text: 'Waiting for the runner to report the inner phase.'}),
+      el('p', {class: 'sub', text: estimate}));
+  }
   function jobProgress(x) {
     if (!x.steps_total) return null;
     const detail = x.steps_done + ' of ' + x.steps_total + ' complete';
-    return el('div', null, meter('GitHub job steps', Math.round(100 * x.steps_done / x.steps_total), detail, 'step'),
+    return el('div', null, buildDetail(x.progress), meter('GitHub job steps', Math.round(100 * x.steps_done / x.steps_total), detail, 'step'),
       x.step ? el('p', {class: 'sub'}, ...sep(join(x.step, x.step_started ? since(x.step_started) : ''))) : null);
   }
   function actRow(x, c) {
@@ -380,6 +394,7 @@
       el('div', null, el('div', {class: 'title', text: r.name}), el('p', {class: 'sub', text: join(r.machine, (r.labels || []).join(', ')).join(' · ')}),
         j ? el('p', {class: 'sub'}, a(j.url, '', j.title), ...sep(['', ...join(j.step ? 'step "' + j.step + '"' + (j.step_started ? ' for ' : '') : '',
           j.step_started ? since(j.step_started) : j.started ? since(j.started) : '')])) : null,
+        j ? buildDetail(j.progress) : null,
         j && j.pr_closed ? el('p', {class: 'sub', text: 'Its pull request is closed: nothing needs this run.'}) : null,
         j && j.id && desk() ? el('div', {class: 'ctl'}, control('Cancel run', '/api/actions/cancel', {repo: j.repo, id: j.id}, 'Cancel this GitHub Actions run?')) : null),
       chip));
@@ -417,7 +432,7 @@
     return el('li', null, el('div', {class: 'run-row'}, el('span', {class: 'ico ' + ico[0], role: 'img', 'aria-label': ico[2], text: ico[1]}),
       el('div', null, a(r.url, 'title', r.name + (r.pr ? ' · PR #' + r.pr : '')),
         el('p', {class: 'sub'}, ...sep(where), where.length ? ' · ' : '', ...when),
-        going && r.steps_total ? bar(r.steps_done / r.steps_total) : null, runControls(r))));
+        buildDetail(r.progress), going && r.steps_total ? bar(r.steps_done / r.steps_total) : null, runControls(r))));
   }
   function prRow(p) {
     const c = p.checks || {};

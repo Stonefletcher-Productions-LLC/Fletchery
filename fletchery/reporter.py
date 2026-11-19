@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import sys
@@ -41,7 +42,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "2"  # 2: sends disk.json (the disk guard) and each drive's total
+VERSION = "3"  # also reports recent build-tool output in the PR's reserved checkout
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -242,6 +243,34 @@ def disks(roots) -> list:
     return out
 
 
+def latest_check_output(lease: dict, now: float) -> dict | None:
+    """Older check scripts have no phase marker. Report the last known tool to write in this lease, by timestamp."""
+    try:
+        acquired = datetime.fromisoformat(lease["acquiredUtc"].replace("Z", "+00:00")).timestamp()
+    except (KeyError, AttributeError, ValueError, OSError):
+        return None
+    names = {"Build_LifeShareEditor": "Editor build", "BuildContent": "Game data build", "ValidateData": "Data validation",
+             "Specs": "Automation specs", "CheckHomes": "Home checks", "ImportEnvironment": "Environment import",
+             "ImportCharacters": "Character import", "ImportAnimals": "Animal import", "ImportFurniture": "Furniture import"}
+    newest, label = 0, ""
+    roots = lease.get("workspaces")
+    if isinstance(roots, str):
+        roots = [roots]
+    for root in roots[:4] if isinstance(roots, list) else []:
+        if not isinstance(root, str) or root.startswith(("\\\\", "//")) or not Path(root).is_absolute():
+            continue
+        for stem, task in names.items():
+            try:
+                stamp = (Path(root) / "Saved" / "Logs" / (stem + ".log")).stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if acquired <= stamp <= now and now - stamp <= FRESH and stamp > newest:
+                newest, label = stamp, task
+    if label:
+        return {"label": label, "at": datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return None
+
+
 class Reporter:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -258,6 +287,10 @@ class Reporter:
                 purpose = str(rec.get("purpose") or f"GitHub run {rec.get('runId')}")
                 lease = {"purpose": purpose[:300], "since": str(rec.get("acquiredUtc") or "")[:40],
                          "owner": str(rec.get("owner") or "")[:20], "alive": alive(rec.get("pid"))}
+                if lease["alive"] and re.search(r"PR check #\d+ \(GitHub run \d+\)", purpose, re.I):
+                    latest = latest_check_output(rec, time.time())
+                    if latest:
+                        lease["last_output"] = latest
             folder = self.lease.parent
             qdir = Path(os.environ.get("LS_LANE_QUEUE") or folder / "heavy.queue")
             now = time.time()
