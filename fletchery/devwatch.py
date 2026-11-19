@@ -355,6 +355,12 @@ def gh_token() -> str:
 
 
 # ---- the watcher ----
+def _iso_after(iso: str, seconds: float) -> str:
+    """`iso` plus `seconds`, as an ISO string that compares with GitHub's."""
+    t = _ts(iso)
+    return now_iso_at(t + seconds) if t else "~"
+
+
 def _runner_job(run: dict) -> dict:
     """What a runner is doing, from its run row: enough to see a step that runs too long or a run nobody needs."""
     return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
@@ -392,6 +398,7 @@ class DevWatch:
         self.no_result: dict[int, bool] = {}        # failed check run id -> its annotations say "No result" (asked once)
         self.fail_notes: dict[int, tuple] = {}      # failed check run id -> (test names, annotation text) (asked once)
         self.fail_jobs: dict[int, dict] = {}        # failed check run id -> {"step", "runner"} of its job (asked once)
+        self.cancels: dict[tuple, dict] = {}        # (repo, run id) -> {"how", "who"}: who or what cancelled a run
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
         self.skip: dict[str, float] = {}            # path -> don't ask again before
@@ -616,6 +623,17 @@ class DevWatch:
                 out["jobs"][run["id"]] = (self._try(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30") or {}).get("jobs") or []
             elif before is not None:
                 out["jobs"][run["id"]] = before
+        for run in runs:
+            # A cancelled run in the last day: who or what cancelled it, from its job's annotations, asked once.
+            if run.get("conclusion") == "cancelled" and (repo, run["id"]) not in self.cancels and _age(run.get("updated_at")) < 86400:
+                jobs = out["jobs"].get(run["id"])
+                if jobs is None:
+                    jobs = (self._try(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30") or {}).get("jobs") or []
+                    out["jobs"][run["id"]] = jobs
+                job = next((j for j in jobs if j.get("conclusion") == "cancelled"), None)
+                notes = self._try(f"repos/{repo}/check-runs/{job['id']}/annotations?per_page=20") or [] if job and job.get("id") else []
+                how, who = rules.cancel_reason(notes)
+                self.cancels[(repo, run["id"])] = {"how": how, "who": who}
         prs = self._try(f"repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50") or []
         out["prs"] = prs
         for pr in prs:
@@ -959,6 +977,7 @@ class DevWatch:
             "flow": self.flow_now(prs_out, at),
             "bases": bases_out,
             "problems": problems[:40], "causes": rules.summary(problems),
+            "queue": self._queue(at, runners_out, runs_out, jobs_by, machines_out),
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "changes": changes[:60],
             "building": building[:30],
@@ -981,6 +1000,91 @@ class DevWatch:
                 cache.pop(next(iter(cache)))
         self._flow_cache = (0.0, {})
         self._base_cache = (0.0, None)
+
+    def note_cancel(self, repo: str, run: int, who: str) -> None:
+        """A cancel pressed in Fletchery (app.py): the surest "who cancelled"."""
+        self.cancels[(repo, int(run))] = {"how": "fletchery", "who": _text(who, 80)}
+
+    def _queue(self, at: float, runners_out: list, runs_out: list, jobs_by: dict, machines_out: list) -> dict:
+        """The Queue tab (rules.py): one row per pool of runners (same custom labels) with its workers, what runs and
+        what waits in order with an estimated start and finish, waits and use over the last day; every run cancelled in
+        the last day with who or what cancelled it; and what waits for a machine's hold."""
+        run_by_id = {r["id"]: r for r in runs_out}
+        pools: dict = {}
+        for r in runners_out:
+            name = rules.pool_of(r["labels"], GENERIC_LABELS)
+            p = pools.setdefault(name, {"name": name, "labels": sorted(set(r["labels"])), "runners": [], "running": [], "waiting": []})
+            p["runners"].append(r)
+        waiting = []
+        for rid, jobs in jobs_by.items():
+            run = run_by_id.get(rid)
+            if not run or run["status"] not in ACTIVE:
+                continue
+            for j in jobs:
+                if j.get("status") in ("queued", "waiting", "pending", "requested"):
+                    waiting.append((run, j))
+        for run in runs_out:          # a queued run whose jobs were not read yet
+            if run["status"] in ACTIVE and run["status"] != "in_progress" and not jobs_by.get(run["id"]):
+                waiting.append((run, {"name": run["name"], "labels": run.get("labels") or [], "created_at": run["created"]}))
+        waiting.sort(key=lambda x: _ts(x[1].get("created_at") or x[0]["created"]))
+        for run, j in waiting:
+            want = {str(x).lower() for x in j.get("labels") or []} - GENERIC_LABELS
+            fits = [p for p in pools.values() if want and want <= {x.lower() for x in p["labels"]}]
+            pool = min(fits, key=lambda p: len(p["labels"])) if fits else pools.setdefault(
+                rules.pool_of(j.get("labels") or [], GENERIC_LABELS), {"name": rules.pool_of(j.get("labels") or [], GENERIC_LABELS),
+                                                                       "labels": sorted(want), "runners": [], "running": [], "waiting": []})
+            est = self.store.job_seconds(run["repo"], run["name"], str(j.get("name") or ""))
+            pool["waiting"].append({"repo": run["repo"], "run": run["id"], "name": run["name"], "job": _text(j.get("name"), 120),
+                                    "pr": run["pr"], "branch": run["branch"], "url": run["url"],
+                                    "since": _text(j.get("created_at") or run["created"], 30), "est": est})
+        out = []
+        for p in pools.values():
+            free = []
+            for r in p["runners"]:
+                if not r["online"]:
+                    continue
+                job = r.get("job")
+                if not job:
+                    free.append(0.0)
+                    continue
+                run = run_by_id.get(job.get("id")) or {}
+                est = self.store.job_seconds(run.get("repo", ""), run.get("name", ""), run.get("job", ""))
+                left = None if est is None else max(0.0, est - _age(run.get("started"), at))
+                free.append(left)
+                p["running"].append({"repo": run.get("repo", ""), "run": run.get("id"), "name": run.get("name", ""),
+                                     "job": run.get("job", ""), "pr": run.get("pr"), "url": run.get("url", ""), "runner": r["name"],
+                                     "since": run.get("started", ""), "left": None if left is None else round(left),
+                                     "late": bool(est and _age(run.get("started"), at) > est * 1.5)})
+            known_free = [x for x in free if x is not None]
+            times = rules.schedule(known_free if len(known_free) == len(free) else [], [w["est"] for w in p["waiting"]])
+            for w, (start, finish) in zip(p["waiting"], times):
+                w["start_in"] = None if start is None else round(start)
+                w["finish_in"] = None if finish is None else round(finish)
+                w["waited"] = round(_age(w["since"], at))
+            online = [r for r in p["runners"] if r["online"]]
+            stats = self.store.pool_stats(set(p["labels"]), len(online) or len(p["runners"]), at)
+            out.append({"name": p["name"], "labels": p["labels"], "workers": len(p["runners"]), "online": len(online),
+                        "busy": sum(1 for r in online if r["busy"] or r.get("job")), "offline": len(p["runners"]) - len(online),
+                        "machines": sorted({r["machine"] for r in p["runners"]}), "running": p["running"][:10],
+                        "waiting": p["waiting"][:30], "waiting_n": len(p["waiting"]), **stats})
+        out.sort(key=lambda p: (-p["waiting_n"], -p["busy"], p["name"]))
+        cancelled = []
+        by_flow: dict = {}
+        for r in runs_out:
+            by_flow.setdefault((r["repo"], r["name"], r["pr"] or r["branch"]), []).append(r)
+        for r in runs_out:
+            if r["conclusion"] != "cancelled" or _age(r["updated"], at) > 86400:
+                continue
+            why = dict(self.cancels.get((r["repo"], r["id"])) or {})
+            if not why.get("how"):
+                newer = [o for o in by_flow.get((r["repo"], r["name"], r["pr"] or r["branch"]), [])
+                         if o["id"] != r["id"] and r["created"] < o["created"] <= _iso_after(r["updated"], 120)]
+                why = {"how": "replaced", "who": ""} if newer else {"how": "unknown", "who": ""}
+            cancelled.append({"repo": r["repo"], "run": r["id"], "name": r["name"], "pr": r["pr"], "branch": r["branch"],
+                              "url": r["url"], "at": r["updated"], "how": why["how"], "who": why.get("who", "")})
+        holds = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a.get("kind") == "queued"]
+        return {"pools": out, "cancelled": cancelled[:30], "holds": holds[:20],
+                "waiting": sum(p["waiting_n"] for p in out) + len(holds)}
 
     def _problems(self, red_checks: list, bases_out: list, prs_out: list) -> list:
         """Why each red PR check is red (rules.classify), grouped into problems (rules.problems); each PR row gets its

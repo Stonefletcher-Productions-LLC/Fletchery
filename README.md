@@ -21,7 +21,7 @@ page opens in a desktop window on the PC and as an app on your phone (over Tails
 
 ## What you see
 
-Three tabs, the same on the desktop and the phone. On the desktop the tabs sit at the top; on the phone they are a bar
+Four tabs, the same on the desktop and the phone. On the desktop the tabs sit at the top; on the phone they are a bar
 at the bottom. Every card folds (tap its heading) and remembers that on the device, long lists show their first few
 rows with **Show N more**, and an opened list scrolls and can be resized. **System / Light / Dark** is the button at
 the top right.
@@ -29,6 +29,7 @@ the top right.
 | Tab | What it shows |
 |---|---|
 | **Live** | A **red banner** over every tab when a base branch (main, Test-Staging…) is red: which checks and tests fail, for how long, the first bad merge, the fix in line and how many PRs it holds red. **Why PRs are red** (each red PR's cause: its own bug, inherited from a red base branch, a machine problem, flaky, or cancelled; failures with the same cause, check and test are one problem, and only own bugs count as stuck), **Flow** at the top (is work moving: merges in the last hour and day, time since the last merge into each base branch, PR-to-merge time, wait for a machine, how often a base branch went red, and a plain verdict: Moving, Slow, Stopped or Idle), **Building now** (every build on every machine, whether Fletchery or a GitHub job started it), **Agents** (one row per Claude or Codex branch active in the last day: its PR or branch, what it waits on, when it last moved), **Stuck or blocked**, **Machines** (what each one is doing, CPU, RAM, disk), **Runners** (online, busy, idle, with the job and step), **GitHub Actions** runs with the current step, **Open pull requests** with their checks, and **Tasks and issues**. With several projects, chips under the numbers show one at a time. |
+| **Queue** | **Waiting for a machine**: one block per kind of machine (runners with the same labels) with how many are busy, offline and waiting, today's wait (median and p90) and how much of the last day they were in use; then what runs (with time left) and what waits, in order, each with an estimated start and finish learned from how long the same job took before ("still being learned" until it knows). **Waiting for a machine's hold**, and **Cancelled today** with who or what cancelled each run: a press in Fletchery, a person named by GitHub, a newer run of the same check, or "outside Fletchery" when GitHub does not say |
 | **Builds** | **Running and coming up**, **Start a build** (version and branch; later, daily or with the Full tests under *Later, daily or with Full tests*), **Finished builds** with their download links, and the **Build machines** |
 | **Activity** | Health (up since, code version, GitHub reads, build machines), **Check GitHub now**, **Restart the backend**, and the log of everything done, including who did it ("from the window" or "from the phone") |
 
@@ -143,6 +144,7 @@ list, and is never on the public internet. [Set it up](docs/PORTAL.md).
 
 <p>
   <img src="docs/images/fletchery/portal-live.png" width="200" alt="The phone app's Live tab: numbers, Building now, and folded cards">
+  <img src="docs/images/fletchery/portal-queue.png" width="200" alt="The phone app's Queue tab: machines by kind, what runs and what waits with estimated start and finish">
   <img src="docs/images/fletchery/portal-builds.png" width="200" alt="The phone app's Builds tab">
   <img src="docs/images/fletchery/portal-activity.png" width="200" alt="The phone app's Activity tab">
   <img src="docs/images/fletchery/portal-live-dark.png" width="200" alt="The Live tab in dark mode">

@@ -8,6 +8,7 @@ from a real project, machine, address or account.
 |---|---|
 | `desktop-live.png`, `desktop-builds.png`, `desktop-activity.png` | The desktop window's three tabs at 1400 px |
 | `portal-live.png`, `portal-builds.png`, `portal-activity.png` | The phone app's three tabs at iPhone size |
+| `portal-queue.png` | The phone app's Queue tab |
 | `portal-live-dark.png` | The phone app's Live tab in dark mode |
 | `icon.png` | The app icon |
 

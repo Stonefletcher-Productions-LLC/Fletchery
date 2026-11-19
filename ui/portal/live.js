@@ -26,7 +26,7 @@
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
   // How many rows each list shows before "Show N more" (kit.js).
-  const CAP = {liveProblems: 5, liveBuilding: 6, liveChanges: 5, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
+  const CAP = {queueCancelled: 6, queueHolds: 6, liveProblems: 5, liveBuilding: 6, liveChanges: 5, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
   function fill(node, rows, empty, more) {
     const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
     node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
@@ -141,6 +141,48 @@
       '. Only own bugs count as stuck.' : '';
     $('liveCauses').hidden = !red;
     fill($('liveProblems'), probs.map(problemRow), 'No PR is red.');
+  }
+  // ---- Queue tab (devwatch._queue): pools of machines, what runs and waits, holds, cancels ----
+  const inMin = s => s == null ? '' : s < 60 ? 'now' : 'in ' + dur(s);
+  const HOW = {fletchery: x => 'cancelled ' + (x.who || 'in Fletchery'), person: x => 'cancelled by @' + x.who,
+               replaced: () => 'replaced by a newer run of the same check', unknown: () => 'cancelled outside Fletchery (GitHub does not say by whom)'};
+  function poolBlock(p) {
+    const head = el('h3', null, p.name === 'any' ? 'Any machine' : p.name,
+      el('small', {text: (p.machines || []).join(', ')}));
+    const nums = el('p', {class: 'nums'},
+      el('span', null, el('b', {text: p.busy + '/' + p.online}), ' busy'),
+      p.offline ? el('span', null, el('b', {text: String(p.offline)}), ' offline') : null,
+      el('span', null, el('b', {text: String(p.waiting_n)}), ' waiting'),
+      p.wait_p50 != null ? el('span', null, 'wait today ', el('b', {text: dur(p.wait_p50)}), p.wait_p90 != null ? ' (p90 ' + dur(p.wait_p90) + ')' : '') : null,
+      p.util != null ? el('span', null, 'in use ', el('b', {text: Math.round(100 * p.util) + '%'}), ' of the last day') : null);
+    const rows = [];
+    (p.running || []).forEach(r => rows.push(el('li', {class: 'now'}, el('span', {class: 'pos', text: '▶'}),
+      a(r.url, 't', r.name + (r.pr ? ' · PR #' + r.pr : '') + (r.job ? ' · ' + r.job : '')),
+      el('p', {class: 'sub'}, ...sep(join(r.runner, ['running for ', since(r.since)], r.late ? 'taking longer than usual' : r.left != null ? '~' + dur(r.left) + ' left' : ''))))));
+    (p.waiting || []).forEach((w, i) => rows.push(el('li', null, el('span', {class: 'pos', text: String(i + 1)}),
+      a(w.url, 't', w.name + (w.pr ? ' · PR #' + w.pr : '') + (w.job && w.job !== w.name ? ' · ' + w.job : '')),
+      el('p', {class: 'sub'}, ...sep(join((w.repo || '').split('/')[1], ['waiting ', since(w.since)],
+        w.start_in != null ? 'starts ' + inMin(w.start_in) + (w.finish_in != null ? ', done ' + inMin(w.finish_in) : '') : 'start time still being learned'))))));
+    return el('section', {class: 'pool', 'aria-label': p.name}, head, nums,
+      rows.length ? el('ol', null, ...rows) : el('p', {class: 'sub', text: p.online ? 'Nothing running or waiting.' : 'No machine of this kind is online.'}));
+  }
+  function drawQueue(full) {
+    const q = full.queue || {}, pools = (q.pools || []);
+    const shown = repo ? pools.map(p => ({...p, running: (p.running || []).filter(mine), waiting: (p.waiting || []).filter(mine)})) : pools;
+    const n = shown.reduce((t, p) => t + (repo ? p.waiting.length : p.waiting_n), 0);
+    $('n-qpool').textContent = n ? '(' + n + ')' : '';
+    $('queuePools').replaceChildren(...(shown.length ? shown.map(poolBlock) : [el('p', {class: 'sub', text: 'No runners found yet.'})]));
+    const holds = q.holds || [];
+    $('n-qhold').textContent = holds.length ? '(' + holds.length + ')' : '';
+    $('queueHoldsCard').classList.toggle('calm', !holds.length);
+    fill($('queueHolds'), holds.map(x => actRow({...x, detail: join(x.machine, x.detail).join(' · ')})), 'Nothing is waiting for a machine’s hold.');
+    const can = (q.cancelled || []).filter(mine);
+    $('n-qcan').textContent = can.length ? '(' + can.length + ')' : '';
+    $('queueCancelledCard').classList.toggle('calm', !can.length);
+    fill($('queueCancelled'), can.map(x => el('li', null, a(x.url, 'title', x.name + (x.pr ? ' · PR #' + x.pr : '')),
+      el('p', {class: 'sub'}, ...sep(join((x.repo || '').split('/')[1], (HOW[x.how] || HOW.unknown)(x), ago(x.at)))))), 'Nothing was cancelled today.');
+    const b = $('b-queue');
+    if (b) { const w = q.waiting || 0; b.hidden = !w; b.textContent = w > 99 ? '99+' : String(w || ''); }
   }
   function blockerRow(b) {
     const label = {base: 'Base red', feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked', disk: 'Low disk'}[b.kind] || 'Look';
@@ -378,6 +420,7 @@
     drawBases(full);
     drawFlow(full);
     drawProblems(d, full);
+    drawQueue(full);
     const blk = d.blockers || [];
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';
@@ -450,14 +493,14 @@
     }
     clearTimeout(giveUp);
     stale();
-    if (!document.hidden) timer = setTimeout(refresh, failed ? RETRY_MS : tab === 'live' ? OPEN_MS : BACK_MS);
+    if (!document.hidden) timer = setTimeout(refresh, failed ? RETRY_MS : (tab === 'live' || tab === 'queue') ? OPEN_MS : BACK_MS);
   }
   try {
     const kept = JSON.parse(localStorage.getItem(KEEP) || 'null');
     if (kept && kept.body && Date.now() - kept.at < 86400000) { last = kept.body; lastOk = kept.at; draw(kept.body); }
   } catch (e) { /* nothing kept */ }
   document.addEventListener('fletchery-refresh', () => setTimeout(refresh, 1500));
-  document.addEventListener('fletchery-tab', e => { tab = e.detail; if (tab === 'live') refresh(); });
+  document.addEventListener('fletchery-tab', e => { tab = e.detail; if (tab === 'live' || tab === 'queue') refresh(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); else clearTimeout(timer); });
   window.addEventListener('online', refresh);
   setInterval(tick, 1000);

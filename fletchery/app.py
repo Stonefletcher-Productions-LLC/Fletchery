@@ -369,6 +369,8 @@ class App:
                 path = {"cancel": "cancel", "rerun": "rerun", "rerun-failed": "rerun-failed-jobs"}[what]
                 self.gh.api(f"repos/{repo}/actions/runs/{run}/{path}", "POST", {})
                 self.log(f"Actions: {what} run {run} in {repo} (from {src(d)})")
+                if what == "cancel" and hasattr(live, "note_cancel"):
+                    live.note_cancel(repo, run, f"from {src(d)}")
             if live is not None:
                 live._wake.set()
             return {"ok": True}

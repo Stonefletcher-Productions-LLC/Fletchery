@@ -37,7 +37,7 @@
   const WAIT_MS = 12000;     // give up on one read after this long
   const KEEP = 'fletchery-portal-last';
   const KEEP_MS = 24 * 3600 * 1000;
-  const TABS = ['live', 'builds', 'activity'];
+  const TABS = ['live', 'queue', 'builds', 'activity'];
   const $ = id => document.getElementById(id);
   let last = null;        // the newest summary
   let lastOk = 0;         // when it arrived (ms)
