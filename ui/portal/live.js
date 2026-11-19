@@ -72,7 +72,7 @@
   const dur = s => s == null ? '–' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : s < 172800 ? (s / 3600).toFixed(1).replace('.0', '') + ' h' : Math.round(s / 86400) + ' d';
   function drawFlow(full) {
     const box = $('liveFlow'), all = full.flow || {};
-    const f = (repo ? (all.repos || {})[repo] : all.all) || null;
+    const f = (repo ? (all.projects || {})[repo] || (all.repos || {})[repo] : all.all) || null;
     box.hidden = !f;
     if (!f) return;
     const v = VERDICT[(f.verdict || {}).state] || ['', (f.verdict || {}).state || ''];
@@ -427,19 +427,27 @@
       ...(i.labels || []).slice(0, 4).map(l => el('span', {class: 'chip', text: l})),
       el('p', {class: 'sub'}, ...sep(join(i.repo.split('/')[1], ['updated ', ago(i.updated)]))));
   }
+  // Projects: the profile's (several repositories each), else one per repository with something to show.
+  let picked = new Set();       // the chosen project's repositories
   function repoChips(d) {
-    const names = [...new Set([...(d.runs || []), ...(d.prs || []), ...(d.issues || [])].map(x => x.repo).filter(Boolean))].sort();
-    if (repo && !names.includes(repo)) repo = '';
+    const seen = new Set([...(d.runs || []), ...(d.prs || []), ...(d.issues || [])].map(x => x.repo).filter(Boolean));
+    const projects = (d.projects || []).filter(p => (p.repos || []).some(r => seen.has(r)));
+    const covered = new Set(projects.flatMap(p => p.repos));
+    const list = [...projects, ...[...seen].filter(r => !covered.has(r)).sort().map(r => ({name: r.split('/')[1] || r, repos: [r]}))];
+    const key = p => p.repos.length > 1 ? p.name : p.repos[0];
+    const cur = list.find(p => key(p) === repo);
+    if (repo && !cur) repo = '';
+    picked = new Set(cur ? cur.repos : []);
     const box = $('liveRepos');
-    box.hidden = names.length < 2;
+    box.hidden = list.length < 2;
     const chip = (value, label) => {
       const b = el('button', {type: 'button', 'aria-pressed': String(repo === value), text: label});
       b.addEventListener('click', () => { repo = value; try { localStorage.setItem('fletchery-live-repo', repo); } catch (e) { /* ignore */ } if (last) draw(last); });
       return b;
     };
-    box.replaceChildren(chip('', 'All projects'), ...names.map(n => chip(n, n.split('/')[1] || n)));
+    box.replaceChildren(chip('', 'All projects'), ...list.map(p => chip(key(p), p.name)));
   }
-  const mine = x => !repo || !x.repo || x.repo === repo;
+  const mine = x => !repo || !x.repo || picked.has(x.repo);
   function draw(full) {
     repoChips(full);
     const d = repo ? {...full, problems: (full.problems || []).filter(mine), blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),

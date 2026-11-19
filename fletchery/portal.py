@@ -39,6 +39,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import api  # beside this file, like every Fletchery module
+
 HERE = Path(__file__).parent
 UI = HERE.parent / "ui" / "portal"
 MAX_BODY = 8 * 1024
@@ -366,6 +368,22 @@ class Portal:
                         return self._send(200, portal.live_bytes())
                     except Exception as e:
                         return self._json(503, {"error": f"The Live feed could not be read ({type(e).__name__})."})
+                if path in ("/api/v2/state", "/api/v2/history", "/metrics"):      # the stable read API (api.py, docs/API.md)
+                    if portal.live is None:
+                        return self._json(404, {"error": "The Live tab is off (workers.portal.live is false)."})
+                    try:
+                        if path == "/api/v2/state":
+                            return self._send(200, portal.live_bytes())
+                        if path == "/metrics":
+                            return self._send(200, api.metrics(json.loads(portal.live_bytes())).encode("utf-8"),
+                                              "text/plain; version=0.0.4; charset=utf-8")
+                        q = {k: v[0] for k, v in parse_qs(parts.query).items()}
+                        return self._json(200, api.history(portal.live.store, q.get("table", ""), q.get("since", 0),
+                                                           q.get("repo", ""), q.get("limit", 1000)))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                    except Exception as e:
+                        return self._json(503, {"error": f"Fletchery could not answer ({type(e).__name__})."})
                 if path == "/api/jobs/log" and (desktop or portal.controls) and portal.job_log is not None:
                     try:
                         job = int((parse_qs(parts.query).get("id") or ["0"])[0])

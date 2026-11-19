@@ -70,7 +70,9 @@ FAILED = ("failure", "timed_out", "action_required", "startup_failure")
 # with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
 NO_RESULT = re.compile(r"no result", re.I)
 # Coding agents' branches (and PR authors): one Agents row per branch with recent activity.
-AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))
+AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))     # branch prefix -> agent (workers.portal.live.agents)
+AGENT_LOGINS = (("codex", "Codex"),)                      # PR author login containing this -> agent
+SCHEMA = 2            # the snapshot's shape (docs/API.md); a field is only ever added, never renamed or removed
 AGENT_HOURS = 24      # a branch quiet this long drops off the Agents card (workers.portal.live.agentHours)
 AGENT_ACTIVE_MINUTES = 15   # working now: a heartbeat this recent (or, for an agent that sends none, a push or PR update)
 CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
@@ -96,7 +98,34 @@ def _agent_of(branch: str, author: str) -> str:
     for prefix, name in AGENTS:
         if b.startswith(prefix):
             return name
-    return "Codex" if "codex" in a else ""
+    for login, name in AGENT_LOGINS:
+        if login and login in a:
+            return name
+    return ""
+
+
+def set_agents(conf) -> list:
+    """The coding agents this install knows, from the profile: [{"name": "Claude", "branches": ["claude/"],
+    "logins": ["claude[bot]"]}]. Replaces the defaults (Claude, Codex) when given; returns notes on what was ignored."""
+    global AGENTS, AGENT_LOGINS
+    if not isinstance(conf, list) or not conf:
+        return []
+    notes, prefixes, logins = [], [], []
+    for a in conf[:20]:
+        name = _text((a or {}).get("name"), 30) if isinstance(a, dict) else ""
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,29}$", name):
+            notes.append(f"live: agents entry {str(a)[:60]!r} ignored: give a name (letters, digits)")
+            continue
+        for b in a.get("branches") or [name.lower() + "/"]:
+            if isinstance(b, str) and re.match(r"^[A-Za-z0-9._/-]{1,60}$", b):
+                prefixes.append((b.lower(), name))
+        for x in a.get("logins") or []:
+            if isinstance(x, str) and x.strip():
+                logins.append((x.strip().lower()[:60], name))
+    if prefixes or logins:
+        AGENTS, AGENT_LOGINS = tuple(prefixes), tuple(logins)
+        presence.AGENTS.update({n.lower(): n for _, n in prefixes + logins})
+    return notes
 
 
 def _latest_checks(cr: list) -> list:
@@ -380,6 +409,18 @@ class DevWatch:
         self.fast = max(10.0, float(conf.get("fastSeconds") or 15))
         self.slow = max(self.fast, float(conf.get("slowSeconds") or 90))
         self.names = {str(k).lower(): _text(v, 60) for k, v in (conf.get("names") or {}).items()}
+        for note in set_agents(conf.get("agents")):
+            self.log(note)
+        # Projects (workers.portal.live.projects): {"LifeShare": ["Owner/LifeShare", "Owner/LifeShare-Art"]}. A watched
+        # repository in none of them is a project of its own.
+        self.projects: dict[str, list] = {}
+        for name, repos in ((conf.get("projects") or {}) if isinstance(conf.get("projects"), dict) else {}).items():
+            good = [str(r) for r in repos if isinstance(r, str) and re.match(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$", r)] \
+                if isinstance(repos, list) else []
+            if good and re.match(r"^[^<>\x00-\x1f]{1,40}$", str(name)):
+                self.projects[str(name)] = good[:50]
+            else:
+                self.log(f"live: projects entry {str(name)[:40]!r} ignored: give \"Name\": [\"Owner/Repo\", ...]")
         # runner name suffixes to strip when GitHub doesn't send a runner's labels (InstallPrRunner.ps1 labels)
         self.runner_labels = [str(x) for x in conf.get("runnerLabels") or ("unreal-pr", "unreal-light")]
         self.gh = github or GitHub(token_fn, self.log)
@@ -975,6 +1016,10 @@ class DevWatch:
                       f"{repo} · {v.get('why') or ''}", since=now_iso_at(last["at"]) if last.get("at") else "", key=f"flow:{repo}", repo=repo)
         rank = {"feed": 0, "base": 1, "machine": 2, "disk": 3, "stuck": 3, "check": 4, "runner": 5, "flow": 6, "label": 7}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
+        project_of = {r.lower(): p["name"] for p in self.projects_now() if len(p["repos"]) > 1 for r in p["repos"]}
+        for b in blockers:      # alerts group by project: one notification for a project's repositories
+            if project_of.get(b["repo"].lower()):
+                b["project"] = project_of[b["repo"].lower()]
         try:
             alerts_out = self.alerts.evaluate(blockers, at)
         except Exception as e:      # the page still lists every blocker
@@ -998,7 +1043,9 @@ class DevWatch:
             "at": now_iso(), "fresh": {"github": self.last_ok, "tried": self.last_try, "every": round(self.interval),
                                        "error": _text(self.error), "remaining": self.gh.remaining,
                                        "free": self.gh.free, "calls": self.gh.calls, "runner_note": _text(self.runner_note, 400)},
+            "schema": SCHEMA,
             "repos": [{"name": r["full_name"], "url": r["url"]} for r in self.repos],
+            "projects": self.projects_now(),
             "counts": {"machines": len(machines_out), "busy": sum(1 for m in machines_out if m["busy"]),
                        "runs": len(active_runs), "queued": sum(1 for r in active_runs if r["status"] != "in_progress"),
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
@@ -1171,6 +1218,18 @@ class DevWatch:
         self._base_cache = (at, out[:20])
         return out[:20]
 
+    def projects_now(self) -> list:
+        """[{"name", "repos"}]: the profile's projects (only repositories being watched), then one per other repository."""
+        watched = {r["full_name"].lower(): r["full_name"] for r in self.repos}
+        out, used = [], set()
+        for name, repos in self.projects.items():
+            mine = [watched[r.lower()] for r in repos if r.lower() in watched]
+            if mine:
+                out.append({"name": name, "repos": mine})
+                used |= {r.lower() for r in mine}
+        out += [{"name": full.split("/")[-1], "repos": [full]} for low, full in sorted(watched.items()) if low not in used]
+        return out
+
     def flow_now(self, prs_out: list, at: float) -> dict:
         """The Flow strip (flow.py), worked out at most every 15 s."""
         when, kept = self._flow_cache
@@ -1181,7 +1240,8 @@ class DevWatch:
             if not p["draft"] and p["checks"]["state"] not in ("failed",):
                 waiting[p["repo"]] = waiting.get(p["repo"], 0) + 1
         try:
-            kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at)
+            kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at,
+                                     projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1})
         except Exception as e:
             self.log(f"live: flow: {type(e).__name__}: {e}")
             kept = {}
