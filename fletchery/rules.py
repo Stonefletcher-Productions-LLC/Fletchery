@@ -3,9 +3,8 @@ history store (store.py), each with tests (test_rules.py). Every project-specifi
 from the profile, so a new project needs no change here.
 
 Base health (Horde's "build health", for a base branch such as Test-Staging or main):
-- A commit on the base branch is **red** when one of its checks ended failure, error or timeout (only the branch's
-  required checks when GitHub says which those are), **green** when none did and at least one passed, else unknown
-  (still running, or only cancelled).
+- A protected branch is green when every required check on its current commit passed. A required failure makes it
+  red; a missing check or a check still awaiting a passing result leaves it checking.
 - **Red since** is when the first commit of the current red streak was first seen red, walking back to the last green
   one, from the store, so a backend restart does not reset it.
 - **Suspects** are the pull requests merged after the last green commit and up to the first red one.
@@ -17,6 +16,8 @@ from __future__ import annotations
 
 import re
 import time
+
+from store import base_result, ts
 
 RED = ("failure", "error", "timeout")
 OK = ("success", "skip")
@@ -30,27 +31,49 @@ def _iso(t):
     return iso(t)
 
 
-def commit_states(store, repo: str, branch: str, required=None, now: float | None = None) -> list:
-    """The branch's commits, newest first: [{"sha", "at", "first", "state", "red": [names], "results": {name: result}}]."""
+def _verdict(commit, required):
+    results = commit["results"]
+    if required:
+        names = {n.casefold(): n for n in results}
+        relevant = {n: results.get(names.get(n.casefold())) for n in required}
+        waiting = [n for n, result in relevant.items() if result != "success" and result not in RED]
+        passed = not waiting
+    else:
+        relevant = results
+        waiting = [n for n, result in results.items() if not result]
+        passed = not waiting and any(r in ("success", "neutral") for r in results.values())
+    red = sorted(n for n, result in relevant.items() if result in RED)
+    ats = {n.casefold(): at for n, at in commit["ats"].items()}
+    if red:
+        state = "red"
+    elif passed:
+        state = "green"
+    else:
+        state = "checking" if required or waiting else "unknown"
+    commit.update(state=state, red=red, waiting=waiting,
+                  red_at=min((ats[n.casefold()] for n in red), default=commit["first"]))
+    return commit
+
+
+def commit_states(store, repo: str, branch: str, required=None, now: float | None = None, required_sources=None) -> list:
+    """Verdicts on individual commits, in merge order when known."""
     now = now or time.time()
-    rows = store.query("SELECT sha, name, result, at FROM base_checks WHERE repo=? AND branch=? AND at > ? ORDER BY at DESC",
+    rows = store.query("SELECT sha, name, result, at, sources FROM base_checks WHERE repo=? AND branch=? AND at > ? ORDER BY at DESC",
                        (repo, branch, now - WINDOW_DAYS * 86400))
+    pins = {name.casefold(): {str(i) for i in ids if i is not None} for name, ids in (required_sources or {}).items()}
     commits: dict = {}
-    for sha, name, result, at in rows:
+    for sha, name, result, at, sources in rows:
+        if not pins.get(name.casefold(), set()).issubset(sources.split(",")):
+            continue
         c = commits.setdefault(sha, {"sha": sha, "at": at, "first": at, "results": {}, "ats": {}})
         c["first"] = min(c["first"], at)
-        if name not in c["results"]:                   # newest result per check (a re-run replaces the failure)
-            c["results"][name], c["ats"][name] = result, at
-    want = {r.lower() for r in required or ()}
-    out = []
-    for c in sorted(commits.values(), key=lambda c: -c["at"]):
-        res = {n: r for n, r in c["results"].items() if not want or n.lower() in want}
-        red = sorted(n for n, r in res.items() if r in RED)
-        c["red"] = red
-        c["red_at"] = min((c["ats"][n] for n in red), default=c["first"])
-        c["state"] = "red" if red else "green" if any(r == "success" for r in res.values()) else "unknown"
-        out.append(c)
-    return out
+        c["results"][name], c["ats"][name] = result, at
+    merges = dict(store.query("SELECT sha, MAX(merged) FROM merges WHERE repo=? AND base=? AND merged>? GROUP BY sha",
+                              (repo, branch, now - WINDOW_DAYS * 86400)))
+    for sha, c in commits.items():
+        c["order"] = merges.get(sha, c["first"])
+        _verdict(c, required)
+    return sorted(commits.values(), key=lambda c: -c["order"])
 
 
 def _mentions(text: str, numbers: set) -> bool:
@@ -58,6 +81,7 @@ def _mentions(text: str, numbers: set) -> bool:
 
 
 def base_health(store, repo: str, branch: str, *, required=None, prs=(), issues=(), notes=None, checking: bool = False,
+                tip_sha=None, tip_checks=None, required_sources=None,
                 fix_labels=FIX_LABELS, red_issue_labels=RED_ISSUE_LABELS, now: float | None = None) -> dict | None:
     """One base branch's health, or None when nothing is known yet.
 
@@ -65,18 +89,45 @@ def base_health(store, repo: str, branch: str, *, required=None, prs=(), issues=
     `issues` its issue rows, both for this repository. `notes` maps a failing check's name to the test names its
     annotations gave (shown as "which tests"). `checking`: the newest commit's checks are still running."""
     now = now or time.time()
-    commits = commit_states(store, repo, branch, required, now)
-    known = [c for c in commits if c["state"] != "unknown"]
-    if not known:
+    commits = commit_states(store, repo, branch, required, now, required_sources)
+    matching = next((c for c in commits if c["sha"] == tip_sha), None)
+    if tip_checks is not None:
+        head = {"sha": tip_sha or "", "at": now, "first": now, "results": {}, "ats": {}}
+        for check in tip_checks:
+            if not tip_sha or not check.get("name") or (check.get("head_sha") and check["head_sha"] != tip_sha):
+                continue
+            name = check["name"]
+            at = ts(check.get("completed_at")) or ts(check.get("started_at")) or ts(check.get("created_at"))
+            head["results"][name] = base_result(check)
+            head["ats"][name] = at or ((matching or {}).get("ats") or {}).get(name) or now
+        if not head["results"] and not required:
+            return None
+        if head["ats"]:
+            head["at"], head["first"] = max(head["ats"].values()), min(head["ats"].values())
+        _verdict(head, required)
+    elif tip_sha:
+        head = matching or _verdict({"sha": tip_sha, "at": now, "first": now, "results": {}, "ats": {}}, required)
+        if not head["results"] and not required:
+            return None
+    else:
+        head = next((c for c in commits if c["state"] in ("red", "green")), None)
+        if not head:
+            return None
+    if head["state"] == "unknown":
         return None
-    head = known[0]
-    out = {"repo": repo, "branch": branch, "state": head["state"], "sha": head["sha"][:12], "checking": bool(checking),
-           "required": bool(required)}
-    if head["state"] != "red":
+    out = {"repo": repo, "branch": branch, "state": head["state"], "sha": head["sha"][:12], "required": bool(required),
+           "checking": bool(head["waiting"] or head["state"] == "checking" or (tip_checks is None and checking)),
+           "waiting": head["waiting"]}
+    if head["state"] == "checking":
+        return out
+    if head["state"] == "green":
         out["green_at"] = _iso(head["at"])
         return out
     first, green = head, None
-    for c in known[1:]:
+    head_order = (matching or head).get("order", head["first"])
+    for c in commits:
+        if c["sha"] == head["sha"] or c["order"] > head_order or c["state"] not in ("red", "green"):
+            continue
         if c["state"] == "green":
             green = c
             break
@@ -141,23 +192,33 @@ def test_names(annotations: list) -> list:
     return out[:10]
 
 
-def required_checks(branch_rules, protection) -> list:
-    """The required checks of a branch, from repository rulesets (`rules/branches/<b>`, needs only read access) and
-    classic branch protection (`protection/required_status_checks`, needs admin: often refused, then skipped)."""
-    names = []
+def required_sources(branch_rules, protection) -> dict:
+    """Required contexts and their permitted GitHub App IDs under rulesets and classic protection."""
+    sources = {}
+
+    def add(name, app=None):
+        if isinstance(name, str) and name:
+            sources.setdefault(name, set()).add(app if isinstance(app, int) and app > 0 else None)
+
     for r in branch_rules if isinstance(branch_rules, list) else []:
         if isinstance(r, dict) and r.get("type") == "required_status_checks":
             for c in (r.get("parameters") or {}).get("required_status_checks") or []:
-                if isinstance(c, dict) and c.get("context"):
-                    names.append(str(c["context"]))
+                if isinstance(c, dict):
+                    add(c.get("context"), c.get("integration_id"))
     if isinstance(protection, dict):
-        names += [str(c) for c in protection.get("contexts") or [] if c]
-        names += [str(c.get("context")) for c in protection.get("checks") or [] if isinstance(c, dict) and c.get("context")]
-    seen = []
-    for n in names:
-        if n not in seen:
-            seen.append(n)
-    return seen[:30]
+        for name in protection.get("contexts") or []:
+            add(name)
+        for c in protection.get("checks") or []:
+            if isinstance(c, dict):
+                add(c.get("context"), c.get("app_id"))
+    for ids in sources.values():
+        if len(ids) > 1:
+            ids.discard(None)
+    return sources
+
+
+def required_checks(branch_rules, protection) -> list:
+    return list(required_sources(branch_rules, protection))
 
 
 # ---- Failure causes (proposal 2): why a PR's check is red, and which red checks share one problem ----

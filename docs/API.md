@@ -19,7 +19,7 @@ are only ever **added**: a reader that ignores fields it does not know keeps wor
 | `open_pr_counts` | Last confirmed open PR count for each watched repository with a known count. A confirmed zero is included. |
 | `pr_count_status` | `partial` flags an incomplete refresh. `inventory_complete` indicates whether the watched repository list was confirmed. `stale` maps affected repositories to their last count confirmation in UTC, or an empty string when unknown. |
 | `flow` | Merges per hour/day/week, time since the last merge, PR lead time, wait for a runner, red share, verdict; for `all`, each of `repos` and each of `projects` |
-| `bases` | Base-branch health: state, failing checks and tests, since, first bad merge, suspects, fixes in line, PRs held red |
+| `bases` | Base-branch health for the observed tip (`sha`). A `checking` branch lists required contexts awaiting a passing result in `waiting`. An incomplete GitHub read can also provide a `reason`. A `red` branch includes failing checks and tests, first bad merge, suspects, fixes in line and PRs held red. |
 | `problems`, `causes` | Red PR checks grouped by cause (own, base, machine, flaky, cancelled) |
 | `queue` | Runner pools (workers, busy, wait p50/p90, utilisation), what runs and waits with estimates, holds, cancelled runs and who cancelled them |
 | `alerts` | `firing`, `pending` (with `fires_in`) and `cleared` alerts; each with `key`, `kind`, `group`, `title`, `notify`, `snoozed_until` |

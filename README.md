@@ -67,6 +67,10 @@ alert too. Alerts and snoozes survive a restart.
 
 <p><img src="docs/images/fletchery/portal-alerts.png" width="300" alt="Stuck or blocked on the phone: rows marked Alerted with snooze buttons, Snoozed until a time, and Not alerted yet with the minutes left, and the alerts cleared recently"></p>
 
+**Branch health.** A protected branch turns green once every required check passes on its current commit. While a
+result is missing, running or skipped, the banner names the check still awaiting a pass. A confirmed required failure
+appears in red immediately. Fletchery reads both check runs and commit statuses and ignores the retired Buildlane runner's reports.
+
 **Cheap to run.** GitHub is read with ETags, so "nothing changed" costs nothing against GitHub's limit and no Actions
 minutes. It reads every 15 s while anything runs and every 90 s when idle, and slows down by itself when the hourly
 limit runs low. Runners are listed for each organisation and each repository, so repository-level runners show too; a
