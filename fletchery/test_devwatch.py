@@ -2,6 +2,7 @@
 free 304s, and the /v1/report route. No real GitHub: a fake answers by path, and a local server stands in for ETags."""
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -35,10 +36,15 @@ class FakeGitHub:
     def get(self, path):
         self.asked.append(path)
         for prefix, answer in self.answers.items():
+            # A run-list response cannot answer an individual run's jobs endpoint.
+            if prefix.endswith("/actions/runs") and path.startswith(prefix + "/"):
+                continue
             if path.startswith(prefix):
                 if isinstance(answer, Exception):
                     raise answer
                 return answer
+        if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/jobs", path.partition("?")[0]):
+            return {"jobs": []}
         raise devwatch.GitHubError(404, "Not Found")
 
 
@@ -682,15 +688,15 @@ class Feed(unittest.TestCase):
         w.gh.answers = world(**{"user/repos": [{"full_name": other, "owner": {"login": ORG}, "pushed_at": ago(1)}],
                                 f"repos/{other}/pulls?state=open": []})
         started, resume = threading.Event(), threading.Event()
-        read_repo = w._read_repo
+        poll_repo = w._poll_repo
 
         def pending_details(repo, prs):
             started.set()
             if not resume.wait(10):
                 raise RuntimeError("test detail read timed out")
-            return read_repo(repo, prs)
+            return poll_repo(repo, prs)
 
-        w._read_repo = pending_details
+        w._poll_repo = pending_details
         worker = threading.Thread(target=w.poll)
         worker.start()
         try:
@@ -1011,6 +1017,124 @@ class Feed(unittest.TestCase):
         for text, kind in (("PR check #2290 (GitHub run 1)", "check"), ("Hand merge batch 7", "merging"),
                            ("NavCheck proof for #12", "proof"), ("Build 0.4.5", "building"), ("something", "working")):
             self.assertEqual(devwatch.kind_of(text), kind, text)
+
+
+class PartialRunRefresh(unittest.TestCase):
+    runs = f"repos/{REPO}/actions/runs"
+    issues = f"repos/{REPO}/issues?state=open"
+    timeout = devwatch.GitHubError(0, "GitHub timed out")
+
+    def setUp(self):
+        self.github = FakeGitHub(world())
+        self.watch = devwatch.DevWatch(github=self.github)
+        self.addCleanup(self.watch.store.close)
+
+    def answers(self, changes):
+        self.github.answers = {**changes, **{k: v for k, v in self.github.answers.items() if k not in changes}}
+
+    def run_list(self, *runs):
+        self.answers({self.runs + "?per_page=20": {"workflow_runs": list(runs)}})
+
+    def job_list(self, run_id, value):
+        self.answers({f"{self.runs}/{run_id}/jobs": value if isinstance(value, Exception) else {"jobs": value}})
+
+    def partial(self):
+        with self.assertRaises(devwatch.GitHubError):
+            self.watch.poll()
+        s = self.watch.snapshot()
+        self.assertTrue(s["pr_count_status"]["partial"])
+        self.assertIn(REPO, s["pr_count_status"]["stale"])
+        self.assertEqual(s["open_pr_counts"], {REPO: 2})
+        return s
+
+    @staticmethod
+    def active(n, attempt=1):
+        return {"id": n, "name": "CI", "status": "in_progress", "run_attempt": attempt,
+                "created_at": ago(20), "updated_at": ago(1)}
+
+    @staticmethod
+    def job(n, name):
+        return {"id": n, "name": name, "status": "in_progress", "runner_name": "NODE-unreal-pr", "started_at": ago(10)}
+
+    def test_observed_runs_jobs_and_history_survive_later_detail_timeout(self):
+        self.answers({self.issues: self.timeout})
+        self.run_list(self.active(7), {**self.active(6), "status": "completed", "conclusion": "success"})
+        self.job_list(7, [self.job(71, "Compile")])
+        cold = self.partial()
+        self.assertEqual({r["id"]: (r["status"], r["job"]) for r in cold["runs"]},
+                         {7: ("in_progress", "Compile"), 6: ("completed", "")})
+        self.assertEqual(self.watch.store.query("SELECT id, result FROM runs WHERE repo=?", (REPO,)), [(6, "success")])
+        self.assertEqual(self.watch.store.query("SELECT id, name FROM jobs WHERE repo=?", (REPO,)), [(71, "Compile")])
+        self.run_list(self.active(7), self.active(9))
+        self.job_list(7, [self.job(72, "Run specs")])
+        self.job_list(9, [self.job(91, "Package")])
+        warm = self.partial()
+        self.assertEqual({r["id"]: r["job"] for r in warm["runs"]}, {7: "Run specs", 9: "Package"})
+
+    def test_confirmed_empty_jobs_then_empty_runs_replace_older_records(self):
+        self.run_list(self.active(7))
+        self.job_list(7, [self.job(71, "Compile")])
+        self.watch.poll()
+        self.answers({self.issues: self.timeout})
+        self.job_list(7, [])
+        self.assertEqual([(r["id"], r["job"]) for r in self.partial()["runs"]], [(7, "")])
+        self.run_list()
+        self.assertEqual(self.partial()["runs"], [])
+        self.assertFalse(self.watch.jobs)
+        self.answers({self.issues: []})
+        self.watch.poll()
+        self.assertEqual(self.watch.snapshot()["pr_count_status"], {"partial": False, "inventory_complete": True, "stale": {}})
+
+    def test_job_timeout_preserves_only_matching_attempt_and_all_successful_siblings(self):
+        self.run_list(*(self.active(n) for n in (7, 8, 9, 10)))
+        for n in (7, 8, 9, 10):
+            self.job_list(n, [self.job(n * 10, "Earlier job")])
+        self.watch.poll()
+        self.run_list(self.active(7), self.active(8), self.active(9, attempt=2), self.active(10))
+        self.job_list(7, [self.job(71, "First update")])
+        self.job_list(8, self.timeout)
+        self.job_list(9, self.timeout)
+        self.job_list(10, [self.job(101, "Last update")])
+        self.assertEqual({r["id"]: r["job"] for r in self.partial()["runs"]},
+                         {7: "First update", 8: "Earlier job", 9: "", 10: "Last update"})
+        self.job_list(8, [])
+        self.job_list(9, [self.job(91, "Second attempt")])
+        self.watch.poll()
+        s = self.watch.snapshot()
+        self.assertFalse(s["pr_count_status"]["partial"])
+        self.assertEqual({r["id"]: r["job"] for r in s["runs"]}[9], "Second attempt")
+
+    def test_second_active_run_page_timeout_keeps_received_runs_and_unseen_active(self):
+        self.run_list(self.active(7), self.active(8))
+        self.watch.poll()
+        finished = [{**self.active(n), "status": "completed", "conclusion": "success"} for n in range(20, 40)]
+        self.run_list(*finished)
+        active_page = self.runs + "?status=in_progress&per_page=100&page="
+        self.answers({active_page + "1": {"workflow_runs": [self.active(n) for n in range(100, 200)]},
+                      active_page + "2": self.timeout,
+                      self.runs + "?status=queued": {"workflow_runs": []}})
+        s = self.partial()
+        self.assertEqual(s["counts"]["runs"], 102)
+        self.assertEqual({r["id"] for r in self.watch.runs[REPO]}, {7, 8, *range(20, 40), *range(100, 200)})
+        self.answers({active_page + "2": {"workflow_runs": []}})
+        self.watch.poll()
+        self.assertEqual(self.watch.snapshot()["counts"]["runs"], 100)
+        self.assertNotIn(7, {r["id"] for r in self.watch.runs[REPO]})
+
+    def test_finished_run_retries_an_interrupted_jobs_page(self):
+        self.run_list(self.active(7))
+        self.job_list(7, [self.job(99, "Last known job")])
+        self.watch.poll()
+        self.run_list({**self.active(7), "status": "completed", "conclusion": "success"})
+        path = self.runs + "/7/jobs?per_page=30&page="
+        complete = [{**self.job(n, f"Task {n}"), "status": "completed", "conclusion": "success"} for n in range(30)]
+        self.answers({path + "1": {"jobs": complete, "total_count": 31}, path + "2": self.timeout})
+        self.partial()
+        self.assertEqual({j["id"] for j in self.watch.jobs[7]}, {*range(30), 99})
+        self.answers({path + "2": {"jobs": [{**complete[0], "id": 31}], "total_count": 31}})
+        self.watch.poll()
+        self.assertFalse(self.watch.snapshot()["pr_count_status"]["partial"])
+        self.assertEqual({j["id"] for j in self.watch.jobs[7]}, {*range(30), 31})
 
 
 class StuckNotifications(unittest.TestCase):

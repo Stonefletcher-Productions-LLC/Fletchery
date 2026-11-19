@@ -18,6 +18,7 @@ are only ever **added**: a reader that ignores fields it does not know keeps wor
 | `counts` | The numbers at the top of Live |
 | `open_pr_counts` | Last confirmed open PR count for each watched repository with a known count. A confirmed zero is included. |
 | `pr_count_status` | `partial` flags an incomplete refresh. `inventory_complete` indicates whether the watched repository list was confirmed. `stale` maps affected repositories to their last count confirmation in UTC, or an empty string when unknown. |
+| `runs` | A partial refresh includes run and job updates already received. An incomplete active-run list keeps previously observed active runs until GitHub confirms the list. Job details can be retained only for the same run attempt. A confirmed empty result clears the corresponding rows. |
 | `flow` | Merges per hour/day/week, time since the last merge, PR lead time, wait for a runner, red share, verdict; for `all`, each of `repos` and each of `projects` |
 | `bases` | Base-branch health for the observed tip (`sha`). A `checking` branch lists required contexts awaiting a passing result in `waiting`. An incomplete GitHub read can also provide a `reason`. A `red` branch includes failing checks and tests, first bad merge, suspects, fixes in line and PRs held red. |
 | `problems`, `causes` | Red PR checks grouped by cause (own, base, machine, flaky, cancelled) |
@@ -26,7 +27,7 @@ are only ever **added**: a reader that ignores fields it does not know keeps wor
 | `blockers`, `parked` | Stuck or blocked items, each with its `alert` state |
 | `machines`, `runners`, `building` | Machines (CPU, RAM, disks with `full_in`, disk guard, activities), runners, everything building now |
 | `agents`, `changes` | Coding agents working now; changes on their way with their steps |
-| `runs`, `prs`, `issues` | Actions runs, open pull requests with checks and cause, open issues |
+| `prs`, `issues` | Open pull requests with checks and cause, open issues |
 
 `/api/live` is the same document (the page reads it); prefer `/api/v2/state` in scripts.
 
