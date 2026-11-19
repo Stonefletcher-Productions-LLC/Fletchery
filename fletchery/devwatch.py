@@ -76,6 +76,7 @@ SCHEMA = 2            # the snapshot's shape (docs/API.md); a field is only ever
 AGENT_HOURS = 24      # a branch quiet this long drops off the Agents card (workers.portal.live.agentHours)
 AGENT_ACTIVE_MINUTES = 15   # working now: a heartbeat this recent (or, for an agent that sends none, a push or PR update)
 CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
+SESSION_FRESH = 120      # a machine's list of open Claude Code sessions counts for this long after its report
 GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
 BACKFILL_RUNS = 30         # past runs read once at start when a repository has no step times yet
@@ -1369,6 +1370,8 @@ class DevWatch:
         2. What GitHub shows, for agents that send no heartbeat: an agent branch (claude/..., codex/... or a codex
            author) with a push, or its PR updated, recently. Marked `source: github`, a guess. A PR or branch a
            heartbeat covers is left to the heartbeat; after it only a newer push brings the guess back.
+        3. Claude Code sessions open on a machine, from its reporter (`claude agents --json`): `source: session`, busy
+           ("Working") or idle, so a session shows while it runs even before it pushes anything. Listed after heartbeats.
         Gone: done, quiet past the window, or its PR merged or closed after the last sign of work."""
         with self._lock:
             pushes = {repo: list(ps) for repo, ps in self.pushes.items()}
@@ -1402,7 +1405,8 @@ class DevWatch:
             pr = pr or (pr_by.get((key, r["branch"])) if r["branch"] else None)
             issue = issue_by.get((key, num)) if num and not pr else None
             linked = key in watched
-            title = (pr or issue or {}).get("title") or (f"{repo}{num}" if repo and num else r["work"] or r["branch"] or "No issue or PR named")
+            title = ((pr or issue or {}).get("title") or r.get("title")
+                     or (f"{repo}{num}" if repo and num else r["work"] or r["branch"] or "No issue or PR named"))
             url = ""      # linked only inside the repositories Live watches
             if linked:
                 url = (pr or issue or {}).get("url") or (f"https://github.com/{watched[key]}/issues/{num[1:]}" if num else "")
@@ -1414,6 +1418,28 @@ class DevWatch:
                         "where": self.display(r["machine"]) if r["machine"] else "cloud",
                         "checks": (pr or {}).get("checks", {}).get("state", ""), "last": now_iso_at(r["at"]),
                         "active": at - r["at"] < self.agent_active})
+
+        # 3. Claude Code sessions open on a machine (reporter.py, `claude agents --json`): what that machine runs now,
+        #    busy or idle, with or without any GitHub trace. Only from a report of the last two minutes.
+        with self._lock:
+            reports = dict(self.reports)
+        for name, rep in reports.items():
+            d = rep.get("data") or {}
+            sessions = d.get("sessions")
+            if not isinstance(sessions, list) or _age(rep.get("at"), at) > SESSION_FRESH:
+                continue
+            where = self.display(_text(d.get("host") or name, 60))
+            for x in sessions[:40]:
+                if not isinstance(x, dict) or not x.get("id"):
+                    continue
+                busy = str(x.get("status") or "").lower() == "busy"
+                kind = {"background": "Background session", "interactive": "Open session"}.get(str(x.get("kind") or "").lower(), "Session")
+                title = _scrub(x.get("name") or x.get("folder") or "Claude Code session", 120)
+                out.append({"agent": "Claude", "source": "session", "repo": "", "number": 0, "title": title, "url": "",
+                            "branch": "", "state": "Working" if busy else "Idle", "tone": "run" if busy else "",
+                            "step": _scrub(" ".join(p for p in (kind, f"in {x['folder']}" if x.get("folder") and x.get("name") and x.get("folder") != x.get("name") else "") if p), presence.STEP_MAX),
+                            "where": where, "checks": "", "last": rep.get("at") or "", "since": _text(x.get("since"), 40),
+                            "active": True})
 
         last_push = {}
         for repo, ps in pushes.items():
@@ -1473,7 +1499,8 @@ class DevWatch:
                         "url": _web(f"https://github.com/{repo}/tree/{branch}"), "branch": branch,
                         "state": "Coding, no PR yet" if fresh else "Pushed, no PR yet", "tone": "run" if fresh else "",
                         "step": "", "where": "", "checks": "", "last": pushed, "active": _age(pushed, at) < self.agent_active})
-        out.sort(key=lambda x: (not x["active"], x["source"] != "heartbeat", -_ts(x["last"])))
+        rank = {"heartbeat": 0, "session": 1}
+        out.sort(key=lambda x: (not x["active"], rank.get(x["source"], 2), x["state"] == "Idle", -_ts(x["last"])))
         return out
 
     def _full_in(self, host: str, drive: str, at: float):

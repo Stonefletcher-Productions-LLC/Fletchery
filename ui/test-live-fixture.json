@@ -25,7 +25,7 @@
   "issues": 1,
   "blockers": 6,
   "building": 1,
-  "agents": 4,
+  "agents": 5,
   "agents_idle": 12,
   "changes": 4,
   "changes_moving": 3,
@@ -473,6 +473,23 @@
    "where": "cloud",
    "checks": "",
    "last": "2026-11-18T04:31:29Z",
+   "active": true
+  },
+  {
+   "agent": "Claude",
+   "source": "session",
+   "repo": "",
+   "number": 0,
+   "title": "Cross-town travel",
+   "url": "",
+   "branch": "",
+   "state": "Working",
+   "tone": "run",
+   "step": "Open session in wt-travel",
+   "where": "Gaming PC",
+   "checks": "",
+   "last": "2026-11-18T04:31:29Z",
+   "since": "2026-11-18T03:40:00Z",
    "active": true
   },
   {

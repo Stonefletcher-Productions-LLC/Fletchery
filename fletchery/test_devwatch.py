@@ -346,6 +346,40 @@ class Feed(unittest.TestCase):
         rows = [a for a in w.snapshot()["agents"] if a["source"] == "heartbeat"]
         self.assertEqual([(a["number"], a["where"], a["step"]) for a in rows], [(12, "cloud", "Planning")])
 
+    def test_open_claude_sessions_on_a_machine_are_listed(self):
+        """Running Claude Code sessions show while they run, with no GitHub trace (reporter.py `sessions`)."""
+        w = self.watch_first({})
+        w.report("ALEX-PC", {"host": "ALEX-PC", "sessions": [
+            {"id": "a1", "name": "LifeShare cross-town travel", "folder": "wt-travel", "kind": "interactive", "status": "busy",
+             "since": ago(30)},
+            {"id": "a2", "name": "", "folder": "wt-marina", "kind": "background", "status": "idle", "since": ago(90)},
+            "junk", {"name": "no id"}]})
+        w.report("OLD-NODE", {"host": "OLD-NODE", "sessions": [{"id": "z", "name": "stale", "status": "busy"}]})
+        w.reports["OLD-NODE"]["at"] = ago(10)                         # its list is old: not shown
+        w.presence.beat("ALEX-PC", {"agent": "claude", "session": "t", "title": "Cloud thread", "step": "Planning"})
+        rows = [a for a in w.snapshot()["agents"] if a["source"] in ("session", "heartbeat")]
+        self.assertEqual([(a["source"], a["title"], a["state"]) for a in rows],
+                         [("heartbeat", "Cloud thread", "Working"), ("session", "LifeShare cross-town travel", "Working"),
+                          ("session", "wt-marina", "Idle")])
+        self.assertEqual((rows[1]["where"], rows[1]["step"], rows[1]["active"]), ("Gaming PC", "Open session in wt-travel", True))
+        self.assertEqual(rows[2]["step"], "Background session")
+
+    def test_reporter_reads_claude_sessions(self):
+        class Out:
+            returncode = 0
+            stdout = json.dumps([{"pid": 9, "cwd": "E:\\lifeshare-scratch\\wt-bus", "kind": "interactive", "startedAt": 1795064263245,
+                                  "sessionId": "41a99d28-f571", "name": "bus lines", "status": "busy"},
+                                 {"sessionId": "bad id!/..", "cwd": "/home/me/repo/", "status": "idle"}, 7]).encode()
+        got = reporter.claude_sessions("claude", run=lambda *a, **k: Out())
+        self.assertEqual(got[0], {"id": "41a99d28-f571", "name": "bus lines", "folder": "wt-bus", "kind": "interactive",
+                                  "status": "busy", "since": "2026-11-19T04:57:43Z"})
+        self.assertEqual((got[1]["id"], got[1]["folder"]), ("badid..", "repo"))   # no path ever leaves the machine
+        Out.returncode = 1
+        self.assertIsNone(reporter.claude_sessions("claude", run=lambda *a, **k: Out()))
+        def boom(*a, **k):
+            raise OSError("not installed")
+        self.assertIsNone(reporter.claude_sessions("claude", run=boom))
+
     def test_agent_presence_is_kept_in_the_state_folder(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:     # Windows: the history file stays open
             w = devwatch.DevWatch({}, github=FakeGitHub(world()), state_dir=d)
