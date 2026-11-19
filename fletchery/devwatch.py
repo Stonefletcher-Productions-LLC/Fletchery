@@ -1076,7 +1076,8 @@ class DevWatch:
         self._link_activities(machines_out, changes)
         active_runs = [r for r in runs_out if r["status"] in ACTIVE]
         # Everything building, checking, testing, merging or importing right now, on any machine, in one list.
-        building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"] if a["kind"] in BUILD_KINDS]
+        building = [{**a, "machine": m["name"]} for m in machines_out for a in m["activities"]
+                    if a["kind"] in BUILD_KINDS or "progress" in a]
         building.sort(key=lambda a: _ts(a.get("since")) or 0)
         return {
             "at": now_iso(), "fresh": {"github": self.last_ok, "tried": self.last_try, "every": round(self.interval),
@@ -1633,7 +1634,7 @@ class DevWatch:
                 if lease is not None:
                     lease.update(repo=job["repo"], pr=job["pr"], run=job["id"], url=job["url"])
                 else:
-                    m["activities"].insert(0, {"kind": "check" if "check" in r["job"]["title"].lower() else "working",
+                    m["activities"].insert(0, {"kind": "check" if "progress" in job or "check" in job["title"].lower() else "working",
                                                "title": r["job"]["title"], "since": r["job"]["started"],
                                                "detail": (f"step: {r['job']['step']} · " if r["job"]["step"] else "") + r["job"]["repo"],
                                                "url": r["job"]["url"], "repo": r["job"]["repo"], "pr": r["job"]["pr"],
@@ -1644,7 +1645,11 @@ class DevWatch:
                 if "progress" in job:
                     key = f"{job['repo']}@{job['id']}/{job['attempt']}".lower()
                     phase = phases.get((m["host"].lower(), key))
-                    if phase and 0 < _ts(job["step_started"]) <= _ts(phase["since"]) <= at + 5:
+                    if lease["kind"] == "queued" and m["online"] and _ts(job["step_started"]) <= _ts(lease["since"]):
+                        job["progress"].pop("eta", None)
+                        job["progress"]["waiting_machine"] = True
+                        job["progress"]["phase"] = {"label": "Waiting for the machine reservation", "since": lease["since"]}
+                    elif phase and 0 < _ts(job["step_started"]) <= _ts(phase["since"]) <= at + 5:
                         job["progress"]["phase"] = phase
                     elif lease.get("last_output") and 0 < _ts(job["step_started"]) <= _ts(lease["last_output"]["at"]):
                         job["progress"]["last_output"] = lease["last_output"]

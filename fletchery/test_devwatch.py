@@ -134,6 +134,10 @@ class Feed(unittest.TestCase):
             self.assertEqual(s["building"][0]["progress"], s["runs"][0]["progress"])
         w.reports["pc"]["at"] = ago(10)
         self.assertNotIn("phase", w.snapshot()["building"][0]["progress"])
+        w.report("pc", {"host": "ALEX-PC", "queue": [{"purpose": "PR check #12 (GitHub run 7)", "since": ago(2)}]})
+        waiting = w.snapshot()["building"][0]["progress"]
+        self.assertTrue(waiting["waiting_machine"])
+        self.assertEqual(waiting["phase"]["label"], "Waiting for the machine reservation")
 
     def test_time_left_uses_job_runtime_and_excludes_shorter_or_cancelled_jobs(self):
         ledger = self.watch().store

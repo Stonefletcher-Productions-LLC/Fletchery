@@ -220,7 +220,8 @@
     if (!progress) return null;
     const {phase, last_output: output, eta = {}} = progress;
     const count = eta.samples + (eta.samples === 1 ? ' past check' : ' past checks') + (eta.same_pr ? ' on this PR' : '');
-    const estimate = eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
+    const estimate = progress.waiting_machine ? 'Finish time depends on when the machine becomes available' :
+      eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
       eta.samples ? 'Running longer than the last ' + eta.samples + (eta.samples === 1 ? ' comparable job' : ' comparable jobs') :
       'No timing history for this job yet';
     return el('div', {class: 'build-detail'}, phase ?
