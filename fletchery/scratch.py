@@ -158,6 +158,15 @@ WORK_PREFIXES = ("unreal", "shadercompile", "ue4", "ue5")
 SIBLING_SUFFIXES = ("logs", "log", "out", "output", "results", "result", "captures", "capture")
 
 
+class Blind(RuntimeError):
+    """Some programs' command lines cannot be read (another account, or run as administrator), so which folders they
+    use is unknown. Carries what could be read: a pass then looks but changes nothing in the scratch folders."""
+
+    def __init__(self, message: str, lines: list[str], hidden: list[str]):
+        super().__init__(message)
+        self.lines, self.hidden = lines, hidden
+
+
 def readable_lines(rows: list[tuple[int, str, str]], own_pid: int | None = None) -> list[str]:
     """Command lines (forward slashes, lower case) from (pid, image name, command line) rows. Raises unless the list
     is provably whole: on SF-NODE-01 (2026-11-17) the worker's scheduled task saw no command line for two running
@@ -175,8 +184,8 @@ def readable_lines(rows: list[tuple[int, str, str]], own_pid: int | None = None)
         raise RuntimeError("Cannot list running processes: this pass's own process is missing from the list")
     if hidden:
         names = ", ".join(sorted(set(hidden))[:6])
-        raise RuntimeError(f"Cannot read the command line of {len(hidden)} running program(s) ({names}); "
-                           "run the cleanup as the account that runs the jobs")
+        raise Blind(f"Cannot read the command line of {len(hidden)} running program(s) ({names}); "
+                    "run the cleanup as the account that runs the jobs", lines, sorted(set(hidden)))
     return lines
 
 
@@ -381,7 +390,7 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
     moved. `quarantine_dir` defaults to "lifeshare-quarantine" beside each root."""
     summary = {"checked_at": _now_iso(), "mode": mode, "dry_run": bool(dry_run), "urgent": bool(urgent),
                "freed_bytes": 0, "trimmed": [], "removed": [], "kept": [], "attention": [], "error": "",
-               "planned": [], "quarantined": [], "listed": []}
+               "planned": [], "quarantined": [], "listed": [], "waiting": ""}
     keep = [*keep, *ALWAYS_KEEP]
     if mode not in MODES:
         summary["error"] = f"Unknown scratch mode {mode!r}"
@@ -389,11 +398,22 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
     if mode == "off" or not roots:
         return summary
     act = mode in ("trim", "remove")
+    purge_dry = dry_run
     now = time.time() if now is None else now
     trim_after = min(float(trim_hours), URGENT_TRIM_HOURS) if urgent else float(trim_hours)
     try:
         if lines is None:
-            lines = command_lines()
+            try:
+                lines = command_lines()
+            except Blind as exc:
+                # Programs this account cannot see into (another account, or run as administrator) may be working in
+                # any scratch folder: look, list and size, but trim, move and remove nothing until they are gone.
+                # The quarantine is still purged on time: nothing runs in a folder that was moved there days ago.
+                lines, act, purge_dry = exc.lines, False, dry_run
+                dry_run = True
+                summary["waiting"] = (f"Changed nothing this pass: {len(exc.hidden)} kind(s) of program are running that "
+                                      f"Fletchery cannot see into ({', '.join(exc.hidden[:4])}), so it cannot tell which "
+                                      "folders they use. It tries again next pass.")
         # The receipt shows what the pass could see: how many command lines, and which folders they name (kept or
         # not), so a pass that is blind to running jobs is visible before it matters.
         summary["processes"], summary["named"] = len(lines), []
@@ -511,7 +531,7 @@ def retain(roots, keep=(), mode: str = "trim", trim_hours: float = 24.0, remove_
                     continue
                 seen_q.add(str(qroot))
                 backup_to = backup_root if backup_root else None
-                _purge(qroot, now, dry_run, backup_to, summary)
+                _purge(qroot, now, purge_dry, backup_to, summary)
         if plan_file:
             _write_plan(plan_file, summary["planned"])
     except Exception as exc:

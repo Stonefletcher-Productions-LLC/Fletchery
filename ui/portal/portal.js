@@ -243,8 +243,8 @@
         el('p', {class: 'sub', text: d.machines.filter(m => m.online).length + ' of ' + d.machines.length + ' online · ' +
           d.jobs.filter(j => j.state === 'running').length + ' running, ' + d.jobs.filter(j => j.state === 'queued').length + ' queued'})) : null,
       sc.checked_at ? el('li', null, el('div', {class: 'title', text: 'Scratch clean-up'}),
-        el('span', {class: 'chip ' + (sc.error ? 'bad' : ''), text: sc.error ? 'Stopped' : sc.mode || 'on'}),
-        el('p', {class: 'sub', text: sc.error || ('Last ran ' + ago(sc.checked_at) + (sc.freed_gb ? ', freed ' + sc.freed_gb + ' GB' : ''))})) : null,
+        el('span', {class: 'chip ' + (sc.error ? 'bad' : sc.waiting ? 'wait' : ''), text: sc.error ? 'Stopped' : sc.waiting ? 'Waiting' : sc.mode || 'on'}),
+        el('p', {class: 'sub', text: sc.error || sc.waiting || ('Last ran ' + ago(sc.checked_at) + (sc.freed_gb ? ', freed ' + sc.freed_gb + ' GB' : ''))})) : null,
       ...d.errors.map(t => el('li', null, el('div', {class: 'title', text: 'Problem'}), el('p', {class: 'sub', text: t})))].filter(Boolean), '');
     fill($('log'), d.log.slice().reverse().map(r => el('li', null, el('time', {text: when(r.at)}), r.line)), 'Nothing yet.');
   }

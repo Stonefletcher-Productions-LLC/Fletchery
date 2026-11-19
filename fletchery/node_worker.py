@@ -455,6 +455,8 @@ def scratch_pass(cfg: dict, log=print) -> dict:
         log(f"scratch: trimmed {len(found['trimmed'])} build-output folders, quarantined "
             f"{len(found.get('quarantined') or [])} idle worktrees, removed {len(found['removed'])} from quarantine, "
             f"{found['freed_bytes'] / 2**30:.1f} GB")
+    if found.get("waiting"):
+        log(f"scratch: {found['waiting']}")
     if found.get("error"):
         log(f"scratch: stopped: {found['error']}")
     return found

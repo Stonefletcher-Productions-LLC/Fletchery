@@ -304,6 +304,23 @@ class ScratchTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "own process"):
             scratch.readable_lines([], 10)
 
+    def test_programs_it_cannot_see_into_make_a_pass_that_changes_nothing(self):
+        wt = self.worktree("idle")
+        original = scratch.command_lines
+        scratch.command_lines = lambda: (_ for _ in ()).throw(
+            scratch.Blind("Cannot read the command line of 2 running program(s)", ["pythonw c:/node/node_worker.py"], ["cmd.exe", "powershell.exe"]))
+        try:
+            summary = scratch.retain([str(self.root)], mode="remove", now=self.later)
+        finally:
+            scratch.command_lines = original
+        self.assertEqual(summary["error"], "")
+        self.assertIn("cannot see into (cmd.exe, powershell.exe)", summary["waiting"])
+        self.assertEqual(summary["freed_bytes"], 0)
+        self.assertEqual([q for q in summary["quarantined"] if q.get("to")], [])
+        self.assertTrue((wt / "Intermediate").exists())          # nothing trimmed
+        self.assertTrue(wt.exists())
+        self.assertIsInstance(scratch.Blind("x", [], []), RuntimeError)
+
     def test_a_job_writing_only_to_the_results_folder_keeps_its_worktree(self):
         wt = self.worktree("audit")
         results = self.root / (wt.name + "-results")

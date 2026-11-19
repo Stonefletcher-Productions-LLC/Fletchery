@@ -254,12 +254,16 @@ class App:
                                    backup_dir=c.scratch_backup_dir or str(self.state_dir / "scratch-backups"),
                                    plan_file=str(self.state_dir / "scratch-plan.json"))
             self.scratch_last = {"checked_at": found["checked_at"], "mode": found["mode"], "error": found["error"],
+                                 "waiting": found.get("waiting") or "",
                                  "freed_gb": round(found["freed_bytes"] / 1024 ** 3, 1), "trimmed": len(found["trimmed"]),
                                  "quarantined": len(found["quarantined"]), "removed": len(found["removed"])}
             if found["freed_bytes"] or found["quarantined"]:
                 self.log(f"Scratch: trimmed {len(found['trimmed'])} build-output folders, quarantined "
                          f"{len(found['quarantined'])} idle worktrees, removed {len(found['removed'])} "
                          f"({found['freed_bytes'] / 1024 ** 3:.1f} GiB)")
+            if found.get("waiting") and found["waiting"] != getattr(self, "_scratch_waiting", ""):
+                self.log(f"Scratch: {found['waiting']}")
+            self._scratch_waiting = found.get("waiting") or ""
             if found["error"]:
                 self.log(f"Scratch: stopped: {found['error']}")
         except Exception as e:
