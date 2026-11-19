@@ -21,6 +21,8 @@ Fletchery's own builds ─┘     store.py (SQLite history, 90 days)      └─
   kinds, agent branch prefixes, alert limits, failure-cause patterns). A new repository, project, agent or machine needs
   no code change; a new kind of source (Perforce, Horde, Jenkins) is one class with `poll()`.
 - Polling, not webhooks: a webhook needs a public address, and Fletchery is tailnet-only.
+- Each poll revalidates checks for every distinct open PR head in a repository, including completed checks.
+  GitHub's ETag lets the poll reuse unchanged results. The newest attempt for each check determines the PR's state.
 
 ## Records
 
