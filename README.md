@@ -28,7 +28,7 @@ the top right.
 
 | Tab | What it shows |
 |---|---|
-| **Live** | **Building now** (every build on every machine, whether Fletchery or a GitHub job started it), **Agents** (one row per Claude or Codex branch active in the last day: its PR or branch, what it waits on, when it last moved), **Stuck or blocked**, **Machines** (what each one is doing, CPU, RAM, disk), **Runners** (online, busy, idle, with the job and step), **GitHub Actions** runs with the current step, **Open pull requests** with their checks, and **Tasks and issues**. With several projects, chips under the numbers show one at a time. |
+| **Live** | **Flow** at the top (is work moving: merges in the last hour and day, time since the last merge into each base branch, PR-to-merge time, wait for a machine, how often a base branch went red, and a plain verdict: Moving, Slow, Stopped or Idle), **Building now** (every build on every machine, whether Fletchery or a GitHub job started it), **Agents** (one row per Claude or Codex branch active in the last day: its PR or branch, what it waits on, when it last moved), **Stuck or blocked**, **Machines** (what each one is doing, CPU, RAM, disk), **Runners** (online, busy, idle, with the job and step), **GitHub Actions** runs with the current step, **Open pull requests** with their checks, and **Tasks and issues**. With several projects, chips under the numbers show one at a time. |
 | **Builds** | **Running and coming up**, **Start a build** (version and branch; later, daily or with the Full tests under *Later, daily or with Full tests*), **Finished builds** with their download links, and the **Build machines** |
 | **Activity** | Health (up since, code version, GitHub reads, build machines), **Check GitHub now**, **Restart the backend**, and the log of everything done, including who did it ("from the window" or "from the phone") |
 
@@ -50,6 +50,9 @@ list GitHub refuses (no `admin:org` scope) is asked again hourly, and those runn
   <img src="docs/images/fletchery/desktop-builds.png" width="49%" alt="The Builds tab on the desktop: running and coming up, start a build, finished builds and build machines">
   <img src="docs/images/fletchery/desktop-activity.png" width="49%" alt="The Activity tab on the desktop: health with Check GitHub now and Restart Fletchery, then the activity log">
 </p>
+
+**Remembers.** What happened (merges, finished runs, job waits) is kept 90 days in `fletchery.db` in the state
+folder, so the Flow numbers survive a restart. How it all fits together: [DESIGN.md](docs/DESIGN.md).
 
 ## Controls
 

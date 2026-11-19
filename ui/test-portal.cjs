@@ -124,6 +124,10 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
     assert.match(await page.textContent('#liveParked'), /1 issue parked until other work lands \(not stuck\): #42/);
     assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
+    // Flow: is work moving? A verdict with its reason, the numbers, 24 hourly bars.
+    assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*Wait for a machine7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
+    assert.equal(await page.$$eval('#liveFlow .hours i', l => l.length), 24);
+    assert.match(await page.getAttribute('#liveFlow .hours', 'aria-label'), /^Merges per hour, last 24 hours: 0, 0, 1/);
     assert.ok(await fits(), 'Live fits the phone');
     for (const box of await page.$$eval('.tabs button, #bell, #refreshTop', list => list.map(b => b.getBoundingClientRect().toJSON()))) {
       assert.ok(box.width >= 44 && box.height >= 44, 'touch target ' + JSON.stringify(box));
@@ -147,6 +151,7 @@ const server = http.createServer((req, res) => {
       await page.locator('#liveAgentsCard').screenshot({path: path.join(shots, 'portal-agents.png')});
       await page.locator('#liveChangesCard').screenshot({path: path.join(shots, 'portal-changes.png')});
       await page.locator('#liveMachinesCard').screenshot({path: path.join(shots, 'portal-machines.png')});
+      await page.locator('#liveFlow').screenshot({path: path.join(shots, 'portal-flow.png')});
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = ''; }), bars);
     }
 
