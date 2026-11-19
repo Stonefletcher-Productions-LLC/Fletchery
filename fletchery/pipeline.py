@@ -105,7 +105,11 @@ def group(checks: list) -> dict:
     status = ("failed" if failed else "running" if any(c.get("status") == "in_progress" for c in going) else
               "queued" if going else "rerun" if cancelled else "done")
     completed = max((c.get("completed_at") or "" for c in checks), default="") if status == "done" else ""
-    return {"status": status, "started": started, "completed": completed, "failed": [_text(c.get("name"), 80) for c in failed][:3]}
+    # When a failed or cancelled set stopped: its clock stops there, so the bar doesn't keep counting while it waits.
+    stopped = max((c.get("completed_at") or "" for c in (failed if status == "failed" else cancelled)), default="") \
+        if status in ("failed", "rerun") else ""
+    return {"status": status, "started": started, "completed": completed, "stopped": stopped,
+            "failed": [_text(c.get("name"), 80) for c in failed][:3]}
 
 
 def steps_of(job: dict | None) -> list:
@@ -323,7 +327,10 @@ def open_change(h: History, rules: Rules, repo: str, pr: dict, checks: list, job
     elif status == "rerun":
         note = "A check was cancelled or gave no result. Re-run it from the PR."
     machine = machine_of((job or {}).get("runner_name") or "") if job and job.get("runner_name") else ""
-    step = _step(h, repo, kind, cur, started, at, machine, job) if cur in TIMED and started else None
+    stopped = (q if cur == "quick" else b).get("stopped") if status in ("failed", "rerun") and cur in ("quick", "build") else ""
+    step = _step(h, repo, kind, cur, started, ts(stopped) if stopped else at, machine, job) if cur in TIMED and started else None
+    if step and stopped:
+        step["late"], step["left"], step["stopped"] = False, None, _text(stopped, 30)
     if status == "queued" and cur in TIMED:
         avg, _ = h.estimate((cur, repo, kind))
         step = {"elapsed": 0, "avg": round(avg) if avg else None, "pct": 0 if avg else None, "left": round(avg) if avg else None,
@@ -332,7 +339,8 @@ def open_change(h: History, rules: Rules, repo: str, pr: dict, checks: list, job
             "url": _text(pr.get("html_url"), 300), "kind": kind, "base": base, "merged": False,
             "stage": cur, "status": status, "stages": _stages(base, states), "step": step,
             "overall": _overall(h, repo, kind, states, cur, step), "note": note, "auto_merge": bool(pr.get("auto_merge")),
-            "why": WHY.get(cur, "").format(base=base or "the main branch"), "updated": _text(pr.get("updated_at"), 30)}
+            "why": WHY.get(cur, "").format(base=base or "the main branch"), "updated": _text(pr.get("updated_at"), 30),
+            **({"since": _text(stopped, 30)} if stopped else {})}
 
 
 def merged_change(h: History, rules: Rules, repo: str, pr: dict, runs: list, jobs_by_run: dict, releases: list,

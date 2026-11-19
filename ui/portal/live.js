@@ -138,7 +138,14 @@
       ? meter('Overall', o.pct, o.pct + '%' + (o.left ? ' · ~' + mins(o.left) + ' ' + end : ''), c.status === 'failed' ? 'bad' : '')
       : el('p', {class: 'sub', text: 'Overall: still learning how long each step takes here.'});
     let here = null;
-    if (step && step.avg) {
+    const stopped = c.status === 'failed' || c.status === 'rerun';
+    if (stopped && c.since) {
+      // A failed or cancelled step's clock stops when it stopped; what counts now is how long it has waited.
+      const clock = new Date(c.since).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+      here = el('p', {class: 'sub stopped'}, ...sep(join(
+        step && step.elapsed ? 'This step ' + (c.status === 'failed' ? 'failed' : 'stopped') + ' after ' + mins(step.elapsed) : '',
+        [c.status === 'failed' ? 'Waiting for a fix since ' : 'Waiting for a re-run since ', clock, ' (', since(c.since), ')'])));
+    } else if (step && step.avg) {
       const cls = c.status === 'failed' ? 'bad' : step.late ? 'late' : 'step';
       here = meter('This step', step.late ? 100 : step.pct, mins(step.elapsed) + ' of ~' + mins(step.avg), cls);
     } else if (step && step.elapsed) {

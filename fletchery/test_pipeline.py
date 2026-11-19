@@ -149,6 +149,18 @@ class OpenChanges(unittest.TestCase):
         self.assertIn("by itself", ok["note"])
         self.assertIn("someone", self.change(pr(auto=False), [check(1, "Cheap checks"), check(2, "Compile and test")])["note"])
 
+    def test_failed_step_clock_stops_when_it_failed(self):
+        # #2263, 2026-11-19: Quick checks failed, yet the bar kept counting ("2 h 20 min of ~1 min", "Taking longer").
+        c = self.change(pr(), [check(1, "Cheap checks", conclusion="failure", start=T0 - 9000, end=T0 - 8100)])
+        st = c["step"]
+        self.assertEqual((c["stage"], c["status"], st["elapsed"], st["late"], st["left"]), ("quick", "failed", 900, False, None))
+        self.assertEqual((c["since"], st["stopped"]), (iso(T0 - 8100), iso(T0 - 8100)))
+        gone = self.change(pr(), [check(1, "Cheap checks"), check(2, "Compile and test", conclusion="cancelled",
+                                                                  start=T0 - 5000, end=T0 - 4000)])
+        self.assertEqual((gone["status"], gone["step"]["elapsed"], gone["since"]), ("rerun", 1000, iso(T0 - 4000)))
+        running = self.change(pr(), [check(1, "Cheap checks", status="in_progress", start=T0 - 60)])
+        self.assertNotIn("since", running)
+
     def test_draft_no_checks_and_still_learning(self):
         self.assertEqual(self.change(pr(draft=True), [])["stage"], "written")
         c = self.change(pr(), [])
