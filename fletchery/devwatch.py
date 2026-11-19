@@ -1077,7 +1077,7 @@ class DevWatch:
         feed_age = _age(last_ok, at) if last_ok else _age(self.started, at)
         if error:
             block("feed", "GitHub can't be read right now", error, since=last_ok, key="feed")
-        elif feed_age > max(180, self.interval * 4):
+        elif feed_age > self.feed_stale_after():
             block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=last_ok, key="feed")
 
         # jobs per runner (from runs still going)
@@ -1483,6 +1483,10 @@ class DevWatch:
         out += [{"name": full.split("/")[-1], "repos": [full]} for low, full in sorted(watched.items()) if low not in used]
         return out
 
+    def feed_stale_after(self) -> float:
+        # A multi-repository poll can itself take longer than the delay between polls.
+        return max(180, self.interval * 4)
+
     def flow_now(self, prs_out: list, at: float) -> dict:
         """The Flow strip (flow.py), worked out at most every 15 s."""
         when, kept = self._flow_cache
@@ -1496,7 +1500,7 @@ class DevWatch:
             kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at,
                                      projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1},
                                      build_queues={r: q for r, q in self.pr_build_queues.items()
-                                                   if q and at - q["at"] <= max(60, 2 * self.interval)})
+                                                   if q and at - q["at"] <= self.feed_stale_after()})
         except Exception as e:
             self.log(f"live: flow: {type(e).__name__}: {e}")
             kept = {}

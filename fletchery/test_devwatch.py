@@ -131,6 +131,9 @@ class Feed(unittest.TestCase):
         row = w.snapshot()["flow"]["all"]["build_queues"][0]
         self.assertEqual(row["waiting"], 1)
         self.assertAlmostEqual(row["oldest"], 45 * 60, delta=3)
+        observed = w.pr_build_queues[REPO]["at"]
+        self.assertEqual(w.flow_now([], observed + 90)["all"]["build_queues"][0]["waiting"], 1)
+        self.assertFalse(w.flow_now([], observed + 181)["all"]["build_queues"])
         w.gh.answers = {f"repos/{REPO}/commits/": devwatch.GitHubError(503, "detail timeout"), **w.gh.answers}
         with self.assertRaises(devwatch.GitHubError):
             w.poll()
