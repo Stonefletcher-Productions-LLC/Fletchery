@@ -52,7 +52,8 @@ could take it is idle or none is online (waiting behind busy runners is a queue,
 check or job over 3 hours, an offline runner, a run that keeps going after its pull request closed, a failed PR check
 (the newest run of each check on the commit), a machine low on disk, and an issue or PR labelled `blocked`,
 `needs-you`/`needs-alex` or `waiting-on…`. A check that was cancelled, or ended "No result" because its machine stayed
-busy, shows as **Needs re-run** on its pull request, with a re-run button, and is not counted. A drive that has been
+busy, shows as **Needs re-run** on its pull request, with a re-run button, and is not counted. When a rerun passes on
+the same commit, the next successful refresh clears that check's failure from **Stuck or blocked**. A drive that has been
 filling for the last hour or two shows when it will be full ("full in ~2.5 h"), and is flagged six hours ahead.
 
 **Alerts, not alarms.** Each row in **Stuck or blocked** says whether it reached the phone. A rule per kind decides

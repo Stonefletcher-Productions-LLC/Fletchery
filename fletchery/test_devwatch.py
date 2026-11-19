@@ -686,12 +686,44 @@ class Feed(unittest.TestCase):
         w.own_builds = lambda: 1 / 0   # a broken hook never loses the feed
         self.assertEqual(len(w.snapshot()["building"]), 1)
 
-    def test_finished_checks_are_not_asked_again(self):
-        w = self.watch()
-        w.gh.asked.clear()
+    def test_rerun_on_same_commit_updates_the_pr_and_its_blocker(self):
+        path = f"repos/{REPO}/commits/{'b' * 40}/check-runs"
+        failed = dict(world()[path]["check_runs"][0], id=11)
+        w = self.watch_first({path: {"check_runs": [failed]}})
+
+        def assert_check(state, blocked):
+            snapshot = w.snapshot()
+            pr = next(p for p in snapshot["prs"] if p["number"] == 13)
+            self.assertEqual(pr["checks"]["state"], state)
+            titles = [b["title"] for b in snapshot["blockers"]]
+            self.assertEqual("PR #13 fails Compile and test" in titles, blocked)
+            self.assertIn("PR #13 is marked blocked", titles)  # Independent label still applies.
+
+        assert_check("failed", True)
+        w.gh.answers[path] = devwatch.GitHubError(0, "timed out")
+        with self.assertRaisesRegex(devwatch.GitHubError, "timed out"):
+            w.poll()
+        assert_check("failed", True)
+        for status, conclusion, expected in (("queued", None, "queued"), ("in_progress", None, "running"),
+                                              ("completed", "success", "passed"), ("completed", "failure", "failed")):
+            with self.subTest(state=expected):
+                latest = dict(failed, id=13 if expected == "failed" else 12, status=status, conclusion=conclusion)
+                w.gh.answers[path] = {"check_runs": [latest, failed]}
+                w.poll()
+                assert_check(expected, expected == "failed")
+
+    def test_new_commit_status_clears_the_previous_failure(self):
+        path = f"repos/{REPO}/commits/{'b' * 40}"
+        status = {"id": 31, "context": "Compile and test", "state": "failure"}
+        w = self.watch_first({path + "/check-runs": {"check_runs": []},
+                              path + "/status": {"statuses": [status]}})
+        self.assertTrue(any(b["kind"] == "check" for b in w.snapshot()["blockers"]))
+        w.gh.answers[path + "/status"] = {"statuses": [dict(status, id=32, state="success")]}
         w.poll()
-        self.assertFalse(any("b" * 40 in p for p in w.gh.asked))
-        self.assertTrue(any("a" * 40 in p for p in w.gh.asked))
+        snapshot = w.snapshot()
+        pr = next(p for p in snapshot["prs"] if p["number"] == 13)
+        self.assertEqual(pr["checks"]["state"], "passed")
+        self.assertFalse(any(b["kind"] == "check" for b in snapshot["blockers"]))
 
     def test_latest_output_remains_during_a_quiet_lease_and_expires_with_the_report(self):
         w = devwatch.DevWatch(github=FakeGitHub({}))
