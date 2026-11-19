@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 
-VERSION = "4"  # includes substeps and photo progress from the reserved checkout
+VERSION = "5"  # reports measured progress of the reserved job's generated-asset uploads
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -338,7 +338,144 @@ def _check_observations(saved: Path, acquired: float, now: float):
             continue
 
 
-def latest_check_output(lease: dict, now: float) -> dict | None:
+_GUID = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
+_PAGE_NAME = re.compile(rf"({_GUID}_{_GUID})_(\d{{1,6}})\.log", re.I)
+_PR_RUN = re.compile(r"PR check #(\d+) \(GitHub run (\d+)\)", re.I)
+_BATCH = re.compile(rb"uploaded (\d{1,9}) of (\d{1,9})")
+_UPLOAD_START = re.compile(rb"LFS: (\d{1,9}) file\(s\) to upload, in batches of \d+\.")
+
+
+def _page_lines(path, tail=False):
+    # The runner flushes chunks which can end halfway through a counter. Use complete lines only.
+    with path.open("rb") as page:
+        if tail:
+            size = page.seek(0, os.SEEK_END)
+            offset = max(size - 65536, 0)
+            page.seek(offset)
+            if offset:
+                page.readline(65536)
+        data = page.read(65536)
+    for line in data.removeprefix(b"\xef\xbb\xbf").split(b"\n")[:-1]:
+        timestamp, _, message = line.rstrip(b"\r").partition(b" ")
+        if not timestamp.endswith(b"Z"):
+            continue
+        try:
+            stamp = datetime.fromisoformat(timestamp[:-1].decode("ascii") + "+00:00").timestamp()
+        except (ValueError, OSError, OverflowError):
+            continue
+        yield stamp, message.strip()
+
+
+def _runner_pages(root, acquired):
+    """Group the local runner's recent page files by job AND step, including numbered rotations."""
+    streams = {}
+    try:
+        with os.scandir(root / "_diag" / "pages") as pages:
+            for entry in pages:
+                match = _PAGE_NAME.fullmatch(entry.name)
+                if not match:
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):
+                    stream = streams.setdefault(match[1], [])
+                    stream.append((int(match[2]), info.st_mtime, Path(entry.path)))
+    except OSError:
+        return []
+    recent = sorted(streams.items(), key=lambda pair: max(page[1] for page in pair[1]), reverse=True)
+    return [(name, sorted(pages)) for name, pages in recent[:4] if max(p[1] for p in pages) >= acquired - 120]
+
+
+def _upload_observation(events, now):
+    # A job-level and step-level stream can contain the exact same batch a few microseconds apart.
+    samples = []
+    stamp, label = 0, ""
+    for observed, message in sorted(events):
+        start = _UPLOAD_START.fullmatch(message)
+        batch = _BATCH.fullmatch(message)
+        if batch or start:
+            done, total = (int(batch[1]), int(batch[2])) if batch else (0, int(start[1]))
+            if not total or done > total:
+                continue
+            if samples and (total != samples[-1][2] or done < samples[-1][1]):
+                samples.clear()
+            if samples and done == samples[-1][1]:
+                continue
+            stamp = observed
+            samples.append((stamp, done, total))
+            label = "Uploaded generated assets" if done == total else "Uploading generated assets"
+        elif message.startswith(b"::error::LFS upload kept failing at file "):
+            stamp, label = observed, "Generated asset upload failed"
+            samples.clear()
+        elif message.startswith(b"== Game scenarios and navigation mapped to the paths "):
+            stamp, label = observed, "Starting game scenarios and navigation checks"
+            samples.clear()
+    if not label:
+        return None
+    result = {"label": label}
+    if samples:
+        stamp, done, total = samples[-1]
+        eta = 0 if done == total else None
+        if done < total and now - stamp <= FRESH:
+            recent = [p for p in samples if stamp - p[0] <= 300]
+            span = stamp - recent[0][0]
+            if len(recent) >= 3 and span >= 20:
+                eta = round((total - done) * span / (done - recent[0][1]))
+        result["upload"] = {"done": done, "total": total, "eta_seconds": eta}
+    return stamp, result
+
+
+def _runner_events(lease, acquired, now, roots, bound):
+    match = _PR_RUN.search(str(lease.get("purpose", "")))
+    if not match:
+        return set()
+    marker = f"Holding the PC for PR check #{match[1]} (GitHub run {match[2]}):".encode()
+    events = set()
+    for root in roots:
+        for stream, pages in _runner_pages(root, acquired):
+            key = (root, stream)
+            try:
+                if key not in bound:
+                    # Search bounded windows for the exact lease acquisition, then remember the stream across rotations.
+                    candidates = dict.fromkeys([p[2] for p in pages[:2] + pages[-2:]])
+                    found = any(acquired - 1 <= stamp <= min(acquired + 120, now) and line.startswith(marker)
+                                for path in candidates for tail in (False, True) for stamp, line in _page_lines(path, tail))
+                    if not found:
+                        continue
+                    bound.add(key)
+                for _, _, path in pages[-2:]:
+                    events.update((stamp, line[:160]) for stamp, line in _page_lines(path, tail=True)
+                                  if acquired <= stamp <= now and line.startswith((
+                                      b"LFS: ", b"uploaded ", b"::error::LFS upload kept failing at file ",
+                                      b"== Game scenarios and navigation mapped to the paths ")))
+            except OSError:
+                continue  # the runner can remove a page after sending it to GitHub
+    return events
+
+
+class RunnerLogProgress:
+    """Keep a lease's observations when the runner removes an uploaded page. Recalculate ETA on every read."""
+    def __init__(self, roots):
+        if isinstance(roots, str):
+            roots = [roots]
+        self.roots = [Path(root) for root in roots[:4] if isinstance(root, str)
+                      and not root.startswith(("\\\\", "//")) and Path(root).is_absolute()] if isinstance(roots, list) else []
+        self.identity = None
+        self.bound = set()
+        self.events = set()
+
+    def latest(self, lease, acquired, now):
+        identity = (lease.get("purpose"), acquired)
+        if identity != self.identity:
+            self.bound.clear()
+            self.events.clear()
+            self.identity = identity
+        self.events.update(_runner_events(lease, acquired, now, self.roots, self.bound))
+        if len(self.events) > 512:
+            self.events = set(sorted(self.events)[-512:])
+        return _upload_observation(self.events, now)
+
+
+def latest_check_output(lease: dict, now: float, runner_logs=None) -> dict | None:
     """Older check scripts have no phase marker. Report the last known tool to write in this lease, by timestamp."""
     try:
         acquired = datetime.fromisoformat(lease["acquiredUtc"].replace("Z", "+00:00")).timestamp()
@@ -354,8 +491,12 @@ def latest_check_output(lease: dict, now: float) -> dict | None:
         for stamp, task in _check_observations(Path(root) / "Saved", acquired, now):
             if acquired <= stamp <= now and stamp >= newest and stamp > 0:
                 newest, label = stamp, task
-    if label:
-        return {"label": label, "at": datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    observation = {"label": label}
+    runner = runner_logs.latest(lease, acquired, now) if runner_logs else None
+    if runner and runner[0] >= newest:
+        newest, observation = runner
+    if newest:
+        return {**observation, "at": datetime.fromtimestamp(newest, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     return None
 
 
@@ -363,6 +504,10 @@ class Reporter:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.lease = Path(cfg["leaseFile"]) if cfg.get("leaseFile") else None
+        roots = cfg.get("runnerRoots")
+        if roots is None:
+            roots = [str(self.lease.parent.parent / "UnrealPR")] if self.lease else []
+        self.runner_logs = RunnerLogProgress(roots)
         self.cpu = Cpu()
         self.idle_since = 0.0
 
@@ -375,8 +520,8 @@ class Reporter:
                 purpose = str(rec.get("purpose") or f"GitHub run {rec.get('runId')}")
                 lease = {"purpose": purpose[:300], "since": str(rec.get("acquiredUtc") or "")[:40],
                          "owner": str(rec.get("owner") or "")[:20], "alive": alive(rec.get("pid"))}
-                if lease["alive"] and re.search(r"PR check #\d+ \(GitHub run \d+\)", purpose, re.I):
-                    latest = latest_check_output(rec, time.time())
+                if lease["alive"] and _PR_RUN.search(purpose):
+                    latest = latest_check_output(rec, time.time(), self.runner_logs)
                     if latest:
                         lease["last_output"] = latest
             folder = self.lease.parent

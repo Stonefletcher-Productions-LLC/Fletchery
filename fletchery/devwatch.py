@@ -191,6 +191,18 @@ def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def _upload_progress(raw, age: float) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    done, total = raw.get("done"), raw.get("total")
+    if type(done) is not int or type(total) is not int or not (0 <= done <= total and total > 0):
+        return None
+    eta = raw.get("eta_seconds")
+    if type(eta) is not int or eta < 0 or age > 120 or done in (0, total):
+        eta = None
+    return {"done": done, "total": total, "eta_seconds": eta}
+
+
 def _holder_name(path) -> str:
     """A folder's last two parts ("lifeshare-scratch\\wt-bus-lines"): enough to know it, without the machine's path."""
     parts = [p for p in re.split(r"[\\/]+", str(path or "")) if p and not re.fullmatch(r"[A-Za-z]:", p)]
@@ -1703,6 +1715,9 @@ class DevWatch:
                 if (age <= REPORT_STALE and lease.get("alive") and isinstance(output, dict) and output.get("label")
                         and 0 < _ts(lease.get("since")) <= _ts(output.get("at")) <= at):
                     acts[-1]["last_output"] = {"label": _scrub(output.get("label"), 80), "at": _text(output.get("at"), 40)}
+                    upload = _upload_progress(output.get("upload"), at - _ts(output["at"]))
+                    if upload is not None:
+                        acts[-1]["last_output"]["upload"] = upload
                 held = _age(lease.get("since"), at)
                 if lease.get("alive") is False:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" holds the machine but its process is gone",

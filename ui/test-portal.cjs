@@ -32,9 +32,10 @@ let mode = 'phone';   // phone | readonly | desktop: what the backend tells this
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
 let down = false;
 const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.json'), 'utf8'));   // devwatch.py's own output
+const uploadOutput = {label: 'Uploading generated assets', at: ago(0), upload: {done: 2160, total: 11391, eta_seconds: 1080}};
 Object.assign(live.building[0], {change: 'Acme/Game#12', job_name: 'Compile and test', step: 'Build editor',
   step_started: new Date(Date.now() - 60000).toISOString(), steps_done: 2, steps_total: 5,
-  progress: {phase: {label: 'Importing environments', since: new Date().toISOString()}, eta: {seconds: 720, samples: 3, same_pr: true}}});
+  progress: {phase: {label: 'Importing environments', since: ago(1)}, last_output: uploadOutput, eta: {seconds: 720, samples: 3, same_pr: true}}});
 let liveAt = new Date().toISOString();
 let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
@@ -175,7 +176,10 @@ const server = http.createServer((req, res) => {
     await page.click('#liveBlockers .more-btn');
     assert.equal(await page.$$eval('#liveBlockers > li.blk:not([hidden])', l => l.length), 6);
     await page.click('#liveBlockers .more-btn');
-    if (shots) { await page.evaluate(() => window.scrollTo(0, 0)); await page.waitForTimeout(200); } if (shots) await page.screenshot({path: path.join(shots, 'portal-live.png')});
+    if (shots) {
+      await page.locator('#liveBuildingCard').evaluate(card => card.scrollIntoView({block: 'center'}));
+      await page.screenshot({path: path.join(shots, 'portal-live.png')});
+    }
     if (shots) {   // the Agents card alone, without the fixed header and tab bar over it
       const bars = 'header.top, nav.tabs';
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = 'hidden'; }), bars);
@@ -225,10 +229,18 @@ const server = http.createServer((req, res) => {
 
     // Live shows every build going on, on any machine, at the top.
     assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
-    assert.equal(await page.locator('#liveBuilding [role=progressbar]').count(), 0);
-    assert.equal(await page.locator('#liveBuilding li p').first().textContent(), 'Importing environments');
-    assert.match(await page.textContent('#liveBuilding'), /Importing environments[\s\S]*About 12 min left in this job · 3 past checks on this PR/);
     const activeJob = live.building[0];
+    const refreshLive = () => page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    assert.equal(await page.locator('#liveBuilding li p').first().textContent(), 'Uploading generated assets');
+    const meter = page.locator('#liveBuilding').getByRole('progressbar', {name: 'Files uploaded'});
+    assert.equal(await meter.getAttribute('aria-valuetext'), '2,160 of 11,391 files uploaded');
+    assert.match(await page.innerText('#liveBuilding'), /19%[\s\S]*About 18 min left in the upload[\s\S]*Importing environments started/);
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /left in this job/);
+    live.building[0] = {...activeJob, progress: {...activeJob.progress, last_output: {...uploadOutput, at: ago(3)}}};
+    await refreshLive();
+    await page.waitForFunction(() => document.querySelector('#liveBuilding .task-title').textContent === 'Importing environments');
+    assert.equal(await meter.count(), 0, 'an upload from before the current phase cannot supply its meter');
+    assert.match(await page.textContent('#liveBuilding'), /About 12 min left in this job · 3 past checks on this PR/);
     const latestOutput = {label: 'Building the town', at: ago(8)};
     const rawJob = {kind: 'check', title: 'PR check #12 (GitHub run 7): PrCheckJob.ps1',
       since: ago(45), reservation_holder: true, machine: 'Gaming PC', last_output: latestOutput};
@@ -242,6 +254,20 @@ const server = http.createServer((req, res) => {
     assert.match(await page.innerText('#baseBanner'), /Merged before the failure/);
     assert.doesNotMatch(await page.innerText('#baseBanner'), /First bad/);
     suspect.first_bad = true;
+    const rawUpload = output => ({...rawJob, last_output: output});
+    live.building[0] = rawUpload({...uploadOutput, at: ago(3)});
+    await refreshLive();
+    await meter.waitFor();
+    assert.match(await page.innerText('#liveBuilding'), /2,160 of 11,391 files uploaded[\s\S]*Waiting for a new upload update[\s\S]*Last upload update 3 min ago/);
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /18 min|GitHub steps/);
+    live.building[0] = rawUpload({...uploadOutput, upload: {...uploadOutput.upload, eta_seconds: null}});
+    await refreshLive();
+    await page.getByText('Upload time remaining is still unknown', {exact: true}).waitFor();
+    live.building[0] = rawUpload({...uploadOutput, upload: {...uploadOutput.upload, done: 11391}});
+    await refreshLive();
+    await page.getByText('Upload complete', {exact: true}).waitFor();
+    assert.match(await page.innerText('#liveBuilding'), /11,391 of 11,391 files uploaded[\s\S]*100%/);
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /min left|Finish time/);
     live.building[0] = {...rawJob, kind: 'queued', progress: {waiting_machine: true, phase: {label: 'Waiting for the machine reservation', since: liveAt},
       reservation: {holder: 'Lake photographs', machine: 'Gaming PC', since: liveAt, ahead: 0, start_in: 900,
         release: {basis: 'step', samples: 1, failed: 1, url: gh + '/actions/runs/91'}}}};
@@ -377,7 +403,12 @@ const server = http.createServer((req, res) => {
     await tab.click('#bell');
     await tab.waitForSelector('#installSteps:not([hidden])');
     assert.match(await tab.textContent('#installSteps'), /Add to Home Screen/);
-    if (shots) { await tab.click('#notifyClose'); await tab.click('#tab-live'); await tab.waitForSelector('#liveMachines .m-name'); await tab.screenshot({path: path.join(shots, 'portal-live-dark.png')}); }
+    if (shots) {
+      await tab.click('#notifyClose');
+      await tab.click('#tab-live');
+      await tab.locator('#liveBuildingCard').evaluate(card => card.scrollIntoView({block: 'center'}));
+      await tab.screenshot({path: path.join(shots, 'portal-live-dark.png')});
+    }
 
     // The desktop window: one row of tabs at the top, never the phone's bar at the bottom, at any width.
     mode = 'desktop';
@@ -418,7 +449,8 @@ const server = http.createServer((req, res) => {
     await win.click('#tab-live');
     await win.waitForSelector('#liveMachines .m-name');
     assert.equal(await win.$$eval('#view-live .cols > .col', l => l.filter(c => c.offsetWidth > 0).length), 2, 'two columns on a wide window');
-    assert.equal(await win.locator('#liveBuilding .task-title').innerText(), 'Importing environments');
+    assert.equal(await win.locator('#liveBuilding .task-title').innerText(), 'Uploading generated assets');
+    assert.match(await win.innerText('#liveBuilding'), /2,160 of 11,391 files uploaded[\s\S]*About 18 min left in the upload/);
     assert.deepEqual(await where('liveBuildingCard'), [0, 0]);
     assert.deepEqual(await where('liveMachinesCard'), [1, 0]);
     const g = await win.$('#liveMachinesCard .grip');

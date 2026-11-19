@@ -18,6 +18,7 @@ During Build and test it also shows the phase reported by the machine and a roug
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
 The live check card leads with what the machine is doing. Between phase reports, the latest observed tool
 activity and its timestamp stay visible for the current reservation.
+During a Git LFS upload, the card shows how many files have uploaded and estimates the time left in the upload from recent batches.
 When a PR waits for a machine reservation, the card names the holder, shows the PR's place in the machine's queue
 and estimates when it can start from earlier holds or comparable workflow timings when available.
 

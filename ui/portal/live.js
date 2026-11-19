@@ -5,6 +5,7 @@
   'use strict';
   const OPEN_MS = 5000, BACK_MS = 30000, RETRY_MS = 3000, WAIT_MS = 12000;
   const STALE_S = 45;          // the feed answered, but its own data is older than this: say so
+  const UPLOAD_ETA_FRESH_S = 120;
   const KEEP = 'fletchery-live-last';
   const $ = id => document.getElementById(id);
   let last = null, lastOk = 0, failed = '', timer = 0, tab = (location.hash.slice(1) || 'live');
@@ -43,9 +44,15 @@
   // Times tick on the phone between reads: a <span data-since> shows "for 12 min", <span data-ago> "3 min ago".
   const since = iso => isFinite(secs(iso)) ? el('span', {'data-since': iso, text: span(secs(iso))}) : '';
   const ago = iso => isFinite(secs(iso)) ? el('span', {'data-ago': iso, text: span(secs(iso)) + ' ago'}) : '';
+  function expireUploadEstimate(node) {
+    if (secs(node.dataset.uploadAt) <= UPLOAD_ETA_FRESH_S) return;
+    node.textContent = 'Waiting for a new upload update to estimate time left';
+    delete node.dataset.uploadAt;
+  }
   function tick() {
     document.querySelectorAll('#view-live [data-since]').forEach(n => { n.textContent = span(secs(n.dataset.since)); });
     document.querySelectorAll('#view-live [data-ago]').forEach(n => { n.textContent = span(secs(n.dataset.ago)) + ' ago'; });
+    document.querySelectorAll('[data-upload-at]').forEach(expireUploadEstimate);
     stale();
   }
   const KIND = {check: 'PR check', merging: 'Merging', proof: 'Proof', building: 'Building', importing: 'Importing',
@@ -236,6 +243,26 @@
         release.basis === 'step' ? ' including any wait inside the step' : '',
         release.failed ? ' · ' + release.failed + ' ended in failure' : '') : null);
   }
+  function uploadDetail(output) {
+    const u = output?.upload;
+    if (!u || !Number.isSafeInteger(u.done) || !Number.isSafeInteger(u.total) ||
+        u.total <= 0 || u.done < 0 || u.done > u.total || !Number.isFinite(secs(output.at))) return null;
+    const complete = u.done === u.total;
+    const percent = complete ? 100 : Math.min(99, Math.round(100 * u.done / u.total));
+    const files = u.done.toLocaleString() + ' of ' + u.total.toLocaleString() + (u.total === 1 ? ' file uploaded' : ' files uploaded');
+    let eta;
+    if (!complete) {
+      const estimate = Number.isFinite(u.eta_seconds) && u.eta_seconds >= 0 ?
+        'About ' + mins(u.eta_seconds) + ' left in the upload' : 'Upload time remaining is still unknown';
+      eta = el('p', {class: 'upload-eta', 'data-upload-at': output.at, text: estimate});
+      expireUploadEstimate(eta);
+    }
+    return el('div', {class: 'upload-progress'},
+      el('p', {class: 'task-title', text: complete ? 'Upload complete' : output.label}),
+      el('div', {class: 'upload-count'}, el('span', {text: files}), el('b', {text: percent + '%'})),
+      el('progress', {max: u.total, value: u.done, 'aria-label': 'Files uploaded', 'aria-valuetext': files}),
+      eta, el('p', {class: 'sub'}, 'Last upload update ', ago(output.at)));
+  }
   function buildDetail(progress, job) {
     if (!progress) return null;
     const {phase, last_output: output, eta = {}} = progress;
@@ -243,6 +270,8 @@
     const label = waiting ? 'Waiting for ' + (progress.reservation?.machine || job.machine || 'a machine') :
       phase?.label || output?.label || job.step || 'Machine reserved for the PR check';
     const observed = output && !waiting;
+    // A later phase supersedes a transfer recorded earlier in the same check.
+    const upload = observed && (!phase?.since || Date.parse(output.at) >= Date.parse(phase.since)) ? uploadDetail(output) : null;
     const count = eta.samples + (eta.samples === 1 ? ' past check' : ' past checks') + (eta.same_pr ? ' on this PR' : '');
     const estimate = waiting ? 'Start time unknown until the machine reports its reservation' :
       eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
@@ -250,16 +279,16 @@
       'Finish time unknown · no comparable timing yet';
     let timing;
     if (waiting && (phase?.since || job.since)) timing = ['Waiting for ', since(phase?.since || job.since)];
-    else if (phase?.since) timing = ['Phase started ', ago(phase.since)];
+    else if (phase?.since) timing = [upload ? phase.label + ' started ' : 'Phase started ', ago(phase.since)];
     else if (job.step_started) timing = ['In this step for ', since(job.step_started)];
     else if (job.reservation_holder && job.since) timing = ['Machine held for ', since(job.since)];
     const status = join(timing, !waiting && !phase && !observed ? 'Waiting for a task update from the runner' : '');
     return el('div', {class: 'build-detail'},
-      el('p', {class: 'task-title', text: label}),
-      observed ? el('p', {class: 'sub'}, phase ? ['Latest output · ', output.label, ' · '] : 'Last observed activity · ',
+      upload || el('p', {class: 'task-title', text: label}),
+      observed && !upload ? el('p', {class: 'sub'}, phase ? ['Latest output · ', output.label, ' · '] : 'Last observed activity · ',
         ago(output.at)) : null,
       status.length ? el('p', {class: 'sub'}, ...sep(status)) : null,
-      waiting && progress.reservation ? reservationDetail(progress.reservation) :
+      upload ? null : waiting && progress.reservation ? reservationDetail(progress.reservation) :
         el('p', {class: 'sub', text: estimate}));
   }
   function githubSteps(x) {
