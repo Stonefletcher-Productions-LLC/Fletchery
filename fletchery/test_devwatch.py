@@ -472,6 +472,28 @@ class Feed(unittest.TestCase):
         self.assertIn("diskfc:SF-NODE-01:E:", {a["key"] for a in s["alerts"]["pending"]})
         self.assertTrue(all(b["alert"]["state"] in ("firing", "pending", "off") for b in s["blockers"]))
 
+    def test_step_times_are_learned_from_past_runs_once(self):
+        runs = {"workflow_runs": [
+            {"id": 100 + i, "name": "PR check", "event": "pull_request", "status": "completed", "conclusion": "success",
+             "display_title": "Town surfaces", "head_branch": "claude/town", "pull_requests": [{"number": 50 + i}],
+             "created_at": ago(300 + i), "run_started_at": ago(300 + i), "updated_at": ago(240 + i)} for i in range(4)]
+            + [{"id": 99, "name": "Docs", "event": "schedule", "status": "completed", "conclusion": "success"}]}
+        answers = {f"repos/{REPO}/actions/runs/{100 + i}/jobs": {"jobs": [
+            {"id": 1000 + i, "name": "Cheap checks", "status": "completed", "conclusion": "success", "runner_name": "ALEX-PC-unreal-light",
+             "started_at": ago(300), "completed_at": ago(296)},
+            {"id": 2000 + i, "name": "Compile and test", "status": "completed", "conclusion": "success", "runner_name": "ALEX-PC-unreal-pr",
+             "started_at": ago(295), "completed_at": ago(255), "steps": [{"name": "Build editor", "status": "completed", "conclusion": "success",
+                                                                         "started_at": ago(294), "completed_at": ago(270)}]}]} for i in range(4)}
+        answers[f"repos/{REPO}/actions/runs"] = runs
+        w = devwatch.DevWatch({}, github=FakeGitHub(answers))
+        w._backfill(REPO)
+        avg, n = w.history.estimate(("build", REPO))
+        self.assertEqual(n, 4)
+        self.assertAlmostEqual(avg, 40 * 60, delta=2)
+        self.assertEqual(w.history.estimate(("quick", REPO))[0], 4 * 60)
+        self.assertEqual(w.store.job_seconds(REPO, "PR check", "Compile and test"), 40 * 60)
+        self.assertIsNone(w.history.estimate(("build", "Acme/Other"))[0])
+
     def test_nothing_merging_is_a_signal(self):
         w = self.watch()
         w.flow_now = lambda prs, at: {"all": {}, "repos": {REPO: {"since_merge": 4 * 3600, "last": [{"at": at - 4 * 3600}],

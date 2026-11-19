@@ -78,6 +78,7 @@ AGENT_ACTIVE_MINUTES = 15   # working now: a heartbeat this recent (or, for an a
 CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
 GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
+BACKFILL_RUNS = 30         # past runs read once at start when a repository has no step times yet
 RUNNER_REFUSED_RETRY = 3600   # a runner list GitHub refused (no admin rights) is asked again after an hour
 LIMITS = {                 # seconds before something counts as stuck
     "queued_run": 20 * 60,      # an Actions run nobody picked up
@@ -474,6 +475,7 @@ class DevWatch:
         # Where each change is in the whole process, and how long its steps usually take (pipeline.py).
         self.rules = pipeline.Rules(conf.get("pipeline"))
         self.history = pipeline.History(Path(state_dir) / "step-times.json" if state_dir else None, log=self.log)
+        self._backfilled: set = set()               # repositories whose past runs were read for step times
         self.merged: dict[str, list] = {}           # repo -> PRs merged in the last day (followed through staging)
         self.releases: dict[str, list] = {}         # repo -> its latest releases
         self.presence = presence.Presence(Path(state_dir) / "agent-presence.json" if state_dir else None, clean=_scrub,
@@ -575,6 +577,10 @@ class DevWatch:
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
             self.runners = {k: v for k, v in found.items() if v is not None}
+        for repo in names:          # nothing known about a repository's times yet: learn from its past runs, once
+            if self.history.path and repo not in self._backfilled and not self.history.estimate(("build", repo))[1]:
+                self._backfilled.add(repo)
+                threading.Thread(target=self._backfill, args=(repo,), name="fletchery-backfill", daemon=True).start()
         try:
             self._learn()
         except Exception as e:      # step times are a nicety: never lose the feed over them
@@ -1250,6 +1256,41 @@ class DevWatch:
 
     def _runner_machine(self, runner_name: str) -> str:
         return self.display(self.machine_of(runner_name)) if runner_name else ""
+
+    def _backfill(self, repo: str) -> None:
+        """Teach the step times (pipeline.History) from a repository's last successful pull-request runs, once per
+        start, when it knows nothing for that repository yet: a fresh install, or samples dropped as unreliable
+        (#235), would otherwise show "no usual time yet" until enough checks finish again. One list call plus one
+        jobs call per run, at most BACKFILL_RUNS."""
+        try:
+            got = self.gh.get(f"repos/{repo}/actions/runs?status=success&per_page=50")
+            runs = [r for r in (got or {}).get("workflow_runs") or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
+            bases = set((self.bases.get(repo) or {}).keys())
+            learned = 0
+            for r in runs:
+                pr_run = str(r.get("event") or "").startswith("pull_request")
+                staging = r.get("event") == "push" and r.get("head_branch") in bases
+                if not (pr_run or staging) or learned >= BACKFILL_RUNS:
+                    continue
+                jobs = [j for j in (self.gh.get(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=50") or {}).get("jobs") or []
+                        if isinstance(j, dict)]
+                learned += 1
+                self.store.runs(repo, [r])
+                self.store.jobs(repo, r, jobs)
+                if staging:
+                    pipeline.learn_staging(self.history, repo, r, jobs)
+                    continue
+                kind = self.rules.kind(r.get("display_title"), (), r.get("head_branch"))
+                number = ((r.get("pull_requests") or [{}])[0] or {}).get("number")
+                pipeline.learn_checks(self.history, repo, kind, f"run{r['id']}",
+                                      [j for j in jobs if self.rules.is_quick(j.get("name"))],
+                                      [j for j in jobs if not self.rules.is_quick(j.get("name"))],
+                                      {j.get("id"): j for j in jobs}, self._runner_machine, number)
+            self.history.save()
+            if learned:
+                self.log(f"live: learned step times for {repo} from {learned} past runs")
+        except Exception as e:      # a nicety: the feed goes on, and times are learned as checks finish
+            self.log(f"live: could not learn past step times for {repo}: {type(e).__name__}: {e}"[:300])
 
     def _learn(self) -> None:
         """Add what finished since the last poll to the step times (pipeline.History), then save them."""
