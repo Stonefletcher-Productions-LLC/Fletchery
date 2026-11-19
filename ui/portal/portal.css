@@ -78,6 +78,9 @@ main { padding: 12px max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-
 .stat span { font-size: 12px; color: var(--muted); }
 .stat.hot { background: var(--blocked-bg); border-color: var(--blocked); }
 .stat.hot b, .stat.hot span { color: var(--blocked); }
+.pr-count-note { font-size: 14px; color: var(--ink); background: var(--hold-bg); border-left: 3px solid var(--hold); border-radius: 4px; padding: 7px 10px; margin-bottom: 10px; overflow-wrap: anywhere; }
+.pr-count-note summary { cursor: pointer; text-decoration: underline; }
+.pr-count-note li { margin-top: 4px; }
 
 .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
 .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; margin-bottom: 6px; }

@@ -12,7 +12,8 @@ doing right now. It flags anything that stopped moving, and it starts, tracks an
 page opens in a desktop window on the PC and as an app on your phone (over Tailscale, never the public internet).
 
 The header shows your GitHub sign-in and selected project. Click the sign-in to switch the account Fletchery uses.
-The open PR total follows the project selection. Building now shows each running check's current GitHub step,
+The open PR total follows the project selection. If GitHub times out, Live marks the total as partial and keeps
+the last confirmed count for each affected repository. Building now shows each running check's current GitHub step,
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
 During Build and test it also shows the phase reported by the machine and a rough time left based on
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.

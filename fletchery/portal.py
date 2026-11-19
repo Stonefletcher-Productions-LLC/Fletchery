@@ -205,7 +205,8 @@ class Portal:
             import devwatch
             client = devwatch.GitHub(accounts.token, self.log, cli_env=accounts.cli_env) if accounts else None
             self.live = devwatch.DevWatch(conf["live"], self.log, github=client,
-                                          state_dir=accounts.live_directory() if accounts else state_dir)
+                                          state_dir=accounts.live_directory() if accounts else state_dir,
+                                          count_account=accounts.login if accounts else "")
         self.push = None
         if conf.get("push") is not None and state_dir is not None:
             import push

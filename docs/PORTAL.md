@@ -191,6 +191,11 @@ It adds a Task Scheduler entry that starts it every 5 minutes if it is not alrea
 itself after a crash or reboot. `reporter.py once --config ...` prints one report without sending it. Builds that
 Fletchery itself runs show under **Building now** without a reporter.
 
+When the open PR total is **Partial**, the note below it names the affected repositories and shows when GitHub
+last confirmed their counts. A repository with no confirmed count contributes nothing to the displayed sum.
+If the selected scope has no known counts, the tile shows a dash. After a backend restart, saved counts become
+available once GitHub confirms which repositories the current sign-in can see.
+
 ## For developers
 
 `fletchery/portal.py` (the server, `can_act()` which decides who may press a button, and `summary()`, which builds what

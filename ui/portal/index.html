@@ -49,6 +49,10 @@
   <section class="view" id="view-live" aria-labelledby="tab-live">
     <div class="alert bad" id="liveStale" role="alert" hidden></div>
     <div class="stats" id="liveStats"></div>
+    <div id="prCountNote" class="pr-count-note" hidden>
+      <p id="prCountSummary"></p>
+      <details id="prCountDetails" hidden><summary id="prCountMore"></summary><ul id="prCountRepos"></ul></details>
+    </div>
     <div class="filters" id="liveRepos" role="group" aria-label="Show one project" hidden></div>
     <section class="flow" id="liveFlow" aria-label="Is work moving?" hidden></section>
     <section class="card" id="liveBuildingCard" aria-labelledby="h-lbuild"><h2 id="h-lbuild">Building now <span class="count" id="n-lbuild"></span></h2><ul class="rows acts" id="liveBuilding"></ul></section>

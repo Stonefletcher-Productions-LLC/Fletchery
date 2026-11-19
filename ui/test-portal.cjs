@@ -524,6 +524,57 @@ const server = http.createServer((req, res) => {
     assert.equal(await solo.isVisible('#liveRepos'), false);      // one project: nothing to choose
     delete live.projects;
 
+    // A failed read can retain a count, leave a repo uncounted, or affect discovery alone.
+    const countTile = solo.locator('#liveStats .stat').nth(2);
+    const redrawCounts = () => solo.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
+    const selectProject = name => solo.getByRole('group', {name: 'Show one project'}).getByRole('button', {name, exact: true}).click();
+    live.pr_count_status = {partial: true, inventory_complete: false, stale: {'Acme/Town': ago(12), 'Acme/Unseen': ''}};
+    await redrawCounts();
+    await solo.locator('#prCountNote:not([hidden])').waitFor();
+    assert.match(await countTile.innerText(), /83\s*open PRs · Partial/);
+    assert.match(await solo.innerText('#prCountSummary'), /Acme\/Town · 81 open PRs last confirmed 12 min ago/);
+    await solo.click('#prCountMore');
+    assert.match(await solo.innerText('#prCountNote'), /Acme\/Unseen · open PR count unavailable[\s\S]*repository list is incomplete/);
+    assert.match(await solo.textContent('#n-lpr'), /83 · Partial/);
+    assert.ok(await solo.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'partial count layout fits the phone');
+    await selectProject('Game');
+    assert.match(await countTile.innerText(), /^2\s*open PRs$/);
+    assert.equal(await solo.isVisible('#prCountNote'), false);
+    live.projects = [{name: 'Town work', repos: ['Acme/Town', 'Acme/Unseen']}];
+    await redrawCounts();
+    await selectProject('Town work');
+    assert.match(await countTile.innerText(), /81\s*open PRs · Partial/);
+    assert.doesNotMatch(await solo.textContent('#prCountNote'), /repository list is incomplete/);
+    delete live.projects;
+    await redrawCounts();
+    await selectProject('Unseen');
+    assert.match(await countTile.innerText(), /—\s*open PRs · Partial/);
+    assert.match(await solo.innerText('#prCountNote'), /Acme\/Unseen · open PR count unavailable/);
+    assert.doesNotMatch(await solo.innerText('#prCountNote'), /Town|repository list is incomplete/);
+    assert.match(await solo.textContent('#livePrs'), /Waiting for pull request details/);
+    live.open_pr_counts['Acme/Unseen'] = 0;
+    live.pr_count_status = {partial: false, inventory_complete: true, stale: {}};
+    await redrawCounts();
+    await solo.locator('#prCountNote').waitFor({state: 'hidden'});
+    assert.equal(await solo.textContent('#scopeName'), 'Unseen');
+    assert.match(await countTile.innerText(), /^0\s*open PRs$/);
+    assert.match(await solo.textContent('#livePrs'), /No open pull requests/);
+    await selectProject('All projects');
+    assert.match(await countTile.innerText(), /^83\s*open PRs$/);
+
+    // Before the first inventory read there is no number yet. A confirmed empty inventory is zero.
+    live.open_pr_counts = {};
+    live.repos = []; live.runs = []; live.prs = []; live.issues = [];
+    live.pr_count_status = {partial: true, inventory_complete: false, stale: {}};
+    await redrawCounts();
+    await solo.locator('#prCountNote:not([hidden])').waitFor();
+    assert.match(await countTile.innerText(), /—\s*open PRs · Partial/);
+    assert.match(await solo.innerText('#prCountNote'), /repository list is incomplete/);
+    live.pr_count_status = {partial: false, inventory_complete: true, stale: {}};
+    await redrawCounts();
+    await solo.locator('#prCountNote').waitFor({state: 'hidden'});
+    assert.match(await countTile.innerText(), /^0\s*open PRs$/);
+
     assert.deepEqual(errors.filter(e => !/Failed to load resource|ERR_|net::/.test(e)), []);
     console.log('portal browser checks passed');
   } finally {

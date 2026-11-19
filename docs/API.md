@@ -16,6 +16,8 @@ are only ever **added**: a reader that ignores fields it does not know keeps wor
 | `at`, `fresh` | When it was made; when GitHub was last read, the poll interval, GitHub calls left this hour, any error |
 | `repos`, `projects` | Watched repositories; projects (`{"name", "repos"}`) from the profile, else one per repository |
 | `counts` | The numbers at the top of Live |
+| `open_pr_counts` | Last confirmed open PR count for each watched repository with a known count. A confirmed zero is included. |
+| `pr_count_status` | `partial` flags an incomplete refresh. `inventory_complete` indicates whether the watched repository list was confirmed. `stale` maps affected repositories to their last count confirmation in UTC, or an empty string when unknown. |
 | `flow` | Merges per hour/day/week, time since the last merge, PR lead time, wait for a runner, red share, verdict; for `all`, each of `repos` and each of `projects` |
 | `bases` | Base-branch health: state, failing checks and tests, since, first bad merge, suspects, fixes in line, PRs held red |
 | `problems`, `causes` | Red PR checks grouped by cause (own, base, machine, flaky, cancelled) |
