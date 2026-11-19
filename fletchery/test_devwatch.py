@@ -148,6 +148,23 @@ class Feed(unittest.TestCase):
         w.poll()                                    # the same commit again changes nothing
         self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks"), [(1,)])
 
+    def test_base_ignores_statuses_that_link_nowhere(self):
+        # Main with no check runs, only statuses: a retired local runner's failures (no link) do not turn it red;
+        # a status that links to its run still counts.
+        main = "d" * 40
+        legacy = [{"id": 90 + i, "context": name, "state": "failure", "description": "Failed on the build PC (run 9000000001)",
+                   "created_at": ago(20), "updated_at": ago(20)} for i, name in enumerate(("Nightly full tests (node)", "preview-receipt", "sync"))]
+        w = self.watch_first({f"repos/{REPO}/commits/main/check-runs": {"check_runs": []},
+                              f"repos/{REPO}/commits/main/status": {"sha": main, "statuses": legacy}})
+        s = w.snapshot()
+        self.assertNotIn("red", [b.get("state") for b in s["bases"]])
+        self.assertNotIn("base", [b["kind"] for b in s["blockers"]])
+        linked = dict(legacy[0], id=99, context="Nightly full", target_url="https://github.com/Acme/Game/actions/runs/77")
+        w = self.watch_first({f"repos/{REPO}/commits/main/check-runs": {"check_runs": []},
+                              f"repos/{REPO}/commits/main/status": {"sha": main, "statuses": legacy + [linked]}})
+        base = w.snapshot()["bases"][0]
+        self.assertEqual((base["state"], [f["name"] for f in base["failing"]]), ("red", ["Nightly full"]))
+
     def test_red_checks_grouped_by_cause(self):
         # PR #13 fails the same check as its red base (inherited); PR #12 fails in a setup step (the machine).
         main, sha_ok, sha_bad = "c" * 40, "a" * 40, "b" * 40

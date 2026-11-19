@@ -762,7 +762,9 @@ class DevWatch:
         cr = (self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100") or {}).get("check_runs") or []
         if not cr:
             st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100") or {}
-            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref)] if st.get("sha") else []
+            # Only statuses that link to where they ran: an old local runner (LifeShare's retired Buildlane task) kept
+            # posting failures with no link, from no workflow anyone can open or re-run, and turned main red (11-19).
+            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref) if c.get("html_url")] if st.get("sha") else []
         sha = str((cr[0] if cr else {}).get("head_sha") or "")
         if sha:
             self.store.base_checks(repo, branch, sha, cr)
