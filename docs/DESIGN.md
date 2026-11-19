@@ -32,8 +32,8 @@ Fletchery's own builds ─┘     store.py (SQLite history, 90 days)      └─
 | Worker | A runner or build machine, in pools by labels | memory |
 | Machine | A computer with a reporter | memory; disk readings in SQLite |
 | Agent | A Claude thread, Codex task or other coder (presence.py) | memory |
-| Problem | One cause of failure, by fingerprint, with every change it hits (Horde-style) | SQLite |
-| Alert | A rule firing, with its wait, keep-firing time, group and snooze | SQLite |
+| Problem | One cause of failure, by fingerprint, with every change it hits (Horde-style) | rebuilt each poll; base check history in SQLite |
+| Alert | A rule firing, with its wait, keep-firing time, group and snooze | `alerts.json`; fired and cleared in SQLite |
 
 ## What each part answers
 
@@ -43,7 +43,31 @@ Fletchery's own builds ─┘     store.py (SQLite history, 90 days)      └─
 | Base health | Is a base branch red, since when, which merge broke it, and is a fix in line? Only the branch's required checks count when GitHub says which (rulesets need only read access). | `rules.py` |
 | Failure causes | Is this red PR its own bug, an inherited red base, flaky, a machine problem, or cancelled? | `rules.py` |
 | Queue | What waits for which machines, in what order, starting and finishing when, and who cancelled what? | `rules.py` |
-| Alerts | What needs a person now, told once, grouped, snoozable? | `alerts.py` |
+| Alerts | What needs a person now, told once, grouped, snoozable? Will a disk fill? | `alerts.py`, `rules.disk_forecast` |
+| Read API | Everything above for scripts, Grafana and agents, in a shape that only grows | `api.py`, [API.md](API.md) |
+
+## Adding things without code
+
+| To add | Do |
+|---|---|
+| A repository | Push to it under a watched owner (`live.owners`); it appears within 10 minutes |
+| A project of several repositories | `live.projects`: `{"Name": ["owner/a", "owner/b"]}` |
+| A base branch nobody targets | `live.bases`: `{"owner/repo": ["release"]}` |
+| A coding agent | `live.agents`: `[{"name": "Devin", "branches": ["devin/"], "logins": ["devin-ai-integration[bot]"]}]`; heartbeats ([AGENT-PRESENCE.md](AGENT-PRESENCE.md)) say what it is doing |
+| A machine | Install the reporter with a key ([MACHINES.md](MACHINES.md)); its runners join it by name |
+| A "machine, not code" message | `live.causes.machine`: regular expressions |
+| An alert change | `live.alerts`: `{"<kind>": {"for": min, "keepFiring": min, "notify": bool, "off": bool}}` |
+
+Only a new kind of source (another CI system, Perforce, Horde) needs code: one class with `poll()` that writes the same
+records.
+
+## Limits that stay
+
+- GitHub has no "cancelled by" field: Fletchery names a person only when GitHub's annotation does, or the press was in
+  Fletchery.
+- History starts when Fletchery is installed: base health, Flow and queue estimates fill in over the first day.
+- Test names come from check annotations; a check that writes none is named by its check only.
+- Queue order and start times are estimates from past job times; GitHub does not publish its queue.
 
 ## Security
 
