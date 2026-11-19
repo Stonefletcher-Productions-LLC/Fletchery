@@ -640,13 +640,14 @@ class DevWatch:
         return out
 
     def _try(self, path: str, quiet_for: float = 1800):
-        """GET that remembers a 403/404 (no access, Actions off) and stops asking for a while."""
+        """GET that remembers a 403/404 (no access, Actions off) or a 422 (a branch deleted since: "No commit found for
+        SHA: <branch>") and stops asking for a while."""
         if self.skip.get(path, 0) > time.time():
             return None
         try:
             return self.gh.get(path)
         except GitHubError as e:
-            if e.code in (403, 404, 410) and "rate limit" not in str(e).lower():
+            if e.code in (403, 404, 410, 422) and "rate limit" not in str(e).lower():
                 now_s = time.time()
                 if len(self.skip) > 500:
                     self.skip = {k: v for k, v in self.skip.items() if v > now_s}
