@@ -13,7 +13,7 @@ const job = (id, state, extra) => ({id, recipe: 'package', state, machine: 'NODE
   requested_by: 'build 0.4.6', created: ago(30), started: state === 'queued' ? '' : ago(25), finished: '', summary: '', cancel: false,
   log_bytes: 2048, steps: [{name: 'Build the editor', state: 'done', start: ago(25), end: ago(12)}, {name: 'Package 0.4.6', state: 'running', start: ago(12), end: ''}], ...extra});
 const data = {
-  project: 'Harbor', repo: 'example/harbor', at: ago(0), started: ago(185), version: 'abc12345', base: 'main',
+  github_login: 'demo-user', project: 'Harbor', repo: 'example/harbor', at: ago(0), started: ago(185), version: 'abc12345', base: 'main',
   build_machines: ['NODE-01'], machines_on: true, held: false, errors: [], restarting: '',
   builds: [
     {id: 'b3', version: '0.4.6', state: 'running', ref: 'main', sha: 'a1b2c3d4e5', at: ago(30), started: ago(25), finished: '', machine: 'NODE-01', job: 7, reason: 'Building on NODE-01.', publish: '', publish_reason: '', tests: 'full', repeat: '', links: []},
@@ -32,6 +32,8 @@ let mode = 'phone';   // phone | readonly | desktop: what the backend tells this
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
 let down = false;
 const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.json'), 'utf8'));   // devwatch.py's own output
+Object.assign(live.building[0], {change: 'Acme/Game#12', job_name: 'Compile and test', step: 'Build editor',
+  step_started: new Date(Date.now() - 60000).toISOString(), steps_done: 2, steps_total: 5});
 let liveAt = new Date().toISOString();
 let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
@@ -62,6 +64,7 @@ const server = http.createServer((req, res) => {
   }
   if (url === '/api/summary') return down ? req.socket.destroy() : send(200, JSON.stringify({...data, desktop: mode === 'desktop', controls: mode !== 'readonly'}), 'application/json');
   if (url === '/api/live') return down ? req.socket.destroy() : send(200, JSON.stringify({...live, at: liveAt, fresh: {...live.fresh, github: liveAt}}), 'application/json');
+  if (url === '/api/github/accounts') return send(200, JSON.stringify({logins: ['demo-user', 'second-user']}), 'application/json');
   if (url === '/api/push') return send(200, JSON.stringify(push), 'application/json');
   if (url === '/api/layout') return send(200, JSON.stringify({layout: layoutFile, can_save: mode !== 'readonly'}), 'application/json');
   if (url === '/api/jobs/log') return send(200, 'step 1\nstep 2', 'text/plain');
@@ -96,7 +99,8 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('#liveMachines .m-name');
     assert.equal(await page.isVisible('#view-live'), true);
     assert.equal(await page.isVisible('#liveStale'), false);
-    assert.deepEqual(await page.$$eval('#liveStats b', list => list.map(b => b.textContent)), ['2/3', '2', '2', '6']);
+    assert.deepEqual(await page.$$eval('#liveStats b', list => list.map(b => b.textContent)), ['2/3', '1', '2', '6']);
+    assert.match(await page.textContent('#liveStats'), /running now · 1 queued/);
     assert.equal(await page.textContent('#b-live'), '6');
     assert.match(await page.textContent('#liveBlockers'), /Build editor" has run 75 min/);
     // B: a machine says in plain words what it does for which change, with its parts, badges, two bars and why
@@ -219,12 +223,13 @@ const server = http.createServer((req, res) => {
     liveAt = new Date().toISOString();
 
     // Live shows every build going on, on any machine, at the top.
-    assert.match(await page.textContent('#liveBuilding'), /PR check · PR #12[\s\S]*Gaming PC/);
+    assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
+    assert.equal(await page.locator('#liveBuilding [role=progressbar]').getAttribute('aria-valuenow'), '40');
 
     // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');
     await page.waitForSelector('#buildsOpen .title');
-    assert.equal(await page.textContent('#project'), 'Harbor');
+    assert.equal(await page.textContent('#project'), 'demo-user // Fletchery // All projects');
     assert.match(await page.textContent('#buildsOpen'), /0\.4\.6[\s\S]*Building[\s\S]*Package 0\.4\.6[\s\S]*0\.4\.7[\s\S]*Scheduled/);
     assert.equal(await page.isVisible('#newBuildCard'), true);
     assert.equal(await page.isVisible('#bAt'), false, 'later, daily and tests fold away');
@@ -430,6 +435,7 @@ const server = http.createServer((req, res) => {
     mode = 'phone';
     live.prs.push({repo: 'Acme/Town', number: 7, title: 'Road decals', url: 'https://github.com/Acme/Town/pull/7', draft: false, author: 'dev',
                    branch: 'roads', base: 'main', updated: new Date().toISOString(), created: '', labels: [], checks: {state: 'passed', total: 1, done: 1, failed: [], running: [], url: ''}});
+    live.open_pr_counts = {'Acme/Town': 81, 'Acme/Game': 2};
     const solo = await context.newPage();
     watch(solo);
     await solo.goto(base + '/#tasks');   // an old link to a tab that is gone opens Live
@@ -437,7 +443,18 @@ const server = http.createServer((req, res) => {
     assert.deepEqual(await solo.$$eval('.tabs button:not([hidden])', l => l.map(b => b.dataset.tab)), ['live', 'queue', 'builds', 'activity']);
     assert.equal(await solo.isVisible('#view-live'), true);
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 3);
+    assert.equal(await solo.textContent('#accountPick'), 'demo-user');
+    assert.equal(await solo.textContent('#scopeName'), 'All projects');
+    await solo.click('#accountPick');
+    await solo.waitForFunction(() => document.querySelectorAll('#accountList option').length === 2);
+    await solo.selectOption('#accountList', 'second-user');
+    await solo.click('#accountApply');
+    await solo.waitForSelector('#accountDialog[data-pending="second-user"]');
+    assert.deepEqual(lastPost(), ['/api/github/account', {login: 'second-user'}]);
+    await solo.click('#accountClose');
     await solo.click('#liveRepos button:has-text("Town")');
+    assert.equal(await solo.textContent('#scopeName'), 'Town');
+    assert.equal(await solo.locator('#liveStats b').nth(2).textContent(), '81');
     assert.equal(await solo.$$eval('#livePrs > li', l => l.length), 1);
     assert.match(await solo.textContent('#livePrs'), /Road decals/);
     // A project of several repositories (workers.portal.live.projects) is one chip.

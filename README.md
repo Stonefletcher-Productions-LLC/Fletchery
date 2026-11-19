@@ -11,6 +11,10 @@ each one is on, your self-hosted runners, pull requests and their checks, issues
 doing right now. It flags anything that stopped moving, and it starts, tracks and publishes your game builds. The same
 page opens in a desktop window on the PC and as an app on your phone (over Tailscale, never the public internet).
 
+The header shows your GitHub sign-in and selected project. Click the sign-in to switch the account Fletchery uses.
+The open PR total follows the project selection. Building now shows each running check's current GitHub step,
+elapsed time and completed steps, including checks that started before the most recent workflow runs.
+
 ![Fletchery on the desktop: the Live tab with Building now, Stuck or blocked, machines, runners, Actions runs, pull requests and issues (demo data)](docs/images/fletchery/desktop-live.png)
 
 <sub>Every screenshot here is the real page showing made-up data. See [where the pictures come from](#where-the-pictures-come-from).</sub>

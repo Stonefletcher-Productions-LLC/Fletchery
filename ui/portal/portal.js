@@ -203,7 +203,19 @@
     document.body.classList.toggle('desktop', desktop);
     document.body.classList.toggle('controls', can);
     for (const n of document.querySelectorAll('.ctrl')) n.hidden = !can || (n.id === 'newBuildCard' && !d.machines_on);
-    $('project').textContent = d.project && d.project !== 'project' ? d.project : 'Fletchery';
+    const login = d.github_login || '';
+    const label = login.toLowerCase() === 'stonefletcher' ? 'Stone Fletcher' : login;
+    const account = $('accountPick');
+    account.textContent = label || 'GitHub account';
+    if (login && $('accountDialog').dataset.pending === login) {
+      delete $('accountDialog').dataset.pending;
+      if ($('accountDialog').open) $('accountDialog').close();
+    }
+    account.dataset.login = login;
+    account.hidden = !login && !can;
+    account.disabled = !can;
+    account.setAttribute('aria-label', can ? 'Switch GitHub account, currently ' + (login || 'unknown') : label);
+    $('accountSep').hidden = account.hidden;
     const alerts = d.errors.map(t => el('div', {class: 'alert bad', role: 'status'}, el('strong', {text: 'Problem'}), t));
     if (d.restarting) alerts.unshift(el('div', {class: 'alert', role: 'status'}, el('strong', {text: 'Restarting'}), d.restarting));
     $('alerts').replaceChildren(...alerts);
@@ -366,6 +378,39 @@
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
     navigator.serviceWorker.addEventListener('message', e => { if (e.data && e.data.tab) { show(e.data.tab); refresh(); } });
   }
+  $('accountPick').addEventListener('click', async () => {
+    const list = $('accountList'), msg = $('accountMsg'), apply = $('accountApply');
+    const current = $('accountPick').dataset.login;
+    list.replaceChildren();
+    apply.disabled = true;
+    msg.textContent = 'Loading signed-in accounts…';
+    $('accountDialog').showModal();
+    try {
+      const response = await fetch('/api/github/accounts', {cache: 'no-store'});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not load accounts.');
+      for (const login of result.logins) list.add(new Option(login, login));
+      if (result.logins.includes(current)) list.value = current;
+      apply.disabled = !list.value || list.value === current;
+      msg.textContent = result.logins.length ? '' : 'No saved GitHub sign-ins are available.';
+    } catch (error) { msg.textContent = error.message; }
+  });
+  $('accountList').addEventListener('change', () => {
+    $('accountApply').disabled = !$('accountList').value || $('accountList').value === $('accountPick').dataset.login;
+  });
+  $('accountClose').addEventListener('click', () => $('accountDialog').close());
+  $('accountApply').addEventListener('click', async () => {
+    const login = $('accountList').value;
+    $('accountApply').disabled = true;
+    try {
+      await post('/api/github/account', {login});
+      $('accountDialog').dataset.pending = login;
+      $('accountMsg').textContent = 'Switching to ' + login + '. The dashboard will reconnect.';
+      try { localStorage.removeItem(KEEP); localStorage.removeItem('fletchery-live-last'); } catch (e) { /* private mode */ }
+      document.dispatchEvent(new Event('fletchery-refresh'));
+    } catch (error) { $('accountMsg').textContent = error.message; $('accountApply').disabled = false; }
+  });
+
   function keyBytes(text) {
     const pad = text + '='.repeat((4 - text.length % 4) % 4);
     return Uint8Array.from(atob(pad.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));

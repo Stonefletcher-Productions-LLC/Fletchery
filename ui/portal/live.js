@@ -60,7 +60,7 @@
     const tile = (n, label, hot) => el('div', {class: 'stat' + (hot ? ' hot' : '')}, el('b', {text: String(n)}), el('span', {text: label}));
     $('liveStats').replaceChildren(
       tile((c.busy || 0) + '/' + (c.machines || 0), 'machines busy'),
-      tile(c.runs || 0, (c.queued ? c.queued + ' queued · ' : '') + 'runs going'),
+      tile((c.runs || 0) - (c.queued || 0), 'running now' + (c.queued ? ' · ' + c.queued + ' queued' : '')),
       tile(c.prs || 0, 'open PRs'),
       tile(c.blockers || 0, 'stuck/blocked', c.blockers > 0));
     const b = $('b-live');
@@ -216,11 +216,25 @@
         b.detail || b.since ? el('p', {class: 'sub'}, ...sep(join(b.detail, b.since ? since(b.since) : ''))) : null,
         alertLine(b)));
   }
-  function actRow(x) {
+  function jobProgress(x) {
+    if (!x.steps_total) return null;
+    const detail = x.steps_done + ' of ' + x.steps_total + ' complete';
+    return el('div', null, meter('GitHub job steps', Math.round(100 * x.steps_done / x.steps_total), detail, 'step'),
+      x.step ? el('p', {class: 'sub'}, ...sep(join(x.step, x.step_started ? since(x.step_started) : ''))) : null);
+  }
+  function actRow(x, c) {
+    if (x.steps_total) {
+      const title = c ? '#' + c.number + ' ' + c.title : x.title;
+      return el('li', {class: 'mact'},
+        el('p', {class: 'say'}, web(x.url) ? a(x.url, 't', title) : title),
+        el('p', {class: 'sub'}, ...sep(join(x.machine, x.job_name))),
+        jobProgress(x));
+    }
+    if (c) return machineAct(x, c);
     const k = KIND[x.kind] ? x.kind : 'working';
     return el('li', null, el('span', {class: 'chip k-' + k, text: KIND[k]}),
       el('div', {class: 'what'}, web(x.url) ? a(x.url, '', x.title) : el('span', {class: 't', text: x.title}),
-        el('p', {class: 'sub'}, ...sep(join(x.detail, x.since ? since(x.since) : '')))));
+        el('p', {class: 'sub'}, ...sep(join(x.machine, x.detail, x.since ? since(x.since) : '')))));
   }
   // A drive that has been filling: when it will be full at that rate (rules.disk_forecast).
   const fullIn = x => x && typeof x.full_in === 'number' ? ' (full in ~' + dur(x.full_in) + ')' : '';
@@ -331,6 +345,7 @@
   function machineAct(x, c) {
     return el('li', {class: 'mact'},
       el('p', {class: 'say'}, ...sentence(c)),
+      x.machine ? el('p', {class: 'sub', text: x.machine}) : null,
       c.step ? partsBar(c.step) : null,
       badges(c), ...bars(c), basis(c, true),
       c.why ? el('p', {class: 'why', text: 'Why: ' + c.why}) : null);
@@ -350,7 +365,7 @@
         el('span', {class: 'm-stats', text: bits.join(' · ')})),
       g ? diskRow(g, (m.disks || []).find(x => x.name.replace(/[:\\/]+$/, '').toUpperCase() === (g.drive || '').replace(/[:\\/]+$/, '').toUpperCase())) : null,
       !m.online ? el('p', {class: 'sub'}, m.last_report ? ['Last report ', ago(m.last_report)] : 'No reporter on this machine yet') : null,
-      m.activities && m.activities.length ? el('ul', {class: 'acts'}, (seen => m.activities.map(x => { const c = changeByKey[x.change]; if (c && seen.has(c.key)) return null; if (c) seen.add(c.key); return c ? machineAct(x, c) : actRow(x); }))(new Set())) :
+      m.activities && m.activities.length ? el('ul', {class: 'acts'}, (seen => m.activities.map(x => { const c = changeByKey[x.change]; if (c && seen.has(c.key)) return null; if (c) seen.add(c.key); return actRow(x, c); }))(new Set())) :
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
       tools.length ? el('p', {class: 'sub', text: 'Running: ' + tools.join(', ')}) : null,
       m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null);
@@ -431,6 +446,7 @@
   let picked = new Set();       // the chosen project's repositories
   function repoChips(d) {
     const seen = new Set([...(d.runs || []), ...(d.prs || []), ...(d.issues || [])].map(x => x.repo).filter(Boolean));
+    for (const [name, count] of Object.entries(d.open_pr_counts || {})) if (count) seen.add(name);
     const projects = (d.projects || []).filter(p => (p.repos || []).some(r => seen.has(r)));
     const covered = new Set(projects.flatMap(p => p.repos));
     const list = [...projects, ...[...seen].filter(r => !covered.has(r)).sort().map(r => ({name: r.split('/')[1] || r, repos: [r]}))];
@@ -438,6 +454,7 @@
     const cur = list.find(p => key(p) === repo);
     if (repo && !cur) repo = '';
     picked = new Set(cur ? cur.repos : []);
+    $('scopeName').textContent = cur ? cur.name : 'All projects';
     const box = $('liveRepos');
     box.hidden = list.length < 2;
     const chip = (value, label) => {
@@ -449,10 +466,23 @@
   }
   const mine = x => !repo || !x.repo || picked.has(x.repo);
   function draw(full) {
+    if (full.github_login) {
+      try {
+        const previous = localStorage.getItem('fletchery-live-login');
+        if (previous && previous !== full.github_login) {
+          repo = '';
+          localStorage.removeItem('fletchery-live-repo');
+        }
+        localStorage.setItem('fletchery-live-login', full.github_login);
+      } catch (e) { /* storage unavailable */ }
+    }
     repoChips(full);
     const d = repo ? {...full, problems: (full.problems || []).filter(mine), blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
-    stats(full);
+    const scopedPrs = full.open_pr_counts
+      ? [...picked].reduce((n, name) => n + (full.open_pr_counts[name] || 0), 0)
+      : (d.prs || []).length;
+    stats(repo ? {...full, counts: {...full.counts, prs: scopedPrs}} : full);
     drawBases(full);
     drawFlow(full);
     drawProblems(d, full);
@@ -479,13 +509,13 @@
     const building = full.building || [];
     $('n-lbuild').textContent = building.length ? '(' + building.length + ')' : '';
     $('liveBuildingCard').classList.toggle('calm', !building.length);
-    fill($('liveBuilding'), building.map(x => actRow({...x, detail: join(x.machine, x.detail).join(' · ')})), 'Nothing is building right now.');
     changeByKey = Object.fromEntries((full.changes || []).map(c => [c.key, c]));
+    fill($('liveBuilding'), building.map(x => actRow(x, changeByKey[x.change])), 'Nothing is building right now.');
     const changes = (full.changes || []).filter(mine);
     $('n-lchg').textContent = changes.length ? '(' + changes.length + ')' : '';
     $('liveChangesCard').classList.toggle('calm', !changes.length);
     fill($('liveChanges'), changes.map(changeRow), 'No open or recently merged changes.');
-    const agents = (full.agents || []).filter(x => !repo || x.repo === repo);
+    const agents = (full.agents || []).filter(x => !repo || picked.has(x.repo));
     $('n-lagents').textContent = agents.length ? '(' + agents.length + ')' : '';
     $('liveAgentsCard').classList.toggle('calm', !agents.length);
     fill($('liveAgents'), agents.map(agentRow), 'No Claude or Codex agent is working right now.');

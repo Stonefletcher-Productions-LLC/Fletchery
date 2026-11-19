@@ -129,7 +129,8 @@ class Publisher:
                 "body": notes(row, zips), "prerelease": True, "make_latest": "false"})
         # `gh release upload` streams large files and retries; --clobber replaces a half-uploaded asset after a failure.
         p = subprocess.run([self.cli, "release", "upload", tag, *[str(z) for z in zips], "--clobber", "--repo", self.repo],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6 * 3600)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=6 * 3600,
+                           env=self.gh.cli_env() if hasattr(self.gh, "cli_env") else None)
         if p.returncode:
             raise RuntimeError(f"upload failed: {(p.stderr or p.stdout).strip()[-400:]}")
         return str(rel.get("html_url") or f"https://github.com/{self.repo}/releases/tag/{tag}")

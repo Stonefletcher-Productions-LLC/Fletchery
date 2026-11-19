@@ -143,7 +143,9 @@ class App:
         self.lines: deque = deque(maxlen=400)
         self._log_lock = threading.Lock()
         self._load_activity()
-        self.gh = GitHub(cfg.repo)
+        from accounts import Accounts
+        self.accounts = Accounts(self.state_dir)
+        self.gh = GitHub(cfg.repo, cli_env=self.accounts.cli_env)
         self.state = State(self.state_dir)
         self.machines = None
         self.portal = None
@@ -189,6 +191,7 @@ class App:
 
     # ---- parts ----
     def start(self, dashboard_port: int | None = None) -> None:
+        self.accounts.identify()
         if self.cfg.machines:
             try:
                 from machines import Coordinator
@@ -208,7 +211,7 @@ class App:
             conf = {"port": 0, "hosts": [], "users": [], "push": None, "live": {}}
         port = self.cfg.dashboard_port if dashboard_port is None else dashboard_port
         self.portal = portal.Portal(self.status, conf, self.state_dir, self.log, self.cfg.repo, desktop_port=port,
-                                    actions=self.actions(), job_log=self.job_log,
+                                    actions=self.actions(), job_log=self.job_log, accounts=self.accounts,
                                     layout=layout.Layout(layout.path_for(getattr(self.cfg, "_path", None), self.state_dir)))
         if self.portal.live is not None:
             self.portal.live.extra = self.machine_blockers
@@ -319,7 +322,7 @@ class App:
                 self.errors["machines"] = self.machines.error
             else:
                 self.errors.pop("machines", None)
-        return {"project": self.cfg.name, "repo": self.cfg.repo, "pid": os.getpid(), "started": self.started,
+        return {"project": self.cfg.name, "repo": self.cfg.repo, "github_login": self.accounts.login, "pid": os.getpid(), "started": self.started,
                 "version": self.version,
                 "at": now_iso(), "errors": dict(self.errors), "builds": builds, "machines": machines,
                 "scratch": self.scratch_last, "log": list(self.lines)[-120:], "restarting": self.restart_reason}
@@ -410,6 +413,15 @@ class App:
             self.log(f"restart requested from {src(d)}")
             return {"ok": True}
 
+        def switch_account(d):
+            login = d.get("login")
+            if login == self.accounts.login and login:
+                return {"ok": True}
+            self.accounts.select(login)
+            self.restart_reason = f"Switching the dashboard to GitHub account {login}."
+            self.log(self.restart_reason)
+            return {"ok": True}
+
         def add(d):
             return self.builds.add({k: v for k, v in d.items() if k != "_from"})
 
@@ -421,7 +433,7 @@ class App:
                 "/api/actions/cancel": lambda d: run_action(d, "cancel"),
                 "/api/actions/rerun": lambda d: run_action(d, "rerun-failed" if d.get("failed") else "rerun"),
                 "/api/actions/rerun-job": lambda d: run_action(d, "rerun-job"),
-                "/api/live/refresh": live_refresh, "/api/alerts/snooze": alert_snooze, "/api/restart": restart}
+                "/api/github/account": switch_account, "/api/live/refresh": live_refresh, "/api/alerts/snooze": alert_snooze, "/api/restart": restart}
 
     def job_log(self, job_id: int) -> str:
         return self.machines.machines.log_text(job_id, tail_bytes=256 * 1024) if self.machines else ""

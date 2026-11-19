@@ -101,6 +101,23 @@ class Feed(unittest.TestCase):
         node = next(r for r in s["runners"] if r["name"] == "NODE-unreal-light")
         self.assertEqual((node["machine"], node["online"]), ("NODE", False))
 
+    def test_long_check_and_second_page_of_open_prs(self):
+        runs = f"repos/{REPO}/actions/runs?"
+        pulls = f"repos/{REPO}/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        active = world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0]
+        w = self.watch_first({
+            runs + "per_page=20": {"workflow_runs": [{"id": i, "status": "completed"} for i in range(50, 70)]},
+            runs + "status=in_progress": {"workflow_runs": [active]},
+            runs + "status=queued": {"workflow_runs": []},
+            pulls + "&page=2": [{"number": 51}],
+            pulls: [{"number": i} for i in range(1, 51)],
+        })
+        s = w.snapshot()
+        self.assertEqual(s["open_pr_counts"][REPO], 51)
+        self.assertEqual(s["counts"]["runs"], 1)
+        self.assertEqual(s["building"][0]["steps_done"], 1)
+        self.assertEqual(s["building"][0]["step"], "Build editor")
+
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
         for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 fails Compile and test",
