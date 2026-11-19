@@ -863,12 +863,9 @@ class DevWatch:
                 self.cancels[(repo, run["id"])] = {"how": how, "who": who}
         for pr in prs:
             sha = (pr.get("head") or {}).get("sha")
-            if not sha:
+            if not sha or (repo, sha) in out["checks"]:
                 continue
-            kept = self.checks.get((repo, sha))
-            if kept and all(c.get("status") == "completed" for c in kept):
-                out["checks"][(repo, sha)] = kept    # finished checks on an unchanged commit do not change
-                continue
+            # A rerun can add a check to the same commit. Revalidate each open head once per poll using GitHub's ETag.
             out["checks"][(repo, sha)] = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
             if not out["checks"][(repo, sha)]:
                 # A commit pushed with a workflow's token starts no check run; the job posts its result as a commit status
