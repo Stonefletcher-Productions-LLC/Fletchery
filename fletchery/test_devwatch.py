@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import devwatch  # noqa: E402
+import pipeline  # noqa: E402
 import reporter  # noqa: E402
 
 
@@ -493,6 +494,68 @@ class Feed(unittest.TestCase):
         self.assertEqual(w.history.estimate(("quick", REPO))[0], 4 * 60)
         self.assertEqual(w.store.job_seconds(REPO, "PR check", "Compile and test"), 40 * 60)
         self.assertIsNone(w.history.estimate(("build", "Acme/Other"))[0])
+
+    def test_a_town_build_is_never_learned_as_two_minutes(self):
+        """Shaped like LifeShare on 2026-11-19 (job names, steps and times copied from real runs): every green
+        "Compile and test" was a 2-minute skip for a tooling change; the town and game builds that really built all
+        ended red after 13 to 45 minutes; others were cancelled or failed in set-up. A town change's Build & test must
+        come out at 10 minutes or more, and say it is for a town change."""
+        def run(i, title, branch, conclusion):
+            return {"id": 300 + i, "name": "PR check", "event": "pull_request", "status": "completed", "conclusion": conclusion,
+                    "display_title": f"#{2300 + i} {title}", "head_branch": branch, "pull_requests": [{"number": 2300 + i}]}
+
+        def jobs(i, build_min, conclusion, failed_step="Build and test (Tools\\CI\\PrCheckJob.ps1)"):
+            steps = [{"name": "Set up job", "status": "completed", "conclusion": "success", "started_at": ago(build_min + 1), "completed_at": ago(build_min + 1)},
+                     {"name": "Check out the merge commit in this machine's standing checkout", "status": "completed",
+                      "conclusion": "failure" if failed_step.startswith("Check out") else "success",
+                      "started_at": ago(build_min + 1), "completed_at": ago(build_min)},
+                     {"name": "Build and test (Tools\\CI\\PrCheckJob.ps1)", "status": "completed",
+                      "conclusion": conclusion if failed_step.startswith("Build") else "skipped", "started_at": ago(build_min), "completed_at": ago(0.2)}]
+            return {"jobs": [
+                {"id": 4000 + i, "name": "PR check / Cheap checks", "status": "completed", "conclusion": "success",
+                 "runner_name": "SF-NODE-01-unreal-light", "started_at": ago(build_min + 20), "completed_at": ago(build_min + 10)},
+                {"id": 5000 + i, "name": "PR check / Compile and test", "status": "completed", "conclusion": conclusion,
+                 "runner_name": "SF-NODE-01-unreal-pr", "created_at": ago(build_min + 60), "started_at": ago(build_min + 1),
+                 "completed_at": ago(0), "steps": steps},
+                {"id": 6000 + i, "name": "PR check / Tip status", "status": "completed", "conclusion": "skipped",
+                 "started_at": ago(0), "completed_at": ago(0)}]}
+        answers, runs = {}, []
+        for i in range(15):          # tooling changes: the build machine is skipped after 2 minutes, green
+            runs.append(run(i, "Nightly housekeeping sweeps finished town worktrees" if i == 0 else "PR check tooling", "claude/tools", "success"))
+            answers[f"repos/{REPO}/actions/runs/{300 + i}/jobs"] = jobs(i, 2, "success")
+        for i, (title, mins) in enumerate([("City rebuild checks (RouteScale, Woods)", 27), ("Town surfaces: level car parks", 45),
+                                           ("Ground town sidewalks and parking lots", 38)], start=20):
+            runs.append(run(i, title, "codex/town", "failure"))
+            answers[f"repos/{REPO}/actions/runs/{300 + i}/jobs"] = jobs(i, mins, "failure")
+        runs.append(run(30, "Town square corners", "codex/town", "failure"))      # the machine broke: no time
+        answers[f"repos/{REPO}/actions/runs/330/jobs"] = jobs(30, 1, "failure", failed_step="Check out")
+        runs.append(run(31, "Build Alderwick Marina", "codex/marina", "cancelled"))   # superseded: never read
+        answers[f"repos/{REPO}/actions/runs"] = {"workflow_runs": runs}
+        kinds = {"Town change": ["town ", "town:", "city rebuild", "/town", "marina"]}
+        w = devwatch.DevWatch({"pipeline": {"kinds": kinds}}, github=FakeGitHub(answers))
+        w._backfill(REPO)
+        self.assertNotIn(f"repos/{REPO}/actions/runs/331/jobs", w.gh.asked)
+        avg, n = w.history.estimate(("build", REPO, "Town change"), own_from=3)
+        self.assertGreaterEqual(avg, 10 * 60, "a town Build & test is never ~2 min")
+        self.assertAlmostEqual(avg, 33.5 * 60, delta=60)      # 3 (a tooling PR that says "town"), 28, 39, 46 min
+        pr = {"number": 2340, "title": "Town surfaces: level car parks and park paving", "head": {"ref": "claude/town", "sha": "c" * 40},
+              "base": {"ref": "Test-Staging"}, "html_url": "", "updated_at": ago(1)}
+        checks = [{"id": 1, "name": "PR check / Cheap checks", "status": "completed", "conclusion": "success",
+                   "started_at": ago(90), "completed_at": ago(80)},
+                  {"id": 2, "name": "PR check / Compile and test", "status": "in_progress", "started_at": ago(39)}]
+        c = pipeline.open_change(w.history, w.rules, REPO, pr, checks, {}, w._runner_machine, time.time())
+        self.assertEqual((c["kind"], c["stage"]), ("Town change", "build"))
+        self.assertGreaterEqual(c["step"]["avg"], 10 * 60)
+        self.assertEqual(c["step"]["scope"], "kind")
+        self.assertFalse(c["step"]["late"])
+
+    def test_old_green_only_build_times_are_dropped(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            f = Path(d) / "steps.json"
+            f.write_text(json.dumps({"version": 2, "samples": {"build|Acme/Game": [[129, "a"]], "own|Acme/Game|7|build": [[129, "b"]],
+                                                                "quick|Acme/Game": [[300, "c"]], "staging|Acme/Game|all": [[900, "d"]]}}), encoding="utf-8")
+            h = pipeline.History(f)
+            self.assertEqual(sorted(h.samples), ["quick|Acme/Game", "staging|Acme/Game|all"])
 
     def test_nothing_merging_is_a_signal(self):
         w = self.watch()

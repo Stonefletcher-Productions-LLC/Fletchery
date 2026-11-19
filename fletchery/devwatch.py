@@ -1263,8 +1263,11 @@ class DevWatch:
         (#235), would otherwise show "no usual time yet" until enough checks finish again. One list call plus one
         jobs call per run, at most BACKFILL_RUNS."""
         try:
-            got = self.gh.get(f"repos/{repo}/actions/runs?status=success&per_page=50")
-            runs = [r for r in (got or {}).get("workflow_runs") or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
+            # Green and red runs: a build that failed in its tests took as long as a green one, and on a busy project
+            # most long builds end red (pipeline._build_span). Cancelled and skipped runs teach nothing.
+            got = self.gh.get(f"repos/{repo}/actions/runs?status=completed&per_page=100")
+            runs = [r for r in (got or {}).get("workflow_runs") or [] if isinstance(r, dict) and isinstance(r.get("id"), int)
+                    and r.get("conclusion") in ("success", "failure")]
             bases = set((self.bases.get(repo) or {}).keys())
             learned = 0
             for r in runs:

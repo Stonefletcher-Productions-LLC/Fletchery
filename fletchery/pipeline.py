@@ -31,6 +31,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import rules
+
 STAGES = ("written", "quick", "build", "merge", "staging", "release")
 TIMED = ("quick", "build", "staging")      # the steps the overall bar and "time left" are made of
 KEEP = 20                                  # samples kept per key
@@ -157,16 +159,22 @@ class History:
                 for k in sorted(self.samples, key=lambda k: len(self.samples[k]))[: len(self.samples) - MAX_KEYS]:
                     del self.samples[k]
 
-    def estimate(self, parts: tuple) -> tuple[float | None, int]:
-        """(median seconds, samples) at the most specific level with MIN_SAMPLES, else the best level with any."""
+    def estimate(self, parts: tuple, own_from: int = 0) -> tuple[float | None, int]:
+        return self.estimate_at(parts, own_from)[:2]
+
+    def estimate_at(self, parts: tuple, own_from: int = 0) -> tuple[float | None, int, int]:
+        """(median seconds, samples, level) at the most specific level with MIN_SAMPLES, else the best level with any.
+        From `own_from` parts on (the kind of change), a level's own samples, however few, beat a more general level:
+        a town change's one 30-minute build says more about the next town change than fifteen 2-minute tooling runs
+        (2026-11-19: "39 min of ~2 min, usually 2 min for a town change")."""
         with self._lock:
-            fallback = (None, 0)
+            fallback = (None, 0, 0)
             for n in range(len(parts), 1, -1):
                 got = self.samples.get(self.key(*parts[:n])) or []
-                if len(got) >= MIN_SAMPLES:
-                    return statistics.median(s[0] for s in got), len(got)
+                if len(got) >= MIN_SAMPLES or (got and own_from and n == own_from):
+                    return statistics.median(s[0] for s in got), len(got), n
                 if got and fallback[0] is None:
-                    fallback = (statistics.median(s[0] for s in got), len(got))
+                    fallback = (statistics.median(s[0] for s in got), len(got), n)
             return fallback
 
     def save(self) -> None:
@@ -174,7 +182,7 @@ class History:
             if not self._dirty or not self.path:
                 return
             self._dirty = False
-            data = json.dumps({"version": 2, "samples": self.samples})
+            data = json.dumps({"version": 3, "samples": self.samples})
         tmp = self.path.with_name(self.path.name + ".tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,10 +202,13 @@ class History:
             self.log(f"live: {self.path.name} unreadable ({type(e).__name__}); step times start again")
             return
         # Version 1 timed commit statuses and skipped checks too (seconds long), so its quick and build times are
-        # dropped and learned again from real runs.
-        stale = ("quick|", "build|") if not (isinstance(data, dict) and data.get("version", 1) >= 2) else ()
+        # dropped and learned again from real runs. Version 2 learned builds only from green runs, which on a project
+        # that skips the build for tooling changes are mostly those 2-minute skips: its build times go too.
+        version = data.get("version", 1) if isinstance(data, dict) else 1
+        stale = ("quick|", "build|") if version < 2 else ("build|",) if version < 3 else ()
         for k, got in ((data.get("samples") or {}) if isinstance(data, dict) else {}).items():
-            if stale and isinstance(k, str) and k.startswith(stale):
+            if stale and isinstance(k, str) and (k.startswith(stale) or (k.startswith("own|") and k.endswith("|build")
+                                                                       and "build|" in stale)):
                 continue
             if isinstance(k, str) and isinstance(got, list):
                 clean = [[float(s[0]), str(s[1])[:120]] for s in got[-KEEP:]
@@ -215,6 +226,26 @@ def _timed(checks: list) -> bool:
     return bool(checks) and all(c.get("source") != "status" and c.get("conclusion") == "success" for c in checks)
 
 
+def _build_span(checks: list, jobs: dict) -> float | None:
+    """How long a finished build took, green or red. A build that failed in its own work (a failed test after 45
+    minutes) took that long too, and on a busy project most long builds end red: learning only from green ones
+    learned mostly the quick skips (2026-11-19: every green LifeShare "Compile and test" of the day took 2 minutes,
+    the red town builds 13 to 45). Not counted: a cancelled check, a commit status, a failure in set-up (checkout,
+    the machine) or one whose job is not known."""
+    if not checks or any(c.get("source") == "status" or c.get("status") != "completed" for c in checks):
+        return None
+    for c in checks:
+        if c.get("conclusion") == "success":
+            continue
+        if c.get("conclusion") != "failure":
+            return None
+        if not any(p["state"] == "failed" and not rules.SETUP_STEP.search(p["name"]) for p in steps_of(jobs.get(c.get("id")))):
+            return None
+    start = min((ts(c.get("started_at")) for c in checks if c.get("started_at")), default=0.0)
+    end = max((ts(c.get("completed_at")) for c in checks if c.get("completed_at")), default=0.0)
+    return end - start if start and end > start else None
+
+
 def learn_checks(h: History, repo: str, kind: str, sha: str, quick: list, build: list, jobs: dict, machine_of,
                  number=None) -> None:
     for name, checks in (("quick", quick), ("build", build)):
@@ -222,16 +253,21 @@ def learn_checks(h: History, repo: str, kind: str, sha: str, quick: list, build:
         # and it must not stop the rest from being timed (2026-11-19: no build time was ever learned again, because
         # LifeShare's PR check always has skipped jobs).
         checks = [c for c in checks if c.get("conclusion") not in ("skipped", "neutral")]
-        g = group(checks)
-        if g["status"] == "done" and g["started"] and g["completed"] and _timed(checks):
+        if name == "build":
+            took = _build_span(checks, jobs)
+        else:
+            g = group(checks)
+            took = ts(g["completed"]) - ts(g["started"]) if g["status"] == "done" and g["started"] and g["completed"] \
+                and _timed(checks) else None
+        if took:
             if number is not None:      # this PR's own last runs: the same files, so the best guess for its next one
-                h.add(("own", repo, str(number), name), ts(g["completed"]) - ts(g["started"]), f"{sha}:{name}")
+                h.add(("own", repo, str(number), name), took, f"{sha}:{name}")
             machine = ""
             for c in checks:
                 job = jobs.get(c.get("id"))
                 if job and job.get("runner_name"):
                     machine = machine_of(job["runner_name"])
-            h.add((name, repo, kind, machine), ts(g["completed"]) - ts(g["started"]), f"{sha}:{name}")
+            h.add((name, repo, kind, machine), took, f"{sha}:{name}")
     for c in build:
         learn_job(h, repo, kind, jobs.get(c.get("id")))
 
@@ -276,11 +312,13 @@ def _step(h: History, repo: str, kind: str, stage: str, started: str, at: float,
     """The current step's own bar: how long it has run against how long it usually takes, and its parts."""
     avg, n = own_estimate(h, repo, number, stage)
     own = avg is not None
+    scope = "own" if own else ""
     if not own:
-        avg, n = h.estimate((stage, repo, "all" if stage == "staging" else kind, machine))
+        avg, n, level = h.estimate_at((stage, repo, "all" if stage == "staging" else kind, machine), own_from=3)
+        scope = "kind" if level >= 3 else "all"
     elapsed = max(0.0, at - ts(started)) if started else 0.0
     out = {"elapsed": round(elapsed), "avg": round(avg) if avg else None, "samples": n, "machine": machine, "parts": [],
-           "own": own}
+           "own": own, "scope": scope}
     if avg:
         out["pct"] = min(99, int(100 * elapsed / avg))
         out["left"] = round(max(0.0, avg - elapsed))
@@ -305,7 +343,7 @@ def _overall(h: History, repo: str, kind: str, states: dict, cur: str, step: dic
     """The whole road from the first check to a green staging build, weighted by how long each step usually takes."""
     avgs = {}
     for s in TIMED:
-        avgs[s], _ = h.estimate((s, repo, "all" if s == "staging" else kind))
+        avgs[s], _ = h.estimate((s, repo, "all" if s == "staging" else kind), own_from=3)
     if any(v is None for v in avgs.values()):
         return {"pct": None, "left": None, "learning": True}
     total = sum(avgs.values())
@@ -367,7 +405,7 @@ def open_change(h: History, rules: Rules, repo: str, pr: dict, checks: list, job
     if status == "queued" and cur in TIMED:
         avg, _ = own_estimate(h, repo, pr.get("number"), cur)
         if avg is None:
-            avg, _ = h.estimate((cur, repo, kind))
+            avg, _ = h.estimate((cur, repo, kind), own_from=3)
         step = {"elapsed": 0, "avg": round(avg) if avg else None, "pct": 0 if avg else None, "left": round(avg) if avg else None,
                 "late": False, "machine": "", "parts": []}
     return {"key": f"{repo}#{pr.get('number')}", "repo": repo, "number": pr.get("number"), "title": _text(pr.get("title")),
