@@ -126,6 +126,27 @@ class Feed(unittest.TestCase):
         self.assertEqual((pr["checks"]["state"], pr["checks"]["failed"]), ("failed", ["PR check / Compile and test"]))
         self.assertIn("PR #13 check failed: PR check / Compile and test", " | ".join(b["title"] for b in s["blockers"]))
 
+    def test_red_base_branch_is_a_banner_and_one_blocker(self):
+        main = "c" * 40
+        w = self.watch_first({
+            f"repos/{REPO}/commits/main/check-runs": {"check_runs": [
+                {"id": 70, "name": "Compile and test", "status": "completed", "conclusion": "failure", "head_sha": main,
+                 "completed_at": ago(50), "output": {"annotations_count": 1}}]},
+            f"repos/{REPO}/check-runs/70/annotations": [{"annotation_level": "failure", "title": "LifeShare.Town.Fishing"}],
+            f"repos/{REPO}/rules/branches/main": [{"type": "required_status_checks", "parameters": {
+                "required_status_checks": [{"context": "Compile and test"}]}}]})
+        s = w.snapshot()
+        base = s["bases"][0]
+        self.assertEqual((base["branch"], base["state"], base["required"]), ("main", "red", True))
+        self.assertEqual(base["failing"], [{"name": "Compile and test", "tests": ["LifeShare.Town.Fishing"]}])
+        self.assertEqual(base["held"], 1)          # PR #13 fails the same check
+        blk = [b for b in s["blockers"] if b["kind"] == "base"]
+        self.assertEqual(len(blk), 1)
+        self.assertEqual(blk[0]["key"], f"base:{REPO}:main")
+        self.assertEqual(s["blockers"][0]["kind"], "base")
+        w.poll()                                    # the same commit again changes nothing
+        self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks"), [(1,)])
+
     def watch_first(self, first: dict, **over):
         """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
         answers = dict(first)

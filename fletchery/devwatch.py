@@ -42,6 +42,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -50,6 +51,7 @@ from pathlib import Path
 import flow as flowmod
 import pipeline  # beside this file, like every Fletchery module
 import presence
+import rules
 import store as storemod
 
 API = "https://api.github.com"
@@ -429,6 +431,15 @@ class DevWatch:
         self.store = storemod.Store(Path(state_dir) / "fletchery.db" if state_dir else None, log=self.log)
         self.flow = flowmod.Flow(self.store, conf.get("flow"))
         self._flow_cache: tuple[float, dict] = (0.0, {})
+        # Base branches (rules.py): which to watch besides every PR's base, and the project's fix and red-issue labels.
+        self.bases_conf: dict[str, list] = {str(k).lower(): [str(b) for b in v][:10] for k, v in
+                                            ((conf.get("bases") or {}) if isinstance(conf.get("bases"), dict) else {}).items()
+                                            if isinstance(v, list)}
+        self.fix_labels = [str(x) for x in conf.get("fixLabels") or rules.FIX_LABELS][:20]
+        self.red_issue_labels = [str(x) for x in conf.get("redIssueLabels") or rules.RED_ISSUE_LABELS][:20]
+        self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
+        self.notes: dict[tuple, list] = {}          # (repo, check name) -> test names from a failed base check's annotations
+        self._required: dict[tuple, tuple] = {}     # (repo, branch) -> (asked at, required check names)
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -482,16 +493,18 @@ class DevWatch:
             # repository is asked too (an ETag answer costs nothing; a refusal is asked again after an hour).
             places = [("orgs", o) for o in orgs] + [("repos", r["full_name"]) for r in self.repos]
             found = dict(zip([p[1] for p in places], pool.map(self._poll_runners, places)))
-        runs, jobs, prs, checks, issues, pushes, closed, merged, releases = {}, {}, {}, {}, {}, {}, {}, {}, {}
+        runs, jobs, prs, checks, issues, pushes, closed, merged, releases, bases = {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
         errors = [g["error"] for g in got.values() if g.get("error")]
         for repo, g in got.items():
             runs[repo], prs[repo], issues[repo], pushes[repo] = g["runs"], g["prs"], g["issues"], g.get("pushes") or []
             closed[repo], merged[repo], releases[repo] = g.get("closed") or [], g.get("merged") or [], g.get("releases") or []
+            bases[repo] = g.get("bases") or self.bases.get(repo) or {}
             jobs.update(g["jobs"])
             checks.update(g["checks"])
         with self._lock:   # swapped whole, so a snapshot never sees half a poll
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
             self.closed, self.merged, self.releases = closed, merged, releases
+            self.bases = bases
             self.runners = {k: v for k, v in found.items() if v is not None}
         try:
             self._learn()
@@ -639,8 +652,38 @@ class DevWatch:
                                if isinstance(r, dict) and not r.get("draft")]
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
+        week = time.time() - 7 * 86400
+        names = ({str((p.get("base") or {}).get("ref") or "") for p in prs if isinstance(p, dict)}
+                 | {str((p.get("base") or {}).get("ref") or "") for p in out["merged_all"] if _ts(p.get("merged_at")) > week}
+                 | set(self.bases_conf.get(repo.lower(), []))) - {""}
+        out["bases"] = {b: self._read_base(repo, b) for b in sorted(names)[:8]}
         self._read_status_issue(repo)
         return out
+
+    def _read_base(self, repo: str, branch: str) -> dict:
+        """A base branch's newest commit: its checks go to the store (rules.base_health reads the streak), the names of
+        the tests a failed one reports are kept, and the branch's required checks are asked every 10 minutes."""
+        ref = urllib.parse.quote(branch, safe="")
+        cr = (self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100") or {}).get("check_runs") or []
+        if not cr:
+            st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100") or {}
+            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref)] if st.get("sha") else []
+        sha = str((cr[0] if cr else {}).get("head_sha") or "")
+        if sha:
+            self.store.base_checks(repo, branch, sha, cr)
+        for c in cr:
+            if c.get("conclusion") in FAILED and c.get("source") != "status" and isinstance(c.get("id"), int) \
+                    and (c.get("output") or {}).get("annotations_count") and (repo, c.get("name")) not in self.notes:
+                found = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50") or []
+                self.notes[(repo, c.get("name"))] = rules.test_names(found)
+            elif c.get("conclusion") == "success":
+                self.notes.pop((repo, c.get("name")), None)
+        asked, req = self._required.get((repo, branch), (0.0, ()))
+        if time.time() - asked > 600:
+            req = rules.required_checks(self._try(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600) or [],
+                                        self._try(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=6 * 3600) or {})
+            self._required[(repo, branch)] = (time.time(), tuple(req))
+        return {"checking": any(c.get("status") != "completed" for c in cr), "required": list(req)}
 
     def _read_status_issue(self, repo: str) -> None:
         """Cloud agents' heartbeats: comments on the repository's status issue edited in the last day. `since` is
@@ -861,7 +904,15 @@ class DevWatch:
                           b.get("since") or "", b.get("key") or "")
             except Exception as e:   # never lose the whole feed over it
                 block("feed", "Fletchery could not check its own machines", f"{type(e).__name__}: {e}"[:200], key="extra")
-        rank = {"feed": 0, "machine": 1, "stuck": 2, "check": 3, "runner": 4, "label": 5}
+        bases_out = self.base_now(prs_out, prs_by, issues_out, at)
+        for h in bases_out:
+            if h.get("state") == "red":
+                fix = ", ".join(f"#{f['number']}" for f in h.get("fixes") or [])
+                block("base", f"{h['branch']} is red: {', '.join(x['name'] for x in h.get('failing') or [])[:120]}",
+                      f"{h['repo']} · " + (f"fix in line: {fix}" if fix else "no fix in line yet") +
+                      (f" · {h['held']} PRs held red by it" if h.get("held") else ""), "", h.get("since") or "",
+                      f"base:{h['repo']}:{h['branch']}", h["repo"])
+        rank = {"feed": 0, "base": 1, "machine": 2, "stuck": 3, "check": 4, "runner": 5, "label": 6}
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
         agents = self._agents(at, prs_out, runs_out, issues_out)
         changes = self._changes(at, prs_by, checks_by, runs_by, jobs_by)
@@ -881,6 +932,7 @@ class DevWatch:
                        "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
             "flow": self.flow_now(prs_out, at),
+            "bases": bases_out,
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "changes": changes[:60],
             "building": building[:30],
@@ -899,6 +951,34 @@ class DevWatch:
                 self.store.jobs(repo, run, (g.get("jobs") or {}).get(run.get("id")) or [])
         self.store.prune()
         self._flow_cache = (0.0, {})
+        self._base_cache = (0.0, None)
+
+    def base_now(self, prs_out: list, prs_by: dict, issues_out: list, at: float) -> list:
+        """Every watched base branch's health (rules.base_health), red ones first; worked out at most every 15 s."""
+        when, kept = getattr(self, "_base_cache", (0.0, None))
+        if kept is not None and at - when < 15:
+            return kept
+        with self._lock:
+            bases = {r: dict(b) for r, b in self.bases.items()}
+        bodies = {(repo, p.get("number")): str(p.get("body") or "")[:4000] for repo, ps in prs_by.items() for p in ps}
+        out = []
+        for repo, branches in bases.items():
+            prs = [{**p, "body": bodies.get((repo, p["number"]), "")} for p in prs_out if p["repo"] == repo]
+            issues = [i for i in issues_out if i["repo"] == repo]
+            notes = {name: tests for (r, name), tests in self.notes.items() if r == repo}
+            for branch, info in branches.items():
+                try:
+                    h = rules.base_health(self.store, repo, branch, required=info.get("required"), prs=prs, issues=issues,
+                                          notes=notes, checking=info.get("checking"), fix_labels=self.fix_labels,
+                                          red_issue_labels=self.red_issue_labels, now=at)
+                except Exception as e:      # one branch's history never costs the feed
+                    self.log(f"live: base health {repo} {branch}: {type(e).__name__}: {e}")
+                    h = None
+                if h:
+                    out.append(h)
+        out.sort(key=lambda h: (h["state"] != "red", -(h.get("for") or 0), h["repo"], h["branch"]))
+        self._base_cache = (at, out[:20])
+        return out[:20]
 
     def flow_now(self, prs_out: list, at: float) -> dict:
         """The Flow strip (flow.py), worked out at most every 15 s."""
