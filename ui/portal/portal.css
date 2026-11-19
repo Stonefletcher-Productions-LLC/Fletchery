@@ -144,6 +144,21 @@ dialog li { margin: 4px 0; }
 .fine { font-size: 13px; color: var(--muted); margin-top: 12px; }
 
 @media (max-width: 340px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+/* Flow: is work moving? A verdict, a few numbers and 24 hourly bars of merges */
+.flow { background: var(--panel); border: 1px solid var(--rule); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+.flow .verdict { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; font-size: 14px; }
+.flow .verdict .chip { margin: 0; }
+.flow .nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px 12px; margin: 0; }
+.flow .nums div { min-width: 0; }
+.flow .nums dt { font-size: 12px; color: var(--muted); }
+.flow .nums dd { margin: 0; font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.flow .nums dd { line-height: 1.25; }
+.flow .nums dd small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+.flow .hours { display: flex; align-items: flex-end; gap: 2px; height: 28px; margin: 10px 0 2px; }
+.flow .hours i { flex: 1; min-height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; opacity: .85; }
+.flow .hours i.zero { background: var(--rule); }
+.flow .axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
+.flow .bases { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
 @media (prefers-reduced-motion: no-preference) { .dot.ok.pulse { animation: pulse 1.2s ease-out 1; } }
 @keyframes pulse { from { box-shadow: 0 0 0 0 rgba(112, 220, 193, .7); } to { box-shadow: 0 0 0 9px rgba(112, 220, 193, 0); } }
 
@@ -215,7 +230,7 @@ body.desktop .toast { bottom: 24px; }
   /* two columns that fill top to bottom, so a short card leaves no gap beside a long one */
   body.desktop #view-live:not([hidden]), body.desktop #view-builds:not([hidden]) { columns: 2; column-gap: 14px; }
   body.desktop .view > .card { break-inside: avoid; display: inline-block; width: 100%; }
-  body.desktop #view-live > .alert, body.desktop #view-live > .stats, body.desktop #view-live > .filters,
+  body.desktop #view-live > .alert, body.desktop #view-live > .stats, body.desktop #view-live > .filters, body.desktop #view-live > .flow,
   body.desktop #view-live > .fine { column-span: all; }
 }
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 6px; }

@@ -67,6 +67,36 @@
     if (b) { b.hidden = !c.blockers; b.textContent = c.blockers > 99 ? '99+' : String(c.blockers || ''); }
     document.title = (c.blockers ? '(' + c.blockers + ') ' : '') + 'Fletchery';
   }
+  // ---- Flow: is work moving? (flow.py) ----
+  const VERDICT = {moving: ['run', 'Moving'], idle: ['', 'Idle'], slow: ['wait', 'Slow'], stopped: ['bad', 'Stopped']};
+  const dur = s => s == null ? '–' : s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : s < 172800 ? (s / 3600).toFixed(1).replace('.0', '') + ' h' : Math.round(s / 86400) + ' d';
+  function drawFlow(full) {
+    const box = $('liveFlow'), all = full.flow || {};
+    const f = (repo ? (all.repos || {})[repo] : all.all) || null;
+    box.hidden = !f;
+    if (!f) return;
+    const v = VERDICT[(f.verdict || {}).state] || ['', (f.verdict || {}).state || ''];
+    box.className = 'flow ' + ((f.verdict || {}).state || '');
+    const num = (label, value, small) => el('div', null, el('dt', {text: label}), el('dd', null, value, small ? el('small', {text: ' ' + small}) : null));
+    const peak = Math.max(1, ...(f.hours || []));
+    const bars = (f.hours || []).map((n, i) => {
+      const b = el('i', {class: n ? '' : 'zero', title: n + ' merge' + (n === 1 ? '' : 's') + ', ' + (23 - i) + '–' + (24 - i) + ' h ago'});
+      b.style.height = Math.max(8, Math.round(100 * n / peak)) + '%';
+      return b;
+    });
+    const lastBits = (f.last || []).slice(0, 4).map(x => (repo ? '' : (x.repo.split('/')[1] || x.repo) + ' ') + x.base + ' ' + dur(x.ago) + ' ago');
+    box.replaceChildren(
+      el('p', {class: 'verdict'}, el('span', {class: 'chip ' + v[0], text: v[1]}), el('span', {text: (f.verdict || {}).why || ''})),
+      el('dl', {class: 'nums'},
+        num('Merges', String(f.merges_hour || 0), 'last hour · ' + (f.merges_day || 0) + ' today'),
+        num('Since last merge', dur(f.since_merge)),
+        num('PR to merge', dur(f.lead_p50), 'median, 7 days'),
+        num('Wait for a machine', dur(f.wait_p50), f.wait_p90 != null ? 'p90 ' + dur(f.wait_p90) : 'today'),
+        num('Base went red', f.red_share == null ? '–' : Math.round(100 * f.red_share) + '%', f.red_n ? 'of ' + f.red_n + ' runs, 7 days' : '')),
+      el('div', {class: 'hours', role: 'img', 'aria-label': 'Merges per hour, last 24 hours: ' + (f.hours || []).join(', ')}, ...bars),
+      el('div', {class: 'axis', 'aria-hidden': 'true'}, el('span', {text: '24 h ago'}), el('span', {text: 'now'})),
+      lastBits.length ? el('p', {class: 'bases', text: 'Last merge into ' + lastBits.join(' · ')}) : null);
+  }
   function blockerRow(b) {
     const label = {feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked', disk: 'Low disk'}[b.kind] || 'Look';
     return el('li', {class: 'blk'}, el('span', {class: 'chip needs', text: label}),
@@ -299,6 +329,7 @@
     const d = repo ? {...full, blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
     stats(full);
+    drawFlow(full);
     const blk = d.blockers || [];
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';

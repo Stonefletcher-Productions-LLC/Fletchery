@@ -47,8 +47,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import flow as flowmod
 import pipeline  # beside this file, like every Fletchery module
 import presence
+import store as storemod
 
 API = "https://api.github.com"
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
@@ -423,6 +425,10 @@ class DevWatch:
         self.releases: dict[str, list] = {}         # repo -> its latest releases
         self.presence = presence.Presence(Path(state_dir) / "agent-presence.json" if state_dir else None, clean=_scrub,
                                           active_seconds=self.agent_active, log=self.log)
+        # What happened, kept (store.py): merges, runs, jobs. The Flow strip reads it (flow.py).
+        self.store = storemod.Store(Path(state_dir) / "fletchery.db" if state_dir else None, log=self.log)
+        self.flow = flowmod.Flow(self.store, conf.get("flow"))
+        self._flow_cache: tuple[float, dict] = (0.0, {})
 
     # ---- machines ----
     def report(self, machine: str, data: dict, ip: str = "") -> dict:
@@ -491,6 +497,10 @@ class DevWatch:
             self._learn()
         except Exception as e:      # step times are a nicety: never lose the feed over them
             self.log(f"live: step times: {type(e).__name__}: {e}")
+        try:
+            self._record(got)
+        except Exception as e:      # history is a nicety too: the live feed comes first
+            self.log(f"live: history: {type(e).__name__}: {e}")
         busy = any(r.get("status") in ACTIVE for rs in runs.values() for r in rs) or any(
             (rep["data"] or {}).get("busy") for rep in list(self.reports.values()))
         self.interval = self.fast if busy else self.slow
@@ -572,7 +582,8 @@ class DevWatch:
             return old
 
     def _read_repo(self, repo: str) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": []}
+        out = {"runs": [], "jobs": {}, "prs": [], "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
+               "merged_all": []}
         runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
         out["runs"] = runs
         for run in runs:
@@ -618,6 +629,8 @@ class DevWatch:
             branch = str((p.get("head") or {}).get("ref") or "")
             if isinstance(p, dict) and p.get("closed_at") and _agent_of(branch, ""):
                 out["closed"].append({"branch": _text(branch, 120), "at": _text(p.get("closed_at"), 30), "number": p.get("number")})
+            if isinstance(p, dict) and p.get("merged_at"):
+                out["merged_all"].append(p)
             if isinstance(p, dict) and p.get("merged_at") and _age(p["merged_at"]) < pipeline.MERGED_HOURS * 3600:
                 out["merged"].append({k: p.get(k) for k in ("number", "title", "html_url", "merged_at", "base", "head", "labels")})
         # Releases: the last step of a change's road. One call, ETag; only asked while something merged recently.
@@ -867,12 +880,42 @@ class DevWatch:
                        "prs": len(prs_out), "issues": len(issues_out), "blockers": len(blockers), "parked": len(parked), "building": len(building),
                        "agents": sum(1 for a in agents if a["active"]), "agents_idle": sum(1 for a in agents if not a["active"]),
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
+            "flow": self.flow_now(prs_out, at),
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "changes": changes[:60],
             "building": building[:30],
             "blockers": blockers[:40], "parked": parked[:40], "machines": machines_out, "runners": runners_out,
             "runs": runs_out[:40], "prs": prs_out[:80], "issues": issues_out[:60],
         }
+
+    def _record(self, got: dict) -> None:
+        """Keep what this poll saw (store.py): merged PRs, finished runs, started and finished jobs."""
+        for repo, g in got.items():
+            if g.get("error"):
+                continue
+            self.store.merges(repo, g.get("merged_all") or [], _agent_of)
+            self.store.runs(repo, g.get("runs") or [])
+            for run in g.get("runs") or []:
+                self.store.jobs(repo, run, (g.get("jobs") or {}).get(run.get("id")) or [])
+        self.store.prune()
+        self._flow_cache = (0.0, {})
+
+    def flow_now(self, prs_out: list, at: float) -> dict:
+        """The Flow strip (flow.py), worked out at most every 15 s."""
+        when, kept = self._flow_cache
+        if kept and at - when < 15:
+            return kept
+        waiting: dict = {}
+        for p in prs_out:
+            if not p["draft"] and p["checks"]["state"] not in ("failed",):
+                waiting[p["repo"]] = waiting.get(p["repo"], 0) + 1
+        try:
+            kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at)
+        except Exception as e:
+            self.log(f"live: flow: {type(e).__name__}: {e}")
+            kept = {}
+        self._flow_cache = (at, kept)
+        return kept
 
     def _runner_machine(self, runner_name: str) -> str:
         return self.display(self.machine_of(runner_name)) if runner_name else ""
