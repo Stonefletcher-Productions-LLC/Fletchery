@@ -26,7 +26,7 @@
   const web = url => typeof url === 'string' && url.startsWith('https://') ? url : '';
   const a = (url, cls, ...kids) => web(url) ? el('a', {class: cls, href: url, target: '_blank', rel: 'noopener noreferrer'}, ...kids) : el('span', {class: cls}, ...kids);
   // How many rows each list shows before "Show N more" (kit.js).
-  const CAP = {liveBuilding: 6, liveChanges: 5, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
+  const CAP = {liveProblems: 5, liveBuilding: 6, liveChanges: 5, liveAgents: 6, liveBlockers: 4, liveMachines: 4, liveRunners: 6, liveRuns: 5, livePrs: 6, liveIssues: 6};
   function fill(node, rows, empty, more) {
     const extra = more > 0 ? [el('li', {class: 'empty', text: '… and ' + more + ' more on GitHub'})] : [];
     node.replaceChildren(...(rows.length ? rows.concat(extra) : [el('li', {class: 'empty', text: empty})]));
@@ -118,6 +118,29 @@
           (h.issues || []).length ? [' · tracked in ', ...sep(h.issues.map(i => a(i.url, '', '#' + i.number)))] : ''),
         h.held ? el('p', {class: 'sub', text: h.held + ' open PR' + (h.held > 1 ? 's fail' : ' fails') + ' the same check' + (h.held > 1 ? 's' : '') + ' because of this; fixing ' + h.branch + ' clears ' + (h.held > 1 ? 'them' : 'it') + '.'}) : null);
     }));
+  }
+  // ---- Why PRs are red: problems by cause (rules.py) ----
+  const CAUSE = {own: 'Own bug', base: 'Base is red', machine: 'Machine', flaky: 'Flaky', cancelled: 'Cancelled'};
+  const CAUSE_N = {own: ['own bug', 'own bugs'], base: ['inherited from a red base', 'inherited from a red base'],
+                   machine: ['machine problem', 'machine problems'], flaky: ['flaky', 'flaky'], cancelled: ['cancelled', 'cancelled']};
+  function problemRow(g) {
+    const again = desk() && ['machine', 'cancelled', 'flaky'].includes(g.cause) ? g.prs.filter(p => p.job).slice(0, 4) : [];
+    return el('li', {class: 'prob'}, el('span', {class: 'chip c-' + g.cause, text: CAUSE[g.cause] || g.cause}),
+      el('div', {class: 'what'}, a((g.prs[0] || {}).url, 't', g.title),
+        el('p', {class: 'prs'}, ...sep(g.prs.slice(0, 6).map(p => [a('https://github.com/' + p.repo + '/pull/' + p.number, '', '#' + p.number), ' ' + p.title]))),
+        el('p', {class: 'sub'}, ...sep(join(g.repo.split('/')[1], g.runner, g.since ? ['red for ', since(g.since)] : ''))),
+        again.length ? el('div', {class: 'ctl'}, again.map(p => control('Re-run #' + p.number, '/api/actions/rerun-job', {repo: p.repo, id: p.job}))) : null));
+  }
+  function drawProblems(d, full) {
+    const probs = (d.problems || []).filter(mine), c = full.causes || {};
+    const red = repo ? new Set(probs.flatMap(g => g.prs.map(p => p.number))).size : c.red || 0;
+    $('n-lprob').textContent = probs.length ? '(' + probs.length + ')' : '';
+    $('liveProblemsCard').classList.toggle('calm', !probs.length);
+    const parts = repo ? [] : Object.keys(CAUSE).filter(k => c[k]).map(k => c[k] + ' ' + CAUSE_N[k][c[k] > 1 ? 1 : 0]);
+    $('liveCauses').textContent = red ? red + ' red PR' + (red > 1 ? 's' : '') + (parts.length ? ': ' + parts.join(' · ') : '') +
+      '. Only own bugs count as stuck.' : '';
+    $('liveCauses').hidden = !red;
+    fill($('liveProblems'), probs.map(problemRow), 'No PR is red.');
   }
   function blockerRow(b) {
     const label = {base: 'Base red', feed: 'Feed', machine: 'Silent', stuck: 'Stuck', check: 'Failed', runner: 'Offline', label: 'Blocked', disk: 'Low disk'}[b.kind] || 'Look';
@@ -323,6 +346,7 @@
       el('div', null, a(p.url, 'title', el('span', {class: 'num', text: '#' + p.number}), p.title),
         el('p', {class: 'sub'}, ...sep(join(p.repo.split('/')[1], p.author, what, ago(p.updated))))),
       el('div', {class: 'chips'}, el('span', {class: 'chip ' + chip[0], text: chip[1]}),
+        c.cause && c.state === 'failed' ? el('span', {class: 'chip c-' + c.cause, text: CAUSE[c.cause]}) : null,
         p.auto_merge ? el('span', {class: 'chip run', text: 'Auto-merge on'}) : null)),
       desk() && again.some(x => x.job) ? el('div', {class: 'ctl'}, again.filter(x => x.job).map(x =>
         control('Re-run ' + x.name, '/api/actions/rerun-job', {repo: p.repo, id: x.job}))) : null);
@@ -348,11 +372,12 @@
   const mine = x => !repo || !x.repo || x.repo === repo;
   function draw(full) {
     repoChips(full);
-    const d = repo ? {...full, blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
+    const d = repo ? {...full, problems: (full.problems || []).filter(mine), blockers: (full.blockers || []).filter(mine), parked: (full.parked || []).filter(mine), runs: (full.runs || []).filter(mine),
                       prs: (full.prs || []).filter(mine), issues: (full.issues || []).filter(mine)} : full;
     stats(full);
     drawBases(full);
     drawFlow(full);
+    drawProblems(d, full);
     const blk = d.blockers || [];
     $('liveBlockersCard').classList.toggle('calm', !blk.length);
     $('n-lblock').textContent = blk.length ? '(' + blk.length + ')' : '';

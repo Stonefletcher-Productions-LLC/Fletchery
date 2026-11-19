@@ -334,7 +334,8 @@
     ],
     "running": [],
     "url": "https://github.com/Acme/Game/runs/1",
-    "rerun": []
+    "rerun": [],
+    "cause": "own"
    }
   },
   {
@@ -930,5 +931,94 @@
    "required": false,
    "green_at": "2026-11-18T10:00:00Z"
   }
- ]
+ ],
+ "problems": [
+  {
+   "key": "own:Acme/Game:compile and test:folk.hair lod #",
+   "cause": "own",
+   "words": "Own bug",
+   "check": "Compile and test",
+   "repo": "Acme/Game",
+   "base": "main",
+   "runner": "",
+   "tests": [
+    "LifeShare.Folk.Hair LOD 3"
+   ],
+   "prs": [
+    {
+     "repo": "Acme/Game",
+     "number": 13,
+     "title": "Weather",
+     "url": "https://github.com/Acme/Game/pull/13",
+     "job": 0,
+     "check": "Compile and test"
+    }
+   ],
+   "since": "2026-11-18T20:00:00Z",
+   "title": "PR #13 fails Compile and test (LifeShare.Folk.Hair LOD 3)"
+  },
+  {
+   "key": "base:Acme/Game:Test-Staging:compile and test",
+   "cause": "base",
+   "words": "Base is red",
+   "check": "Compile and test",
+   "repo": "Acme/Game",
+   "base": "Test-Staging",
+   "runner": "",
+   "tests": [
+    "LifeShare.Town.Fishing"
+   ],
+   "prs": [
+    {
+     "repo": "Acme/Game",
+     "number": 20,
+     "title": "Lots",
+     "url": "https://github.com/Acme/Game/pull/20",
+     "job": 0,
+     "check": "Compile and test"
+    },
+    {
+     "repo": "Acme/Game",
+     "number": 21,
+     "title": "Roads",
+     "url": "https://github.com/Acme/Game/pull/21",
+     "job": 0,
+     "check": "Compile and test"
+    }
+   ],
+   "since": "2026-11-18T19:00:00Z",
+   "title": "2 PRs fail Compile and test (LifeShare.Town.Fishing) because Test-Staging is red"
+  },
+  {
+   "key": "machine:NODE-unreal-pr:compile and test",
+   "cause": "machine",
+   "words": "Machine problem",
+   "check": "Compile and test",
+   "repo": "Acme/Game",
+   "base": "main",
+   "runner": "NODE-unreal-pr",
+   "tests": [],
+   "prs": [
+    {
+     "repo": "Acme/Game",
+     "number": 22,
+     "title": "Hair LODs",
+     "url": "https://github.com/Acme/Game/pull/22",
+     "job": 991,
+     "check": "Compile and test"
+    }
+   ],
+   "since": "2026-11-18T21:00:00Z",
+   "title": "PR #22: Compile and test gave no verdict on NODE-unreal-pr; re-run"
+  }
+ ],
+ "causes": {
+  "own": 1,
+  "base": 2,
+  "machine": 1,
+  "flaky": 0,
+  "cancelled": 0,
+  "red": 4,
+  "problems_own": 1
+ }
 }

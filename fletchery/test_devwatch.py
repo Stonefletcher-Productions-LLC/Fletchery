@@ -102,7 +102,7 @@ class Feed(unittest.TestCase):
 
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
-        for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 check failed",
+        for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 fails Compile and test",
                      "Runner NODE-unreal-light is offline", "PR #13 is marked blocked", "#41 needs you"):
             self.assertIn(want, titles)
 
@@ -124,7 +124,7 @@ class Feed(unittest.TestCase):
         s = w.snapshot()
         pr = next(p for p in s["prs"] if p["number"] == 13)
         self.assertEqual((pr["checks"]["state"], pr["checks"]["failed"]), ("failed", ["PR check / Compile and test"]))
-        self.assertIn("PR #13 check failed: PR check / Compile and test", " | ".join(b["title"] for b in s["blockers"]))
+        self.assertIn("PR #13 fails PR check / Compile and test", " | ".join(b["title"] for b in s["blockers"]))
 
     def test_red_base_branch_is_a_banner_and_one_blocker(self):
         main = "c" * 40
@@ -146,6 +146,26 @@ class Feed(unittest.TestCase):
         self.assertEqual(s["blockers"][0]["kind"], "base")
         w.poll()                                    # the same commit again changes nothing
         self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks"), [(1,)])
+
+    def test_red_checks_grouped_by_cause(self):
+        # PR #13 fails the same check as its red base (inherited); PR #12 fails in a setup step (the machine).
+        main, sha_ok, sha_bad = "c" * 40, "a" * 40, "b" * 40
+        w = self.watch_first({
+            f"repos/{REPO}/commits/main/check-runs": {"check_runs": [
+                {"id": 70, "name": "Compile and test", "status": "completed", "conclusion": "failure", "head_sha": main, "completed_at": ago(50)}]},
+            f"repos/{REPO}/commits/{sha_ok}/check-runs": {"check_runs": [
+                {"id": 81, "name": "Cheap checks", "status": "completed", "conclusion": "failure", "completed_at": ago(9),
+                 "details_url": "https://github.com/Acme/Game/actions/runs/1/job/81"}]},
+            f"repos/{REPO}/actions/jobs/81": {"runner_name": "ALEX-PC-unreal-light", "steps": [
+                {"name": "Set up job", "conclusion": "success"}, {"name": "Checkout with LFS", "conclusion": "failure"}]}})
+        s = w.snapshot()
+        by = {(g["cause"], g["prs"][0]["number"]) for g in s["problems"]}
+        self.assertEqual(by, {("base", 13), ("machine", 12)})
+        self.assertEqual(s["causes"], {"own": 0, "base": 1, "machine": 1, "flaky": 0, "cancelled": 0, "red": 2, "problems_own": 0})
+        self.assertNotIn("check", {b["kind"] for b in s["blockers"]})     # nothing of their own to fix
+        self.assertEqual({p["number"]: p["checks"].get("cause") for p in s["prs"]}, {12: "machine", 13: "base"})
+        g = next(g for g in s["problems"] if g["cause"] == "machine")
+        self.assertEqual(g["runner"], "ALEX-PC-unreal-light")
 
     def watch_first(self, first: dict, **over):
         """A world whose `first` answers win over the usual ones (FakeGitHub answers the first matching prefix)."""
@@ -175,8 +195,12 @@ class Feed(unittest.TestCase):
         s = w.snapshot()
         titles = " | ".join(b["title"] for b in s["blockers"])
         self.assertNotIn("for a runner", titles)
-        self.assertNotIn("check failed", titles)
+        self.assertNotIn("PR #13 fails", titles)
         self.assertNotIn("marked blocked", titles)
+        # the cancelled and "No result" checks are problems with their cause, but nobody needs to fix code for them
+        causes = {g["cause"]: g for g in s["problems"]}
+        self.assertEqual(set(causes), {"cancelled", "machine"})
+        self.assertEqual((s["causes"]["red"], s["causes"]["own"]), (1, 0))
         pr = next(p for p in s["prs"] if p["number"] == 13)
         self.assertEqual(pr["checks"]["state"], "running")
         self.assertEqual([(x["name"], x["why"], x["job"]) for x in pr["checks"]["rerun"]],

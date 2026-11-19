@@ -390,6 +390,8 @@ class DevWatch:
         self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
         self.closed: dict[str, list] = {}           # repo -> recently merged or closed PRs' branches (they leave Agents)
         self.no_result: dict[int, bool] = {}        # failed check run id -> its annotations say "No result" (asked once)
+        self.fail_notes: dict[int, tuple] = {}      # failed check run id -> (test names, annotation text) (asked once)
+        self.fail_jobs: dict[int, dict] = {}        # failed check run id -> {"step", "runner"} of its job (asked once)
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
         self.skip: dict[str, float] = {}            # path -> don't ask again before
@@ -436,6 +438,14 @@ class DevWatch:
                                             ((conf.get("bases") or {}) if isinstance(conf.get("bases"), dict) else {}).items()
                                             if isinstance(v, list)}
         self.fix_labels = [str(x) for x in conf.get("fixLabels") or rules.FIX_LABELS][:20]
+        # Extra "this is the machine, not the code" messages (regular expressions), added to rules.MACHINE_TEXT.
+        self.machine_patterns = list(rules.MACHINE_TEXT)
+        for x in ((conf.get("causes") or {}).get("machine") or []) if isinstance(conf.get("causes"), dict) else []:
+            try:
+                re.compile(str(x))
+                self.machine_patterns.append(str(x)[:200])
+            except re.error:
+                self.log(f"live: causes.machine pattern {str(x)[:60]!r} ignored: not a regular expression")
         self.red_issue_labels = [str(x) for x in conf.get("redIssueLabels") or rules.RED_ISSUE_LABELS][:20]
         self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
         self.notes: dict[tuple, list] = {}          # (repo, check name) -> test names from a failed base check's annotations
@@ -628,6 +638,15 @@ class DevWatch:
                     notes = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=30") or []
                     self.no_result[c["id"]] = any(NO_RESULT.search(str(n.get("message") or "") + " " + str(n.get("title") or ""))
                                                   for n in notes if isinstance(n, dict))
+                    # what the failure says, for its cause and its problem (rules.classify): test names and a little text
+                    self.fail_notes[c["id"]] = (rules.test_names(notes), " ".join(
+                        str(n.get("message") or "")[:300] for n in notes if isinstance(n, dict))[:1500])
+                if c.get("conclusion") in FAILED + ("cancelled",) and isinstance(c.get("id"), int) and c.get("source") != "status" \
+                        and c["id"] not in self.fail_jobs and "/actions/" in str(c.get("details_url") or c.get("html_url") or "/actions/"):
+                    # the job behind a failed check, once (a finished job never changes): its failed step and machine
+                    j = self._try(f"repos/{repo}/actions/jobs/{c['id']}", quiet_for=86400) or {}
+                    step = next((st.get("name") for st in j.get("steps") or [] if st.get("conclusion") in FAILED), "")
+                    self.fail_jobs[c["id"]] = {"step": _text(step, 120), "runner": _text(j.get("runner_name"), 80)}
         # Pushes to agent branches (claude/..., codex/...): what the Agents card shows before a PR exists. One call, ETag.
         for e in self._try(f"repos/{repo}/events?per_page=100") or []:
             if not isinstance(e, dict) or e.get("type") != "PushEvent":
@@ -838,6 +857,7 @@ class DevWatch:
         machines_out = self._machines(at, runners_out, block)
 
         prs_out = []
+        red_checks: list = []
         for repo, prs in prs_by.items():
             for p in prs:
                 sha = (p.get("head") or {}).get("sha")
@@ -861,10 +881,9 @@ class DevWatch:
                                              "why": "cancelled" if c.get("conclusion") == "cancelled" else "no result"} for c in rerun][:4],
                                   "url": _web((failed or rerun or going or cr or [{}])[0].get("html_url"))}}
                 prs_out.append(row)
-                if failed and not row["draft"]:
-                    block("check", f"PR #{row['number']} check failed: {', '.join(row['checks']['failed'][:2])}",
-                          f"{repo} · {row['title']}", row["checks"]["url"] or row["url"], max((c.get("completed_at") or "") for c in failed),
-                          f"check:{repo}:{row['number']}:{sha}", repo)
+                if not row["draft"]:
+                    for c in failed + rerun:      # why each is red is decided below, once base health is known
+                        red_checks.append((row, c, cr_all := checks_by.get((repo, sha)) or []))
                 for c in going:
                     if c.get("status") == "in_progress" and _age(c.get("started_at"), at) > LIMITS["check"]:
                         block("stuck", f"PR #{row['number']} check \"{_text(c.get('name'), 60)}\" has run {int(_age(c.get('started_at'), at) // 60)} min",
@@ -905,6 +924,12 @@ class DevWatch:
             except Exception as e:   # never lose the whole feed over it
                 block("feed", "Fletchery could not check its own machines", f"{type(e).__name__}: {e}"[:200], key="extra")
         bases_out = self.base_now(prs_out, prs_by, issues_out, at)
+        problems = self._problems(red_checks, bases_out, prs_out)
+        for g in problems:
+            if g["cause"] == "own":       # only a real bug in a PR needs someone; the rest is shown, not counted
+                first = g["prs"][0]
+                block("check", g["title"], f"{g['repo']} · " + "; ".join(f"#{p['number']} {p['title']}" for p in g["prs"][:3]),
+                      first["url"], g["since"], f"problem:{g['key']}", g["repo"])
         for h in bases_out:
             if h.get("state") == "red":
                 fix = ", ".join(f"#{f['number']}" for f in h.get("fixes") or [])
@@ -933,6 +958,7 @@ class DevWatch:
                        "changes": len(changes), "changes_moving": sum(1 for c in changes if c["status"] in ("running", "queued"))},
             "flow": self.flow_now(prs_out, at),
             "bases": bases_out,
+            "problems": problems[:40], "causes": rules.summary(problems),
             "agents": [a for a in agents if a["active"]][:40],     # working now; the rest is only counted
             "changes": changes[:60],
             "building": building[:30],
@@ -950,8 +976,38 @@ class DevWatch:
             for run in g.get("runs") or []:
                 self.store.jobs(repo, run, (g.get("jobs") or {}).get(run.get("id")) or [])
         self.store.prune()
+        for cache in (self.no_result, self.fail_notes, self.fail_jobs):
+            while len(cache) > 4000:      # oldest first (insertion order): finished checks never change, so re-asking is rare
+                cache.pop(next(iter(cache)))
         self._flow_cache = (0.0, {})
         self._base_cache = (0.0, None)
+
+    def _problems(self, red_checks: list, bases_out: list, prs_out: list) -> list:
+        """Why each red PR check is red (rules.classify), grouped into problems (rules.problems); each PR row gets its
+        cause too."""
+        base_failing = {(h["repo"], h["branch"]): {rules._norm(f["name"]): f.get("tests") or [] for f in h.get("failing") or []}
+                        for h in bases_out if h.get("state") == "red"}
+        failures = []
+        for row, c, cr_all in red_checks:
+            cid = c.get("id") if isinstance(c.get("id"), int) else 0
+            tests, text = self.fail_notes.get(cid, ([], ""))
+            job = self.fail_jobs.get(cid, {})
+            retried_ok = any(o.get("name") == c.get("name") and o.get("conclusion") == "success"
+                             and str(o.get("completed_at") or "") < str(c.get("completed_at") or "~") for o in cr_all)
+            cause = rules.classify({"name": c.get("name"), "conclusion": c.get("conclusion"), "no_result": self.no_result.get(cid)},
+                                   failed_step=job.get("step", ""), tests=tests, text=text, retried_ok=retried_ok,
+                                   base_failing=base_failing.get((row["repo"], row["base"])), machine_patterns=self.machine_patterns)
+            failures.append({"repo": row["repo"], "number": row["number"], "title": row["title"], "url": _web(c.get("html_url")) or row["url"],
+                             "base": row["base"], "check": _text(c.get("name"), 80), "cause": cause, "tests": tests,
+                             "since": c.get("completed_at") or "", "runner": job.get("runner", ""), "job": cid})
+        by_pr: dict = {}
+        for f in failures:
+            by_pr.setdefault((f["repo"], f["number"]), []).append(f["cause"])
+        for p in prs_out:
+            causes = by_pr.get((p["repo"], p["number"]))
+            if causes:
+                p["checks"]["cause"] = min(causes, key=rules.CAUSES.index)
+        return rules.problems(failures)
 
     def base_now(self, prs_out: list, prs_by: dict, issues_out: list, at: float) -> list:
         """Every watched base branch's health (rules.base_health), red ones first; worked out at most every 15 s."""
