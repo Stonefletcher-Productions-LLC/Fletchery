@@ -124,6 +124,10 @@ const server = http.createServer((req, res) => {
     assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing/);
     assert.match(await page.textContent('#liveParked'), /1 issue parked until other work lands \(not stuck\): #42/);
     assert.match(await page.textContent('#liveFoot'), /^1 repositories watched · GitHub read [0-9]/);
+    // Base health: a red base branch on top, with what fails, the first bad merge, the fix in line and what it holds red.
+    assert.equal(await page.$$eval('#baseBanner .base-red', l => l.length), 1, 'only the red base shows');
+    assert.match(await page.textContent('#baseBanner'), /Test-Staging is red · for \d+ (h|d)[\s\S]*a new commit is being checked[\s\S]*Failing: PR check \/ Compile and test \(LifeShare.Town.Fishing, RouteScale\)[\s\S]*First bad: #9 Folk greetings \(Claude\)[\s\S]*Fix in line: #12 Bus lines \(checks running, merges by itself\) · tracked in #42[\s\S]*3 open PRs fail the same checks because of this; fixing Test-Staging clears them/);
+    assert.equal(await page.getAttribute('#baseBanner a[href$="/pull/9"]', 'href'), 'https://github.com/Acme/Game/pull/9');
     // Flow: is work moving? A verdict with its reason, the numbers, 24 hourly bars.
     assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*Wait for a machine7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
     assert.equal(await page.$$eval('#liveFlow .hours i', l => l.length), 24);
@@ -152,6 +156,7 @@ const server = http.createServer((req, res) => {
       await page.locator('#liveChangesCard').screenshot({path: path.join(shots, 'portal-changes.png')});
       await page.locator('#liveMachinesCard').screenshot({path: path.join(shots, 'portal-machines.png')});
       await page.locator('#liveFlow').screenshot({path: path.join(shots, 'portal-flow.png')});
+      await page.locator('#baseBanner').screenshot({path: path.join(shots, 'portal-base.png')});
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = ''; }), bars);
     }
 

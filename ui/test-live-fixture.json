@@ -871,5 +871,64 @@
     }
    }
   }
- }
+ },
+ "bases": [
+  {
+   "repo": "Acme/Game",
+   "branch": "Test-Staging",
+   "state": "red",
+   "sha": "r2",
+   "checking": true,
+   "required": true,
+   "since": "2026-11-18T20:10:00Z",
+   "for": 25000,
+   "failing": [
+    {
+     "name": "PR check / Compile and test",
+     "tests": [
+      "LifeShare.Town.Fishing",
+      "RouteScale"
+     ]
+    }
+   ],
+   "first_bad": "r1",
+   "last_green": "g1",
+   "suspects": [
+    {
+     "number": 9,
+     "title": "Folk greetings",
+     "author": "dev",
+     "agent": "Claude",
+     "merged": "2026-11-18T19:40:00Z",
+     "first_bad": true
+    }
+   ],
+   "fixes": [
+    {
+     "number": 12,
+     "title": "Bus lines",
+     "url": "https://github.com/Acme/Game/pull/12",
+     "state": "running",
+     "auto_merge": true
+    }
+   ],
+   "issues": [
+    {
+     "number": 42,
+     "title": "Test-Staging is red",
+     "url": "https://github.com/Acme/Game/issues/42"
+    }
+   ],
+   "held": 3
+  },
+  {
+   "repo": "Acme/Game",
+   "branch": "main",
+   "state": "green",
+   "sha": "g9",
+   "checking": false,
+   "required": false,
+   "green_at": "2026-11-18T10:00:00Z"
+  }
+ ]
 }

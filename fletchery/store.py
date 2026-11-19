@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 1
+SCHEMA = 2
 KEEP_DAYS = 90
 
 # GitHub conclusion -> OpenTelemetry cicd.pipeline.result
@@ -85,6 +85,9 @@ class Store:
             if self.path:
                 self.db.execute("PRAGMA journal_mode=WAL")
             self.db.executescript(TABLES)
+            cols = {r[1] for r in self.db.execute("PRAGMA table_info(merges)")}
+            if "sha" not in cols:      # schema 1 -> 2: the merge commit, to place a merge on its base branch
+                self.db.execute("ALTER TABLE merges ADD COLUMN sha TEXT")
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             self.db.commit()
         self._pruned = 0.0
@@ -108,11 +111,12 @@ class Store:
     # ---- recording (from devwatch's poll) ----
     def merges(self, repo: str, prs: list, agent_of=None) -> None:
         """Merged pull requests (from the closed-PR list)."""
-        self._write("INSERT OR REPLACE INTO merges VALUES (?,?,?,?,?,?,?,?)", (
+        self._write("INSERT OR REPLACE INTO merges (repo, number, base, title, author, agent, created, merged, sha) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", (
             (repo, int(p["number"]), str((p.get("base") or {}).get("ref") or ""), str(p.get("title") or "")[:200],
              str((p.get("user") or {}).get("login") or "")[:60],
              (agent_of(str((p.get("head") or {}).get("ref") or ""), str((p.get("user") or {}).get("login") or "")) if agent_of else ""),
-             ts(p.get("created_at")), ts(p["merged_at"]))
+             ts(p.get("created_at")), ts(p["merged_at"]), str(p.get("merge_commit_sha") or "")[:40])
             for p in prs if isinstance(p, dict) and p.get("merged_at") and isinstance(p.get("number"), int)))
 
     def runs(self, repo: str, runs: list) -> None:
