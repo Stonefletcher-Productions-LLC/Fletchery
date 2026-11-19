@@ -144,6 +144,12 @@ dialog li { margin: 4px 0; }
 .fine { font-size: 13px; color: var(--muted); margin-top: 12px; }
 
 @media (max-width: 340px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+/* Why PRs are red: one row per problem, its cause as a chip */
+.chip.c-own { background: var(--failed-bg); color: var(--failed); }
+.chip.c-base { background: var(--blocked-bg); color: var(--blocked); }
+.chip.c-machine, .chip.c-cancelled { background: var(--hold-bg); color: var(--hold); }
+.chip.c-flaky { background: var(--queued-bg); color: var(--queued); }
+.prob .prs { margin: 2px 0 0; font-size: 13px; }
 /* Base health: a red base branch, on top of every tab */
 .base-banner { margin: 0 0 10px; }
 .base-red { background: var(--failed-bg); color: var(--ink); border: 1px solid var(--failed); border-left-width: 5px; border-radius: 10px;

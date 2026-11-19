@@ -155,3 +155,120 @@ def required_checks(branch_rules, protection) -> list:
         if n not in seen:
             seen.append(n)
     return seen[:30]
+
+
+# ---- Failure causes (proposal 2): why a PR's check is red, and which red checks share one problem ----
+#
+# Checked in this order; the first that fits wins:
+#   cancelled  the check was cancelled (by a newer run, a person or an agent): it needs a re-run, not a fix
+#   machine    the system broke, not the code (OpenTelemetry "error"): no verdict ("No result"), a startup failure,
+#              a timeout with no failed step, a failed setup step (checkout, LFS, disk), or a known machine message
+#   base       the same check fails on the PR's base branch right now (and, where both name tests, the same tests)
+#   flaky      the same check failed and then passed on the same commit (Trunk's pass-on-retry)
+#   own        anything else: a real bug in this PR
+CAUSES = ("own", "base", "machine", "flaky", "cancelled")
+CAUSE_WORDS = {"own": "Own bug", "base": "Base is red", "machine": "Machine problem", "flaky": "Flaky", "cancelled": "Cancelled"}
+SETUP_STEP = re.compile(r"^(set up|checkout|git |fetch|lfs|clean|free|disk|download|prepare|restore|cache|install|"
+                        r"wait for (a )?(machine|lease|slot)|reserve|acquire)", re.I)
+MACHINE_TEXT = (r"no result", r"runner .*(lost|shut ?down|offline|stopped)", r"lost communication", r"no space left",
+                r"disk (is )?full", r"not enough (disk )?space", r"out of memory", r"git-lfs|lfs .*(fail|error)",
+                r"the hosted runner", r"received a shutdown signal", r"machine (was )?busy")
+
+
+def _norm(name: str) -> str:
+    """'PR check / Compile and test' and 'Compile and test' are the same check."""
+    return re.sub(r"\s+", " ", str(name or "").split(" / ")[-1]).strip().lower()
+
+
+def _fp(text: str) -> str:
+    """A fingerprint of a test or message: numbers, hashes and paths stripped, so the same failure matches itself."""
+    t = re.sub(r"[0-9a-f]{7,40}", "#", str(text or "").lower())
+    t = re.sub(r"\d+(\.\d+)?", "#", t)
+    t = re.sub(r"[a-z]:\\[^\s]+|/[^\s]+/", "<path>", t)
+    return re.sub(r"\s+", " ", t).strip()[:80]
+
+
+def classify(check: dict, *, failed_step: str = "", tests=(), text: str = "", base_failing=None, retried_ok: bool = False,
+             machine_patterns=MACHINE_TEXT) -> str:
+    """One failed (or cancelled, or no-verdict) check's cause. `base_failing` maps the PR's base branch's failing
+    checks (normalised name) to their test names, or is None when the base is not red."""
+    concl = check.get("conclusion")
+    if concl == "cancelled":
+        return "cancelled"
+    blob = " ".join([failed_step or "", text or "", str(check.get("why") or "")])
+    if check.get("no_result") or concl == "startup_failure" or (failed_step and SETUP_STEP.search(failed_step)) \
+            or (concl == "timed_out" and not failed_step) or any(re.search(p, blob, re.I) for p in machine_patterns):
+        return "machine"
+    if base_failing and _norm(check.get("name")) in base_failing:
+        theirs = {_fp(t) for t in base_failing[_norm(check.get("name"))] or ()}
+        mine = {_fp(t) for t in tests or ()}
+        if not theirs or not mine or theirs & mine:
+            return "base"
+    if retried_ok:
+        return "flaky"
+    return "own"
+
+
+def problems(failures: list) -> list:
+    """Group failures into problems (Horde's issues): one per cause + check + first failing test (fingerprinted), or
+    per base branch for "base", or per runner for "machine". Each failure is {"repo", "number", "title", "url", "base",
+    "check", "cause", "tests", "since", "runner", "job"}. Own bugs first, then the rest, biggest first."""
+    groups: dict = {}
+    for f in failures:
+        cause = f["cause"]
+        if cause == "base":
+            key = f"base:{f['repo']}:{f['base']}:{_norm(f['check'])}"
+        elif cause == "machine":
+            key = f"machine:{f.get('runner') or 'unknown'}:{_norm(f['check'])}"
+        elif cause == "cancelled":
+            key = f"cancelled:{f['repo']}"
+        else:
+            key = f"{cause}:{f['repo']}:{_norm(f['check'])}:{_fp((f.get('tests') or [''])[0])}"
+        g = groups.setdefault(key, {"key": key, "cause": cause, "words": CAUSE_WORDS[cause], "check": f["check"], "repo": f["repo"],
+                                    "base": f.get("base") or "", "runner": f.get("runner") or "", "tests": [], "prs": [], "since": f.get("since") or ""})
+        for t in f.get("tests") or []:
+            if t not in g["tests"]:
+                g["tests"].append(t)
+        if not any(p["number"] == f["number"] and p["repo"] == f["repo"] for p in g["prs"]):
+            g["prs"].append({"repo": f["repo"], "number": f["number"], "title": f["title"], "url": f["url"], "job": f.get("job") or 0,
+                             "check": f["check"]})
+        if f.get("since") and (not g["since"] or f["since"] < g["since"]):
+            g["since"] = f["since"]
+    out = list(groups.values())
+    for g in out:
+        g["tests"] = g["tests"][:6]
+        g["title"] = _problem_title(g)
+    order = {c: i for i, c in enumerate(CAUSES)}
+    out.sort(key=lambda g: (order.get(g["cause"], 9), -len(g["prs"]), g["since"]))
+    return out
+
+
+def _problem_title(g: dict) -> str:
+    n = len(g["prs"])
+    who = f"PR #{g['prs'][0]['number']}" if n == 1 else f"{n} PRs"
+    test = f" ({', '.join(g['tests'][:2])})" if g["tests"] else ""
+    if g["cause"] == "base":
+        return f"{who} fail{'s' if n == 1 else ''} {g['check']}{test} because {g['base']} is red"
+    if g["cause"] == "machine":
+        return f"{who}: {g['check']} gave no verdict on {g['runner'] or 'a machine'}; re-run"
+    if g["cause"] == "cancelled":
+        return f"{who}: a check was cancelled; re-run"
+    if g["cause"] == "flaky":
+        return f"{who}: {g['check']} failed, then passed on the same commit"
+    return f"{who} fail{'s' if n == 1 else ''} {g['check']}{test}"
+
+
+def summary(problems_: list) -> dict:
+    """{"own": PRs with an own bug, ..., "red": distinct red PRs}: the line "13 red PRs: 4 own bugs, 6 base, 3 machine"."""
+    out = {c: 0 for c in CAUSES}
+    seen = {}
+    for g in problems_:
+        for p in g["prs"]:
+            k = (p["repo"], p["number"])
+            if k not in seen or CAUSES.index(g["cause"]) < CAUSES.index(seen[k]):
+                seen[k] = g["cause"]
+    for c in seen.values():
+        out[c] += 1
+    out["red"] = len(seen)
+    out["problems_own"] = sum(1 for g in problems_ if g["cause"] == "own")
+    return out

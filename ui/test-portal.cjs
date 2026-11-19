@@ -128,6 +128,10 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.$$eval('#baseBanner .base-red', l => l.length), 1, 'only the red base shows');
     assert.match(await page.textContent('#baseBanner'), /Test-Staging is red · for \d+ (h|d)[\s\S]*a new commit is being checked[\s\S]*Failing: PR check \/ Compile and test \(LifeShare.Town.Fishing, RouteScale\)[\s\S]*First bad: #9 Folk greetings \(Claude\)[\s\S]*Fix in line: #12 Bus lines \(checks running, merges by itself\) · tracked in #42[\s\S]*3 open PRs fail the same checks because of this; fixing Test-Staging clears them/);
     assert.equal(await page.getAttribute('#baseBanner a[href$="/pull/9"]', 'href'), 'https://github.com/Acme/Game/pull/9');
+    // Why PRs are red: problems by cause; only own bugs count as stuck; machine problems can be re-run.
+    assert.match(await page.textContent('#liveCauses'), /^4 red PRs: 1 own bug · 2 inherited from a red base · 1 machine problem\. Only own bugs count as stuck\.$/);
+    assert.match(await page.textContent('#liveProblems'), /Own bug\s*PR #13 fails Compile and test \(LifeShare.Folk.Hair LOD 3\)[\s\S]*Base is red\s*2 PRs fail[\s\S]*#20 Lots · #21 Roads[\s\S]*Machine\s*PR #22/);
+    assert.match(await page.textContent('#livePrs'), /#13\s*Weather[\s\S]*Failing\s*Own bug/);
     // Flow: is work moving? A verdict with its reason, the numbers, 24 hourly bars.
     assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*Wait for a machine7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
     assert.equal(await page.$$eval('#liveFlow .hours i', l => l.length), 24);
@@ -157,6 +161,7 @@ const server = http.createServer((req, res) => {
       await page.locator('#liveMachinesCard').screenshot({path: path.join(shots, 'portal-machines.png')});
       await page.locator('#liveFlow').screenshot({path: path.join(shots, 'portal-flow.png')});
       await page.locator('#baseBanner').screenshot({path: path.join(shots, 'portal-base.png')});
+      await page.locator('#liveProblemsCard').screenshot({path: path.join(shots, 'portal-problems.png')});
       await page.evaluate(b => document.querySelectorAll(b).forEach(n => { n.style.visibility = ''; }), bars);
     }
 
