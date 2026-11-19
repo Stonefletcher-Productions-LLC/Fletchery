@@ -14,6 +14,8 @@ page opens in a desktop window on the PC and as an app on your phone (over Tails
 The header shows your GitHub sign-in and selected project. Click the sign-in to switch the account Fletchery uses.
 The open PR total follows the project selection. Building now shows each running check's current GitHub step,
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
+During Build and test it also shows the phase reported by the machine and a rough time left based on
+finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
 
 ![Fletchery on the desktop: the Live tab with Building now, Stuck or blocked, machines, runners, Actions runs, pull requests and issues (demo data)](docs/images/fletchery/desktop-live.png)
 

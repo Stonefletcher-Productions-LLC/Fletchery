@@ -166,6 +166,11 @@ machine, no admin:
 pythonw <Fletchery>\fletchery\reporter.py install --config <path to reporter.json>
 ```
 
+A build script can report the phase inside the GitHub **Build and test** step using the same activity folder.
+Write a record with `kind` set to `pr-phase`, `title` set to `owner/repository@run_id/attempt`, a short
+human-readable `detail`, and the phase's UTC start time in `since`. Refresh the file while the phase is active
+and remove it at exit. The dashboard matches it to the current machine, run, attempt and step start time.
+
 **Disk space.** When a disk guard writes `<lease folder>\disk.json` (LifeShare's `Tools/CI/DiskGuard.ps1`, every 10
 minutes: `drive`, `freeGB`, `totalGB`, `state` ok/low/full, `warnGB`, `runnerStopped`, `holders`), the reporter (version
 2) sends it too. The Machines card then shows that drive's free/total space, a warning under `warnGB` (50 GB by default),

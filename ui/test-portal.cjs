@@ -33,7 +33,8 @@ let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgD
 let down = false;
 const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.json'), 'utf8'));   // devwatch.py's own output
 Object.assign(live.building[0], {change: 'Acme/Game#12', job_name: 'Compile and test', step: 'Build editor',
-  step_started: new Date(Date.now() - 60000).toISOString(), steps_done: 2, steps_total: 5});
+  step_started: new Date(Date.now() - 60000).toISOString(), steps_done: 2, steps_total: 5,
+  progress: {phase: {label: 'Importing environments', since: new Date().toISOString()}, eta: {seconds: 720, samples: 3, same_pr: true}}});
 let liveAt = new Date().toISOString();
 let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
@@ -225,6 +226,7 @@ const server = http.createServer((req, res) => {
     // Live shows every build going on, on any machine, at the top.
     assert.match(await page.textContent('#liveBuilding'), /#12 Bus lines[\s\S]*Gaming PC[\s\S]*Compile and test[\s\S]*2 of 5 complete[\s\S]*Build editor/);
     assert.equal(await page.locator('#liveBuilding [role=progressbar]').getAttribute('aria-valuenow'), '40');
+    assert.match(await page.textContent('#liveBuilding'), /Importing environments[\s\S]*About 12 min left in this job · 3 past checks on this PR/);
 
     // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');

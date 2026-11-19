@@ -118,6 +118,34 @@ class Feed(unittest.TestCase):
         self.assertEqual(s["building"][0]["steps_done"], 1)
         self.assertEqual(s["building"][0]["step"], "Build editor")
 
+    def test_inner_phase_is_for_the_current_run_attempt_and_machine(self):
+        run = world()[f"repos/{REPO}/actions/runs"]["workflow_runs"][0]
+        job = {"id": 80, "name": "Compile and test", "runner_name": "ALEX-PC-unreal-pr", "status": "in_progress",
+               "started_at": ago(20), "steps": [{"name": "Build and test", "status": "in_progress", "started_at": ago(15)}]}
+        w = self.watch_first({f"repos/{REPO}/actions/runs/7/jobs": {"jobs": [job]},
+                              f"repos/{REPO}/actions/runs?": {"workflow_runs": [{**run, "run_attempt": 2}]}})
+        phase = {"kind": "pr-phase", "title": REPO + "@7/2", "detail": "Running specs", "since": ago(4)}
+        for title, since, expect in ((REPO + "@7/1", ago(4), False), (OLD + "@7/2", ago(4), False),
+                                     (phase["title"], ago(25), False), (phase["title"], ago(4), True)):
+            w.report("pc", {"host": "ALEX-PC", "activities": [{**phase, "title": title, "since": since}]})
+            s = w.snapshot()
+            self.assertEqual("phase" in s["runs"][0]["progress"], expect)
+            self.assertEqual(len(s["building"]), 1)
+            self.assertEqual(s["building"][0]["progress"], s["runs"][0]["progress"])
+        w.reports["pc"]["at"] = ago(10)
+        self.assertNotIn("phase", w.snapshot()["building"][0]["progress"])
+
+    def test_time_left_uses_job_runtime_and_excludes_shorter_or_cancelled_jobs(self):
+        ledger = self.watch().store
+        for i, (minutes, pr, result) in enumerate([(1, 12, "success"), (30, 12, "failure"), (50, 13, "success"), (80, 12, "cancelled")], 100):
+            run = {"id": i, "status": "completed", "updated_at": ago(1), "pull_requests": [{"number": pr}]}
+            ledger.runs(REPO, [run])
+            ledger.jobs(REPO, run, [{"id": i, "status": "completed", "conclusion": result, "name": "Build",
+                                     "created_at": ago(400), "started_at": ago(100), "completed_at": ago(100 - minutes)}])
+        self.assertEqual(ledger.job_remaining(REPO, "Build", 12, 20*60), {"samples": 1, "seconds": 600, "same_pr": True})
+        self.assertEqual(ledger.job_remaining(REPO, "Build", 12, 40*60)["seconds"], 600)
+        self.assertIsNone(ledger.job_remaining(REPO, "Build", 12, 55*60)["seconds"])
+
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
         for want in ("waited 30 min for a runner", "\"Build editor\" has run 160 min", "PR #13 fails Compile and test",
@@ -731,6 +759,20 @@ def _plain(gh, url):
 
 
 class Reporter(unittest.TestCase):
+    def test_only_recent_output_in_this_checkout_and_lease(self):
+        with tempfile.TemporaryDirectory() as d:
+            logs = Path(d) / "Saved" / "Logs"
+            logs.mkdir(parents=True)
+            f = logs / "ImportEnvironment.log"
+            f.touch()
+            now = time.time()
+            os.utime(f, (now-2, now-2))
+            lease = {"acquiredUtc": ago(2), "workspaces": [d]}
+            self.assertEqual(reporter.latest_check_output(lease, now)["label"], "Environment import")
+            self.assertEqual(reporter.latest_check_output({**lease, "workspaces": d}, now)["label"], "Environment import")
+            os.utime(f, (now-200, now-200))
+            self.assertIsNone(reporter.latest_check_output(lease, now))
+
     def test_reads_the_lease_queue_and_activities(self):
         with tempfile.TemporaryDirectory() as d:
             lease = Path(d) / "heavy.json"

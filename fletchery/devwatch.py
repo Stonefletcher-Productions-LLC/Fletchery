@@ -398,7 +398,8 @@ def _runner_job(run: dict) -> dict:
     return {"title": run["name"] + (f" · PR #{run['pr']}" if run["pr"] else ""), "repo": run["repo"], "id": run["id"],
             "step": run["step"], "step_started": run["step_started"], "url": run["url"], "started": run["started"],
             "status": run["status"], "pr_closed": bool(run.get("pr_closed")), "pr": run["pr"],
-            "steps_done": run["steps_done"], "steps_total": run["steps_total"], "name": run["job"]}
+            "steps_done": run["steps_done"], "steps_total": run["steps_total"], "name": run["job"],
+            "attempt": run.get("attempt", 1), **({"progress": run["progress"]} if "progress" in run else {})}
 
 
 class DevWatch:
@@ -895,6 +896,11 @@ class DevWatch:
                        "job": _text(job.get("name"), 120), "step": _text((cur or {}).get("name"), 120),
                        "step_started": _text((cur or {}).get("started_at"), 30), "steps_done": done, "steps_total": len(steps),
                        "labels": [_text(x, 60) for x in job.get("labels") or [] if isinstance(x, str)][:8]}
+                if job.get("status") == "in_progress" and re.match(r"^Build and test(?:\s*\(|$)", row["step"], re.I):
+                    row["attempt"] = r.get("run_attempt") or 1
+                    start = _ts(job.get("started_at"))
+                    row["progress"] = {"eta": self.store.job_remaining(repo, row["job"], prn, max(0, at - start))
+                                       if start else {}}
                 heads = open_heads.get(repo)
                 row["pr_closed"] = bool(row["status"] in ACTIVE and row["event"].startswith("pull_request") and heads is not None
                                         and (f"#{prn}" not in heads if prn else row["branch"] and row["branch"] not in heads))
@@ -1516,6 +1522,7 @@ class DevWatch:
         with self._lock:
             reports = dict(self.reports)
         by = {}
+        phases = {}
         for name, rep in reports.items():
             d = rep["data"] or {}
             host = _text(d.get("host") or name, 60)
@@ -1529,6 +1536,9 @@ class DevWatch:
                 purpose = _scrub(lease.get("purpose"), 200)
                 acts.append({"kind": kind_of(purpose), "title": purpose, "since": _text(lease.get("since"), 30),
                              "detail": "holds the machine" + ("" if lease.get("alive", True) else " (its process is gone)")})
+                output = lease.get("last_output")
+                if age <= REPORT_STALE and lease.get("alive") and isinstance(output, dict) and 0 <= at - _ts(output.get("at")) <= 180:
+                    acts[-1]["last_output"] = {"label": _scrub(output.get("label"), 80), "at": _text(output.get("at"), 40)}
                 held = _age(lease.get("since"), at)
                 if lease.get("alive") is False:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" holds the machine but its process is gone",
@@ -1547,6 +1557,11 @@ class DevWatch:
                 if _age(q.get("since"), at) > LIMITS["queue_wait"]:
                     block("stuck", f"{self.display(host)}: \"{purpose}\" has waited {int(_age(q.get('since'), at) // 60)} min in the queue", since=q.get("since") or "", key=f"queue:{host}:{q.get('since')}:{purpose}")
             for a in (d.get("activities") or [])[:10]:
+                if isinstance(a, dict) and a.get("kind") == "pr-phase":
+                    if age <= REPORT_STALE and a.get("detail"):
+                        phases[host.lower(), _text(a.get("title")).lower()] = {
+                            "label": _scrub(a["detail"], 220), "since": _text(a.get("since"), 40)}
+                    continue
                 if isinstance(a, dict) and a.get("title"):
                     acts.append({"kind": _text(a.get("kind") or kind_of(a.get("title")), 20), "title": _scrub(a.get("title"), 200),
                                  "since": _text(a.get("since"), 30), "detail": _scrub(a.get("detail"), 200)})
@@ -1626,6 +1641,14 @@ class DevWatch:
                     lease = m["activities"][0]
                 lease.update(job_name=job["name"], step=job["step"], step_started=job["step_started"],
                              steps_done=job["steps_done"], steps_total=job["steps_total"])
+                if "progress" in job:
+                    key = f"{job['repo']}@{job['id']}/{job['attempt']}".lower()
+                    phase = phases.get((m["host"].lower(), key))
+                    if phase and 0 < _ts(job["step_started"]) <= _ts(phase["since"]) <= at + 5:
+                        job["progress"]["phase"] = phase
+                    elif lease.get("last_output") and 0 < _ts(job["step_started"]) <= _ts(lease["last_output"]["at"]):
+                        job["progress"]["last_output"] = lease["last_output"]
+                    lease["progress"] = job["progress"]
         if self.own_builds is not None:
             try:
                 own = list(self.own_builds() or [])
