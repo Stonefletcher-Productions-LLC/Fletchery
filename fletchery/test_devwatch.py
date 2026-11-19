@@ -165,6 +165,16 @@ class Feed(unittest.TestCase):
         base = w.snapshot()["bases"][0]
         self.assertEqual((base["state"], [f["name"] for f in base["failing"]]), ("red", ["Nightly full"]))
 
+    def test_a_deleted_base_branch_is_not_a_feed_error(self):
+        # A PR merged this week into a branch deleted since: GitHub answers 422 "No commit found for SHA: <branch>".
+        gone = devwatch.GitHubError(422, "No commit found for SHA: claude/old-stack")
+        merged = {"number": 30, "title": "Stacked", "merged_at": ago(60), "closed_at": ago(60), "base": {"ref": "claude/old-stack"},
+                  "head": {"ref": "claude/top"}, "html_url": "https://github.com/Acme/Game/pull/30"}
+        w = self.watch_first({f"repos/{REPO}/pulls?state=closed": [merged],
+                              f"repos/{REPO}/commits/claude%2Fold-stack": gone})
+        self.assertEqual(w.error, "")
+        self.assertNotIn("feed", [b["kind"] for b in w.snapshot()["blockers"]])
+
     def test_red_checks_grouped_by_cause(self):
         # PR #13 fails the same check as its red base (inherited); PR #12 fails in a setup step (the machine).
         main, sha_ok, sha_bad = "c" * 40, "a" * 40, "b" * 40
