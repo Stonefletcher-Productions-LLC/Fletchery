@@ -35,15 +35,15 @@ import json
 import re
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import api  # beside this file, like every Fletchery module
+from http_request import JsonRequestHandler, MAX_BODY, RequestError
 
 HERE = Path(__file__).parent
 UI = HERE.parent / "ui" / "portal"
-MAX_BODY = 8 * 1024
 DEFAULT_PORT = 8772
 STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
           "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -304,10 +304,9 @@ class Portal:
     def _handler(self, port: int):
         portal = self
 
-        class Handler(BaseHTTPRequestHandler):
+        class Handler(JsonRequestHandler):
             server_version = "Fletchery"
             sys_version = ""
-            timeout = 30   # a client that opens a connection and sends nothing does not hold a thread forever
 
             def handle(self):
                 try:
@@ -426,17 +425,10 @@ class Portal:
                 if not portal.same_origin(self.headers):
                     return self._json(403, {"error": "This request did not come from the app's own page."})
                 try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    length = -1
-                if not 0 <= length <= MAX_BODY:
-                    return self._json(413, {"error": "request too large"})
-                try:
-                    data = json.loads(self.rfile.read(length) or b"{}") if length else {}
-                    if not isinstance(data, dict):
-                        raise ValueError
-                except ValueError:
-                    return self._json(400, {"error": "bad JSON"})
+                    data = self.read_json_body(MAX_BODY)
+                except RequestError as exc:
+                    self.close_connection = True
+                    return self._json(exc.status, {"error": str(exc)})
                 pushes = {"/api/push/subscribe": "subscribe", "/api/push/unsubscribe": "unsubscribe", "/api/push/test": "test"}
                 if self.path in pushes:
                     if not portal.push:

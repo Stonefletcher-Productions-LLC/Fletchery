@@ -48,10 +48,11 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import presence  # beside this file: agent heartbeats' limits (POST /v1/agent)
+from http_request import JsonRequestHandler, MAX_BODY, RequestError
 
 ONLINE_SECONDS = 90          # a node that has not called for this long shows as offline
 # A running job past its recipe's timeout is asked to stop after this much grace, and given up (lost) at twice its
@@ -59,8 +60,9 @@ ONLINE_SECONDS = 90          # a node that has not called for this long shows as
 TIMEOUT_GRACE_MINUTES = 10
 LOST_SECONDS = 180           # a running job without a heartbeat for this long is lost (the node stopped or rebooted)
 MAX_ATTEMPTS = 2             # a lost job is queued again once, then fails
-MAX_BODY = 1024 * 1024
+MAX_JOB_BODY = 1024 * 1024  # log batches and structured build results
 MAX_UPLOAD_BODY = 8 * 1024 * 1024   # /v1/upload chunks (base64 of up to 4 MiB)
+JOB_BODY_LIMITS = {"/v1/log": MAX_JOB_BODY, "/v1/result": MAX_JOB_BODY, "/v1/upload": MAX_UPLOAD_BODY}
 UPLOAD_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.zip$")
 LOG_MAX_BYTES = 50 * 1024 * 1024
 # The lines of a job's log that mark its progress (Testing tab): the worker's own steps, the project script's sections
@@ -813,6 +815,7 @@ class WorkerApi:
         self.log = log
         self.server: ThreadingHTTPServer | None = None
         self._fails: dict[str, list[float]] = {}
+        self._fails_lock = threading.Lock()
         self.reports = None     # devwatch.DevWatch, set by the portal: takes /v1/report (reporter.py) and /v1/agent
 
     def _throttled(self, ip: str) -> bool:
@@ -821,12 +824,18 @@ class WorkerApi:
         self._fails[ip] = recent
         return len(recent) >= 10
 
+    def _authorize(self, machine: str, key: str, ip: str):
+        with self._fails_lock:
+            if self._throttled(ip):
+                return 429, {"error": "too many failed sign-ins; wait a minute"}
+            if not self.machines.authenticate(machine, key):
+                self._fails.setdefault(ip, []).append(time.monotonic())
+                return 401, {"error": "unknown machine or key"}
+
     def handle(self, path: str, machine: str, key: str, ip: str, data: dict) -> tuple[int, dict]:
-        if self._throttled(ip):
-            return 429, {"error": "too many failed sign-ins; wait a minute"}
-        if not self.machines.authenticate(machine, key):
-            self._fails.setdefault(ip, []).append(time.monotonic())
-            return 401, {"error": "unknown machine or key"}
+        return self._authorize(machine, key, ip) or self._dispatch(path, machine, ip, data)
+
+    def _dispatch(self, path, machine, ip, data):
         m = self.machines
         stats = data.get("stats") if isinstance(data.get("stats"), dict) else None
         try:
@@ -890,7 +899,7 @@ class WorkerApi:
     def start(self) -> None:
         api = self
 
-        class Handler(BaseHTTPRequestHandler):
+        class Handler(JsonRequestHandler):
             server_version = "Fletchery-Machines"
 
             def log_message(self, *a):
@@ -908,20 +917,19 @@ class WorkerApi:
                 self._json(404, {"error": "not found"})
 
             def do_POST(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > (MAX_UPLOAD_BODY if self.path == "/v1/upload" else MAX_BODY):
-                    return self._json(413, {"error": "request too large"})
-                try:
-                    data = json.loads(self.rfile.read(length) or b"{}") if length else {}
-                    if not isinstance(data, dict):
-                        raise ValueError
-                except ValueError:
-                    return self._json(400, {"error": "bad JSON"})
                 auth = self.headers.get("Authorization") or ""
                 key = auth[7:] if auth.startswith("Bearer ") else ""
-                code, obj = api.handle(self.path, self.headers.get("X-Fletchery-Machine") or "", key,
-                                       self.client_address[0], data)
-                self._json(code, obj)
+                machine, ip = self.headers.get("X-Fletchery-Machine") or "", self.client_address[0]
+                denied = api._authorize(machine, key, ip)
+                if denied:
+                    self.close_connection = True
+                    return self._json(*denied)
+                try:
+                    data = self.read_json_body(JOB_BODY_LIMITS.get(self.path, MAX_BODY))
+                except RequestError as exc:
+                    self.close_connection = True
+                    return self._json(exc.status, {"error": str(exc)})
+                self._json(*api._dispatch(self.path, machine, ip, data))
 
         self.server = ThreadingHTTPServer((self.host, self.port), Handler)
         self.server.daemon_threads = True
