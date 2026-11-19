@@ -168,7 +168,7 @@ def required_checks(branch_rules, protection) -> list:
 #   own        anything else: a real bug in this PR
 CAUSES = ("own", "base", "machine", "flaky", "cancelled")
 CAUSE_WORDS = {"own": "Own bug", "base": "Base is red", "machine": "Machine problem", "flaky": "Flaky", "cancelled": "Cancelled"}
-SETUP_STEP = re.compile(r"^(set up|checkout|git |fetch|lfs|clean|free|disk|download|prepare|restore|cache|install|"
+SETUP_STEP = re.compile(r"^(set up|check ?out|git |fetch|lfs|clean|free|disk|download|prepare|restore|cache|install|"
                         r"wait for (a )?(machine|lease|slot)|reserve|acquire)", re.I)
 MACHINE_TEXT = (r"no result", r"runner .*(lost|shut ?down|offline|stopped)", r"lost communication", r"no space left",
                 r"disk (is )?full", r"not enough (disk )?space", r"out of memory", r"git-lfs|lfs .*(fail|error)",

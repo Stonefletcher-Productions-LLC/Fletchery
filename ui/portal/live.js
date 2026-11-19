@@ -303,7 +303,7 @@
     return el('p', {class: 'basis'}, ...sep(join(
       onMachine ? '' : step.machine || '',
       part && !onMachine ? 'now: ' + part.name + ' (' + (step.part + 1) + ' of ' + parts.length + ')' : '',
-      step.avg ? 'usually ' + mins(step.avg) + (step.own ? ' for this change' : c.kind && c.kind !== 'Change' && c.stage !== 'staging' ? ' for a ' + c.kind.toLowerCase() : '') + ' (' + step.samples + ' run' + (step.samples > 1 ? 's' : '') + ')' : '',
+      step.avg ? 'usually ' + mins(step.avg) + (step.own ? ' for this change' : step.scope === 'all' && c.kind && c.kind !== 'Change' && c.stage !== 'staging' ? ' for any change (no ' + c.kind.toLowerCase() + ' timed yet)' : c.kind && c.kind !== 'Change' && c.stage !== 'staging' ? ' for a ' + c.kind.toLowerCase() : '') + ' (' + step.samples + ' run' + (step.samples > 1 ? 's' : '') + ')' : '',
       c.note || '')));
   }
   function changeRow(c) {
