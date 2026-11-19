@@ -169,6 +169,10 @@ class OpenChanges(unittest.TestCase):
         skipped = check(2, "Cheap checks", conclusion="skipped", start=T0 - 30, end=T0 - 29)
         pipeline.learn_checks(h, REPO, "Change", "s2", [skipped], [], {}, MACHINE)
         self.assertEqual(h.estimate(("quick", REPO, "Change")), (None, 0))
+        # A job a workflow condition skipped beside one that ran: the one that ran is timed (2026-11-19: none was).
+        pipeline.learn_checks(h, REPO, "Change", "s3", [], [check(20, "Compile and test", start=T0 - 3000, end=T0 - 600),
+                                                           check(21, "Retire stale", conclusion="skipped", start=T0 - 5, end=T0 - 5)], {}, MACHINE)
+        self.assertEqual(h.estimate(("build", REPO, "Change")), (2400, 1))
         for i in range(3):
             pipeline.learn_checks(h, REPO, "Change", f"r{i}", [check(3 + i, "Cheap checks", start=T0 - 700, end=T0 - 640)], [], {}, MACHINE)
         pipeline.learn_checks(h, REPO, "Town change", "mine", [check(9, "Cheap checks", start=T0 - 900, end=T0 - 180)], [], {}, MACHINE, 12)
@@ -252,7 +256,7 @@ class Feed(unittest.TestCase):
                   "base": {"ref": "main"}, "head": {"ref": "claude/greet"}, "labels": []}
         first = {f"repos/{tdw.REPO}/pulls?state=closed": [{**merged, "closed_at": tdw.ago(20)}],
                  f"repos/{tdw.REPO}/releases": []}
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:     # Windows: the history file stays open
             answers = dict(first)
             for k, v in tdw.world().items():
                 answers.setdefault(k, v)
