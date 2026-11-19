@@ -138,6 +138,20 @@ class AppTests(unittest.TestCase):
                                                   "repos/example/harbor/actions/runs/6/cancel",
                                                   "repos/example/harbor/actions/jobs/77/rerun"])
 
+    def test_snooze_an_alert(self):
+        import alerts
+        live = SimpleNamespace(alerts=alerts.Alerts())
+        self.app.portal = SimpleNamespace(live=live)
+        self.assertTrue(self.acts["/api/alerts/snooze"]({"key": "runner:N", "hours": 4})["until"])
+        self.acts["/api/alerts/snooze"]({"group": "Acme/Game", "hours": 24})
+        self.assertEqual(set(live.alerts.snoozed), {"runner:N", "group:Acme/Game"})
+        for bad in ({"key": "x", "hours": 2}, {"hours": 1}, {"key": "x", "hours": "soon"}):
+            with self.assertRaises(ValueError, msg=bad):
+                self.acts["/api/alerts/snooze"](bad)
+        self.acts["/api/alerts/snooze"]({"key": "runner:N", "hours": 0})
+        self.assertEqual(set(live.alerts.snoozed), {"group:Acme/Game"})
+        self.assertIn("alerts: alert runner:N snoozed 4 h (from the window)", self.lines())
+
     def test_a_new_build_ignores_who_sent_it(self):
         with self.assertRaises(ValueError):   # no build machines: refused, and `_from` never reaches the row
             self.acts["/api/builds/add"]({"version": "0.4.6", "_from": "the window"})

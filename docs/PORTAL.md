@@ -79,7 +79,8 @@ With `push` in the profile the PC sends a notification when:
 | Event | `events` name |
 |---|---|
 | a build finishes (once its download link is ready) or fails | `build` |
-| something new appears under **Stuck or blocked** (a lost feed or a silent machine only after 3 minutes) | `stuck` |
+| an alert fires: something under **Stuck or blocked** lasted its rule's wait (a lost feed or a silent machine 3 minutes, an offline runner or low disk 5, the rest at once) and is not snoozed; alerts of one project or machine that fire together are one notification | `stuck` |
+| alerts cleared (a quiet notification) | `resolved` |
 
 `"push": {"contact": "...", "events": ["build"]}` limits them. Each message is encrypted for that one phone,
 so Apple's push service relays it without being able to read it, and signed with a key made on the PC. Notifications

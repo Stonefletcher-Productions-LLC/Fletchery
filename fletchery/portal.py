@@ -207,12 +207,16 @@ class Portal:
 
     def summary(self) -> dict:
         out = summary(self.status_fn())
-        if self.live is not None:   # for notifications (push.py "stuck"): what the Live tab lists as stuck or blocked
+        if self.live is not None:   # for notifications (push.py): the alerts that fired (alerts.py), and those that cleared
+            fields = ("kind", "key", "group", "title", "detail", "since", "repo", "fired")
             try:
-                out["live_blockers"] = [{k: b.get(k) for k in ("kind", "key", "title", "detail", "since", "repo")}
-                                        for b in self.live.snapshot().get("blockers") or []]
+                a = self.live.snapshot().get("alerts") or {}
+                out["live_alerts"] = [{k: x.get(k) for k in fields} for x in a.get("firing") or []
+                                      if x.get("notify") and not x.get("snoozed_until")]
+                out["live_cleared"] = [{**{k: x.get(k) for k in fields}, "cleared": x.get("cleared")} for x in a.get("cleared") or []
+                                       if x.get("notify") and not x.get("snoozed_until")]
             except Exception:
-                out["live_blockers"] = []
+                out["live_alerts"], out["live_cleared"] = [], []
         return out
 
     def summary_bytes(self) -> bytes:

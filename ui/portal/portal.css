@@ -356,3 +356,8 @@ body.desktop .fresh { margin-top: -4px; }
 .parts .legend span { flex: 1; min-width: 0; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .parts .legend .on { color: var(--running); font-weight: 700; }
 .why { font-size: 13px; color: var(--muted); margin-top: 6px; background: var(--soft); border-radius: 8px; padding: 6px 8px; }
+/* alerts (alerts.py): not yet, alerted, snoozed, with snooze buttons */
+.blk .sub.alarm { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; -webkit-line-clamp: unset; overflow: visible; margin-top: 3px; }
+.blk .sub.alarm .chip { margin: 0; }
+.blk .sub.alarm .ctl { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0; }
+.blk .sub.alarm button.small { padding: 2px 8px; min-height: 28px; }

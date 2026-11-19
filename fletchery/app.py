@@ -381,6 +381,21 @@ class App:
             self.wake()
             return {"ok": True}
 
+        def alert_snooze(d):
+            """Snooze one alert (key) or a whole group for 1, 4 or 24 hours (0 ends it): it stays on the page, the phone
+            is not told."""
+            live = self.portal.live if self.portal else None
+            if live is None or not hasattr(live, "alerts"):
+                raise ValueError("The Live feed is off.")
+            try:
+                hours = float(d.get("hours", 1))
+            except (TypeError, ValueError):
+                raise ValueError("Snooze for 1, 4 or 24 hours (0 ends it).")
+            out = live.alerts.snooze(str(d.get("key") or "")[:200], str(d.get("group") or "")[:200], hours)
+            what = f"group {d.get('group')}" if d.get("group") else f"alert {d.get('key')}"
+            self.log(f"alerts: {what} " + (f"snoozed {hours:g} h" if hours else "unsnoozed") + f" (from {src(d)})")
+            return out
+
         def restart(d):
             self.restart_reason = f"Restart pressed in {src(d)}."
             self.log(f"restart requested from {src(d)}")
@@ -397,7 +412,7 @@ class App:
                 "/api/actions/cancel": lambda d: run_action(d, "cancel"),
                 "/api/actions/rerun": lambda d: run_action(d, "rerun-failed" if d.get("failed") else "rerun"),
                 "/api/actions/rerun-job": lambda d: run_action(d, "rerun-job"),
-                "/api/live/refresh": live_refresh, "/api/restart": restart}
+                "/api/live/refresh": live_refresh, "/api/alerts/snooze": alert_snooze, "/api/restart": restart}
 
     def job_log(self, job_id: int) -> str:
         return self.machines.machines.log_text(job_id, tail_bytes=256 * 1024) if self.machines else ""

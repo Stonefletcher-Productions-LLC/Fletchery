@@ -37,42 +37,74 @@
    "title": "PR check \u00b7 PR #13 has waited 30 min for a runner",
    "detail": "Acme/Game: no free runner with its labels picked it up.",
    "url": "",
-   "since": "2026-11-18T04:02:29Z"
+   "since": "2026-11-18T04:02:29Z",
+   "key": "queued:Acme/Game:13",
+   "alert": {
+    "state": "firing",
+    "group": "Acme/Game"
+   }
   },
   {
    "kind": "stuck",
    "title": "PR check \u00b7 PR #12: step \"Build editor\" has run 75 min",
    "detail": "Acme/Game on MY-PC-unreal-pr",
    "url": "https://github.com/Acme/Game/actions/runs/7",
-   "since": "2026-11-18T03:17:29Z"
+   "since": "2026-11-18T03:17:29Z",
+   "key": "step:Acme/Game:7:Build editor",
+   "alert": {
+    "state": "firing",
+    "group": "Acme/Game",
+    "snoozed_until": 1795544400
+   }
   },
   {
    "kind": "check",
    "title": "PR #13 check failed: Compile and test",
    "detail": "Acme/Game \u00b7 Weather",
    "url": "https://github.com/Acme/Game/runs/1",
-   "since": "2026-11-18T04:28:29Z"
+   "since": "2026-11-18T04:28:29Z",
+   "key": "problem:acme-13",
+   "alert": {
+    "state": "firing",
+    "group": "Acme/Game"
+   }
   },
   {
    "kind": "runner",
    "title": "Runner NODE-unreal-light is offline",
    "detail": "NODE \u00b7 unreal-light",
    "url": "",
-   "since": ""
+   "since": "",
+   "key": "runner:NODE-unreal-light",
+   "alert": {
+    "state": "pending",
+    "group": "machine:NODE",
+    "fires_in": 240
+   }
   },
   {
    "kind": "label",
    "title": "#40 is blocked: Bench clipping",
    "detail": "Acme/Game \u00b7 foreman:blocked",
    "url": "https://github.com/Acme/Game/issues/40",
-   "since": "2026-11-18T04:30:29Z"
+   "since": "2026-11-18T04:30:29Z",
+   "key": "label:Acme/Game:40",
+   "alert": {
+    "state": "firing",
+    "group": "Acme/Game"
+   }
   },
   {
    "kind": "label",
    "title": "PR #13 is marked blocked",
    "detail": "Acme/Game \u00b7 status:needs-you",
    "url": "https://github.com/Acme/Game/pull/13",
-   "since": "2026-11-18T04:27:29Z"
+   "since": "2026-11-18T04:27:29Z",
+   "key": "label:Acme/Game:13",
+   "alert": {
+    "state": "off",
+    "group": "Acme/Game"
+   }
   }
  ],
  "machines": [
@@ -156,7 +188,8 @@
     {
      "name": "E:",
      "free_gb": 31,
-     "total_gb": 250
+     "total_gb": 250,
+     "full_in": 9000
     }
    ],
    "procs": {},
@@ -1133,5 +1166,21 @@
   ],
   "holds": [],
   "waiting": 2
+ },
+ "alerts": {
+  "firing": [],
+  "pending": [],
+  "cleared": [
+   {
+    "key": "machine:Gaming PC",
+    "kind": "machine",
+    "group": "machine:Gaming PC",
+    "title": "Gaming PC stopped reporting",
+    "repo": "",
+    "cleared": 1795528200,
+    "fired": 1795527600,
+    "notify": true
+   }
+  ]
  }
 }

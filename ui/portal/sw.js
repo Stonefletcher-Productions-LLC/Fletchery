@@ -2,7 +2,7 @@
 // saved on the phone (Tailscale still connecting, PC asleep), and shows notifications. Network first since 2026-11-18:
 // cache first kept phones on an old page for several opens after an update. Status is never saved here:
 // the page asks the PC for it after it has opened.
-const CACHE = 'fletchery-portal-v19';
+const CACHE = 'fletchery-portal-v20';
 const NET_MS = 4000;
 const SHELL = ['/', '/portal.css', '/kit.js', '/portal.js', '/live.js', '/manifest.webmanifest', '/icon-180.png', '/icon-192.png', '/icon-512.png'];
 
@@ -43,11 +43,11 @@ self.addEventListener('push', event => {
   let note = {};
   try { note = event.data ? event.data.json() : {}; } catch (e) { note = {}; }
   const title = typeof note.title === 'string' && note.title ? note.title : 'Fletchery';
-  const tab = ['live', 'now', 'tasks', 'merges', 'builds'].includes(note.tab) ? note.tab : 'live';
+  const tab = ['live', 'queue', 'builds', 'activity'].includes(note.tab) ? note.tab : 'live';
   event.waitUntil(self.registration.showNotification(title, {
     body: typeof note.body === 'string' ? note.body : '',
     tag: typeof note.tag === 'string' && note.tag ? note.tag : undefined,
-    icon: '/icon-192.png', badge: '/icon-192.png', data: {tab},
+    icon: '/icon-192.png', badge: '/icon-192.png', data: {tab}, silent: note.quiet === true,
   }));
 });
 

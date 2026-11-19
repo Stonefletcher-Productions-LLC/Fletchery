@@ -40,7 +40,19 @@ could take it is idle or none is online (waiting behind busy runners is a queue,
 check or job over 3 hours, an offline runner, a run that keeps going after its pull request closed, a failed PR check
 (the newest run of each check on the commit), a machine low on disk, and an issue or PR labelled `blocked`,
 `needs-you`/`needs-alex` or `waiting-on…`. A check that was cancelled, or ended "No result" because its machine stayed
-busy, shows as **Needs re-run** on its pull request, with a re-run button, and is not counted.
+busy, shows as **Needs re-run** on its pull request, with a re-run button, and is not counted. A drive that has been
+filling for the last hour or two shows when it will be full ("full in ~2.5 h"), and is flagged six hours ahead.
+
+**Alerts, not alarms.** Each row in **Stuck or blocked** says whether it reached the phone. A rule per kind decides
+how long a thing must last before it alerts (a silent machine or a lost GitHub feed 3 minutes, an offline runner or low
+disk 5, a red base branch or an own bug at once), and how long it stays alerted after it goes, so one that flaps does
+not alert again and again. Until then the row says **Not alerted yet · alerts in N min if it lasts**. Alerts that start
+together for one project or machine arrive as one notification, and a quiet **Resolved** follows when they clear (the
+last two hours of those are named under the card). Any alert, or its whole project or machine, can be snoozed for 1, 4
+or 24 hours from its row: it stays listed, the phone is not told. Nothing merged for 3 hours while changes wait is an
+alert too. Alerts and snoozes survive a restart.
+
+<p><img src="docs/images/fletchery/portal-alerts.png" width="300" alt="Stuck or blocked on the phone: rows marked Alerted with snooze buttons, Snoozed until a time, and Not alerted yet with the minutes left, and the alerts cleared recently"></p>
 
 **Cheap to run.** GitHub is read with ETags, so "nothing changed" costs nothing against GitHub's limit and no Actions
 minutes. It reads every 15 s while anything runs and every 90 s when idle, and slows down by itself when the hourly
@@ -127,7 +139,7 @@ A small JSON file. Only `name` and `repo` are required; everything else is optio
 | `stateDir` | Where Fletchery keeps its state, logs and builds (empty = `%LOCALAPPDATA%\Fletchery\<name>`) |
 | `dashboardPort` | The desktop window's local port (`127.0.0.1` only) |
 | `heavyLeaseFile` | The heavy-work lease file on this PC ([RESERVATIONS.md](docs/RESERVATIONS.md)); what holds it shows on Live |
-| `portal` | The phone app and the Live feed: [PORTAL.md](docs/PORTAL.md). `live.owners` lists the GitHub organisations and users to watch; `live.names` gives machines friendly names; `live.diskFreeGb` flags a machine under that much free disk; `live.bases` (`{"owner/repo": ["main"]}`) watches branches no PR targets, `live.causes.machine` adds messages (regular expressions) that mean "the machine broke, not the code"; `live.fixLabels` and `live.redIssueLabels` name a project's base-fix PRs and base-red issues (defaults `tip-fix`, `tip-red` and similar) |
+| `portal` | The phone app and the Live feed: [PORTAL.md](docs/PORTAL.md). `live.owners` lists the GitHub organisations and users to watch; `live.names` gives machines friendly names; `live.diskFreeGb` flags a machine under that much free disk; `live.bases` (`{"owner/repo": ["main"]}`) watches branches no PR targets, `live.causes.machine` adds messages (regular expressions) that mean "the machine broke, not the code"; `live.fixLabels` and `live.redIssueLabels` name a project's base-fix PRs and base-red issues (defaults `tip-fix`, `tip-red` and similar); `live.alerts` changes a kind's rule in minutes, e.g. `{"disk": {"for": 10}, "flow": {"notify": false}, "runner": {"off": true}}` (kinds: feed, machine, runner, disk, base, check, stuck, label, flow; keys `for`, `keepFiring`, `notify`, `off`) |
 | `machines` | The build machines' worker API on this PC's Tailscale address: [MACHINES.md](docs/MACHINES.md) |
 | `builds` | Where finished builds go, extra labels a machine needs to take one, and publishing to GitHub releases or Google Drive |
 | `scratch*` | Cleaning up session folders: [below](#session-folders-scratch-retention) |
@@ -216,7 +228,7 @@ See [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). The quick ones:
 
 | Folder | What |
 |---|---|
-| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `pipeline.py` (where each change is in the process, and step times), `presence.py` and `agent_status.py` (which coding agents are working: [docs/AGENT-PRESENCE.md](docs/AGENT-PRESENCE.md)), `builds.py`, `publish.py`, `push.py`, `scratch.py` |
+| `fletchery/` | The backend (Python, standard library): `app.py` (the app and its controls), `devwatch.py` (the Live feed), `portal.py` (the page server for window and phone), `machines.py` and `node_worker.py` (build machines), `reporter.py`, `pipeline.py` (where each change is in the process, and step times), `presence.py` and `agent_status.py` (which coding agents are working: [docs/AGENT-PRESENCE.md](docs/AGENT-PRESENCE.md)), `store.py` (history in SQLite), `flow.py`, `rules.py` (base health, failure causes, queue estimates, disk forecast), `alerts.py`, `builds.py`, `publish.py`, `push.py`, `scratch.py` |
 | `ui/portal/` | The page (no build step): `kit.js` (folding cards, long lists), `portal.js`, `live.js`, `portal.css`, `sw.js` |
 | `shell/` | `Fletchery.exe` (C# + WebView2), the supervisor and the install script |
 | `tools/` | The heavy-work reservation tool ([RESERVATIONS.md](docs/RESERVATIONS.md), [CANCELLATION.md](docs/CANCELLATION.md)) |
