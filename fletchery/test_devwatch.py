@@ -329,7 +329,7 @@ class Feed(unittest.TestCase):
         self.assertEqual([(a["number"], a["where"], a["step"]) for a in rows], [(12, "cloud", "Planning")])
 
     def test_agent_presence_is_kept_in_the_state_folder(self):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:     # Windows: the history file stays open
             w = devwatch.DevWatch({}, github=FakeGitHub(world()), state_dir=d)
             w.agent("ALEX-PC", {"agent": "codex", "session": "s", "step": "Building"})
             again = devwatch.DevWatch({}, github=FakeGitHub(world()), state_dir=d)

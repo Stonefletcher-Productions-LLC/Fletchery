@@ -218,6 +218,10 @@ def _timed(checks: list) -> bool:
 def learn_checks(h: History, repo: str, kind: str, sha: str, quick: list, build: list, jobs: dict, machine_of,
                  number=None) -> None:
     for name, checks in (("quick", quick), ("build", build)):
+        # A skipped or neutral check (a job a workflow condition left out) did not run: it is not part of the time,
+        # and it must not stop the rest from being timed (2026-11-19: no build time was ever learned again, because
+        # LifeShare's PR check always has skipped jobs).
+        checks = [c for c in checks if c.get("conclusion") not in ("skipped", "neutral")]
         g = group(checks)
         if g["status"] == "done" and g["started"] and g["completed"] and _timed(checks):
             if number is not None:      # this PR's own last runs: the same files, so the best guess for its next one
