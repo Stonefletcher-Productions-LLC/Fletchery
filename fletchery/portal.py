@@ -183,7 +183,7 @@ class Portal:
     action gets `_from` in its data: "the window" or "the phone (<login>)", for the activity log."""
 
     def __init__(self, status_fn, conf: dict, state_dir=None, log=None, repo: str = "", host: str = "127.0.0.1",
-                 desktop_port: int = 0, actions: dict | None = None, job_log=None):
+                 desktop_port: int = 0, actions: dict | None = None, job_log=None, layout=None):
         self.status_fn = status_fn
         self.conf = conf
         self.port = int(conf.get("port") or 0)
@@ -191,6 +191,7 @@ class Portal:
         self.desktop_port = int(desktop_port or 0)
         self.actions = dict(actions or {})
         self.job_log = job_log
+        self.layout = layout       # layout.Layout: where the cards sit (GET/POST /api/layout)
         self.host = host
         self.log = log or (lambda line: None)
         self.servers: list[ThreadingHTTPServer] = []
@@ -393,6 +394,10 @@ class Portal:
                     if not desktop:
                         text = _scrub(text)   # folder paths stay on this PC
                     return self._send(200, text.encode("utf-8"), "text/plain; charset=utf-8")
+                if path == "/api/layout":
+                    may, _ = portal.can_act(self.headers, port, path)
+                    saved = portal.layout.read() if portal.layout is not None else None
+                    return self._json(200, {"layout": saved, "can_save": bool(may and portal.layout is not None)})
                 if path == "/api/push":
                     return self._json(200, portal.push.info() if portal.push else
                                       {"available": False, "why": "Notifications are off (workers.portal.push)."})
@@ -427,6 +432,19 @@ class Portal:
                         return self._json(400, {"error": str(e)})
                     except Exception as e:
                         return self._json(502, {"error": f"{type(e).__name__}: {e}"[:300]})
+                if self.path in ("/api/layout", "/api/layout/reset"):
+                    ok, _ = portal.can_act(self.headers, port, self.path)
+                    if not ok or portal.layout is None:
+                        return self._json(403, {"error": "This screen keeps its layout to itself (the phone is read-only)."})
+                    try:
+                        if self.path == "/api/layout/reset":
+                            portal.layout.reset()
+                            return self._json(200, {"layout": None})
+                        return self._json(200, {"layout": portal.layout.save(data.get("layout"))})
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
+                    except OSError as e:
+                        return self._json(502, {"error": f"The layout file could not be saved ({type(e).__name__})."})
                 if self.path in portal.actions:
                     ok, who = portal.can_act(self.headers, port, self.path)
                     if not ok:

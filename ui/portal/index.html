@@ -106,6 +106,14 @@
         <span class="msg" id="rMsg" role="status" aria-live="polite"></span>
       </div>
     </section>
+    <section class="card" id="layoutCard" aria-labelledby="h-layout"><h2 id="h-layout">Page layout</h2>
+      <p class="sub">Drag any card by its <span aria-hidden="true">⠿</span> grip to move it, up or down or into another column, or focus the grip and use the arrow keys.<span id="layoutWhere" hidden> Your layout is saved on the PC, so a new install keeps it.</span></p>
+      <div class="toolbar"><span class="sub" id="layoutColsLabel">Columns on a wide window:</span>
+        <span class="layout-cols" role="group" aria-labelledby="layoutColsLabel"><button type="button" class="small" data-cols="1" aria-pressed="false">1</button><button type="button" class="small" data-cols="2" aria-pressed="true">2</button><button type="button" class="small" data-cols="3" aria-pressed="false">3</button></span>
+        <button type="button" class="small" id="layoutReset">Reset the layout</button>
+        <span class="msg" id="layoutMsg" role="status" aria-live="polite"></span>
+      </div>
+    </section>
     <section class="card" id="logCard" aria-labelledby="h-log"><h2 id="h-log">Activity</h2><ol class="log" id="log"></ol></section>
   </section>
 </main>
