@@ -517,6 +517,7 @@ class DevWatch:
         self.runner_note = ""
         self.runs: dict[str, list] = {}             # repo -> recent runs
         self.jobs: dict[int, list] = {}             # run id -> jobs
+        self.partial_jobs = {}                      # repo -> run attempts whose job pages still need a complete read
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
         self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
@@ -690,6 +691,7 @@ class DevWatch:
             if not errors or len(errors) < len(got):
                 self.last_ok = now_iso()
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
+            self.partial_jobs = {repo: g["partial_jobs"] for repo, g in got.items()}
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
             self.runners = {k: rows for k, (rows, _) in found.items() if rows is not None}
@@ -778,7 +780,8 @@ class DevWatch:
                     "404 ref not found", "404 branch not found")
                 self.skip[path] = (now_s + quiet_for, missing)
                 return missing_ref if missing else None
-            raise
+            message = str(e).removeprefix(f"{e.code} ")
+            raise GitHubError(e.code, f"{path}: {message}") from e
 
     def _poll_open_prs(self, repo: str) -> tuple:
         """Publish a repository's PR rows only after every page succeeds, including the terminal empty page."""
@@ -801,18 +804,20 @@ class DevWatch:
             return self.prs.get(repo, []), "", f"{repo}: {e}"
 
     def _poll_repo(self, repo: str, prs: list) -> dict:
-        """A detail timeout keeps older check and issue data alongside the independent PR inventory."""
+        """Stage the repository privately; each successful read replaces only the data it owns."""
+        with self._lock:
+            runs = self.runs.get(repo, [])
+            heads = {(repo, (p.get("head") or {}).get("sha")) for p in prs}
+            out = {"runs": runs, "prs": prs, "issues": self.issues.get(repo, []), "pushes": self.pushes.get(repo, []),
+                   "closed": self.closed.get(repo, []), "merged": self.merged.get(repo, []), "merged_all": [],
+                   "releases": self.releases.get(repo, []), "jobs": {r["id"]: self.jobs[r["id"]] for r in runs if r["id"] in self.jobs},
+                   "checks": {k: self.checks[k] for k in heads if k in self.checks},
+                   "partial_jobs": set(self.partial_jobs.get(repo, ()))}
         try:
-            return self._read_repo(repo, prs)
-        except GitHubError as e:
-            with self._lock:
-                old = {"runs": self.runs.get(repo, []), "prs": prs, "issues": self.issues.get(repo, []),
-                       "pushes": self.pushes.get(repo, []), "closed": self.closed.get(repo, []),
-                       "merged": self.merged.get(repo, []), "releases": self.releases.get(repo, []),
-                       "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
-                       "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
-            old["error"] = f"{repo}: {e}"
-            return old
+            self._read_repo(repo, prs, out)
+        except GitHubError as exc:
+            out.setdefault("error", f"{repo}: {exc}")
+        return out
 
     def _read_holder_times(self, repo, runs, jobs):
         """Look up the same runner, dispatch workload, job and step, only while a reported reservation has waiters."""
@@ -864,34 +869,109 @@ class DevWatch:
                         samples.append((end - start, s["conclusion"]))
         return samples
 
-    def _read_repo(self, repo: str, prs: list) -> dict:
-        out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
-               "merged_all": []}
-        runs = (self._try(f"repos/{repo}/actions/runs?per_page=20") or {}).get("workflow_runs") or []
-        if len(runs) == 20:
-            # GitHub's recent list is ordered by creation time. A long check can disappear from it while still running.
-            by_id = {r["id"]: r for r in runs}
+    def _action_pages(self, repo, path, field, size, out):
+        """Keep pages already received on timeout and tell the caller when absence is authoritative."""
+        rows, seen = [], set()
+        page = 1
+        try:
+            while True:
+                page_path = f"{path}&page={page}"
+                response = self._try(page_path)
+                if response is None:  # endpoint unavailable (e.g. Actions disabled)
+                    if rows:
+                        raise GitHubError(0, f"GitHub did not return {page_path}")
+                    return rows, False
+                batch = response.get(field) if isinstance(response, dict) else None
+                if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
+                    raise GitHubError(0, f"Incomplete {field} response for {path}")
+                ids = [row["id"] for row in batch if row.get("id") is not None]
+                if (field == "workflow_runs" or len(batch) >= size) and len(ids) != len(batch):
+                    raise GitHubError(0, f"Missing IDs in {field} for {path}")
+                if len(ids) != len(set(ids)):
+                    raise GitHubError(0, f"Duplicate IDs in {field} for {path}")
+                rows.extend(row for row in batch if row.get("id") not in seen)
+                if seen.intersection(ids):
+                    raise GitHubError(0, f"{field} changed while paging {path}")
+                seen.update(ids)
+                total = response.get("total_count")
+                if len(batch) < size or len(rows) == total:
+                    if total is not None and len(rows) != total:
+                        raise GitHubError(0, f"Incomplete {field} list for {path}")
+                    return rows, True
+                if field == "workflow_runs" and page == 10:
+                    raise GitHubError(0, f"Active run list exceeds GitHub's 1,000-result limit for {path}")
+                page += 1
+        except GitHubError as exc:
+            out.setdefault("error", f"{repo}: {exc}")
+            return rows, False
+
+    def _read_actions(self, repo, out):
+        previous = {r["id"]: r for r in out["runs"]}
+        recent = self._try(f"repos/{repo}/actions/runs?per_page=20")
+        if recent is None:
+            if previous:
+                out["error"] = f"{repo}: GitHub did not return the recent Actions runs"
+            return
+        if not isinstance(recent, dict) or not isinstance(recent.get("workflow_runs"), list):
+            raise GitHubError(0, f"Incomplete recent Actions runs for {repo}")
+        recent_runs = recent["workflow_runs"]
+        if any(not isinstance(r, dict) or type(r.get("id")) is not int for r in recent_runs):
+            raise GitHubError(0, f"Invalid recent Actions run for {repo}")
+        observed = {r["id"]: r for r in recent_runs}
+        complete = True
+        if len(recent_runs) == 20 or recent.get("total_count", 0) > len(recent_runs):
+            # A long-running job can fall outside the recent window. A partial active list cannot retire unseen jobs.
             for status in ("in_progress", "queued"):
-                page = 1
-                while True:
-                    path = f"repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"
-                    batch = (self._try(path) or {}).get("workflow_runs") or []
-                    by_id.update((r["id"], r) for r in batch)
-                    if len(batch) < 100:
-                        break
-                    page += 1
-            runs = list(by_id.values())
-        out["runs"] = runs
-        for run in runs:
-            before = self.jobs.get(run["id"])
-            if run.get("status") in ACTIVE or before is None and run.get("status") != "completed" or \
-                    before and any(j.get("status") in ACTIVE for j in before):
-                out["jobs"][run["id"]] = (self._try(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30") or {}).get("jobs") or []
-            elif before is not None:
-                out["jobs"][run["id"]] = before
+                path = f"repos/{repo}/actions/runs?status={status}&per_page=100"
+                batch, finished = self._action_pages(repo, path, "workflow_runs", 100, out)
+                observed.update((r["id"], r) for r in batch)
+                complete = complete and finished
+            if not complete:
+                out.setdefault("error", f"{repo}: GitHub did not return all active runs")
+        runs = dict(observed)
+        if not complete:
+            runs.update((rid, r) for rid, r in previous.items() if rid not in runs and r.get("status") in ACTIVE)
+        out["runs"] = list(runs.values())
+        out["partial_jobs"].intersection_update((rid, r.get("run_attempt") or 1) for rid, r in runs.items())
+        jobs = {}
+        for rid, run in runs.items():
+            old = previous.get(rid, {})
+            attempt = run.get("run_attempt") or 1
+            same_attempt = (old.get("run_attempt") or 1) == attempt
+            before = out["jobs"].get(rid) if same_attempt else None
+            if before is not None:
+                jobs[rid] = before
+            if rid not in observed:
+                continue
+            key = (rid, attempt)
+            if (run.get("status") in ACTIVE or old.get("status") in ACTIVE or key in out["partial_jobs"]
+                    or any(j.get("status") in ACTIVE for j in before or [])):
+                path = f"repos/{repo}/actions/runs/{rid}/jobs?per_page=30"
+                batch, finished = self._action_pages(repo, path, "jobs", 30, out)
+                # /jobs defaults to the latest attempt, which may advance during this poll.
+                if any((j.get("run_attempt") or attempt) > attempt for j in batch):
+                    finished = False
+                    out.setdefault("error", f"{repo}: run {rid} changed attempts during its job refresh")
+                batch = [j for j in batch if (j.get("run_attempt") or attempt) == attempt]
+                if finished:
+                    jobs[rid] = batch
+                    out["partial_jobs"].discard(key)
+                else:
+                    out["partial_jobs"].add(key)
+                    out.setdefault("error", f"{repo}: GitHub did not return all jobs for run {rid}")
+                    if batch:
+                        received = {j.get("id") for j in batch}
+                        jobs[rid] = batch + [j for j in before or [] if j.get("id") not in received]
+        out["jobs"] = jobs
+
+    def _read_repo(self, repo: str, prs: list, out: dict) -> None:
+        self._read_actions(repo, out)
+        runs = out["runs"]
         self._read_holder_times(repo, runs, out["jobs"])
         for run in runs:
             # A cancelled run in the last day: who or what cancelled it, from its job's annotations, asked once.
+            if (run["id"], run.get("run_attempt") or 1) in out["partial_jobs"]:
+                continue
             if run.get("conclusion") == "cancelled" and (repo, run["id"]) not in self.cancels and _age(run.get("updated_at")) < 86400:
                 jobs = out["jobs"].get(run["id"])
                 if jobs is None:
@@ -901,17 +981,20 @@ class DevWatch:
                 notes = self._try(f"repos/{repo}/check-runs/{job['id']}/annotations?per_page=20") or [] if job and job.get("id") else []
                 how, who = rules.cancel_reason(notes)
                 self.cancels[(repo, run["id"])] = {"how": how, "who": who}
+        checked = set()
         for pr in prs:
             sha = (pr.get("head") or {}).get("sha")
-            if not sha or (repo, sha) in out["checks"]:
+            if not sha or sha in checked:
                 continue
             # A rerun can add a check to the same commit. Revalidate each open head once per poll using GitHub's ETag.
-            out["checks"][(repo, sha)] = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
-            if not out["checks"][(repo, sha)]:
+            checks = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
+            if not checks:
                 # A commit pushed with a workflow's token starts no check run; the job posts its result as a commit status
                 # instead (LifeShare's PR check on generated content). Without this such a PR looked unchecked, not failed.
-                out["checks"][(repo, sha)] = self._statuses(repo, sha)
-            for c in out["checks"][(repo, sha)]:
+                checks = self._statuses(repo, sha)
+            out["checks"][(repo, sha)] = checks
+            checked.add(sha)
+            for c in checks:
                 # A failed check's annotations, once per check run (they never change): "No result" = needs a re-run.
                 if c.get("conclusion") in FAILED and c.get("id") and c["id"] not in self.no_result \
                         and (c.get("output") or {}).get("annotations_count"):
@@ -928,7 +1011,9 @@ class DevWatch:
                     step = next((st.get("name") for st in j.get("steps") or [] if st.get("conclusion") in FAILED), "")
                     self.fail_jobs[c["id"]] = {"step": _text(step, 120), "runner": _text(j.get("runner_name"), 80)}
         # Pushes to agent branches (claude/..., codex/...): what the Agents card shows before a PR exists. One call, ETag.
-        for e in self._try(f"repos/{repo}/events?per_page=100") or []:
+        events = self._try(f"repos/{repo}/events?per_page=100") or []
+        out["pushes"] = []
+        for e in events:
             if not isinstance(e, dict) or e.get("type") != "PushEvent":
                 continue
             ref = str((e.get("payload") or {}).get("ref") or "")
@@ -937,7 +1022,9 @@ class DevWatch:
                 out["pushes"].append({"branch": _text(branch, 120), "at": _text(e.get("created_at"), 30),
                                       "actor": _text((e.get("actor") or {}).get("login"), 60)})
         # Agent branches whose PR was merged or closed: their work is done, so they leave the Agents card.
-        for p in self._try(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50") or []:
+        closed = self._try(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50") or []
+        out["closed"], out["merged"] = [], []
+        for p in closed:
             branch = str((p.get("head") or {}).get("ref") or "")
             if isinstance(p, dict) and p.get("closed_at") and _agent_of(branch, ""):
                 out["closed"].append({"branch": _text(branch, 120), "at": _text(p.get("closed_at"), 30), "number": p.get("number")})
@@ -946,9 +1033,8 @@ class DevWatch:
             if isinstance(p, dict) and p.get("merged_at") and _age(p["merged_at"]) < pipeline.MERGED_HOURS * 3600:
                 out["merged"].append({k: p.get(k) for k in ("number", "title", "html_url", "merged_at", "base", "head", "labels")})
         # Releases: the last step of a change's road. One call, ETag; only asked while something merged recently.
-        if out["merged"]:
-            out["releases"] = [r for r in self._try(f"repos/{repo}/releases?per_page=5") or []
-                               if isinstance(r, dict) and not r.get("draft")]
+        releases = self._try(f"repos/{repo}/releases?per_page=5") if out["merged"] else []
+        out["releases"] = [r for r in releases or [] if isinstance(r, dict) and not r.get("draft")]
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
         week = time.time() - 7 * 86400
@@ -957,7 +1043,6 @@ class DevWatch:
                  | set(self.bases_conf.get(repo.lower(), []))) - {""}
         out["bases"] = {b: info for b in sorted(names)[:8] if (info := self._read_base(repo, b)) is not None}
         self._read_status_issue(repo)
-        return out
 
     def _base_get(self, path, **kwargs):
         try:
@@ -1343,8 +1428,6 @@ class DevWatch:
     def _record(self, got: dict) -> None:
         """Keep what this poll saw (store.py): merged PRs, finished runs, started and finished jobs."""
         for repo, g in got.items():
-            if g.get("error"):
-                continue
             self.store.merges(repo, g.get("merged_all") or [], _agent_of)
             self.store.runs(repo, g.get("runs") or [])
             for run in g.get("runs") or []:

@@ -15,6 +15,8 @@ The header shows your GitHub sign-in and selected project. Click the sign-in to 
 The open PR total follows the project selection. If GitHub times out, Live marks the total as partial and keeps
 the last confirmed count for each affected repository. Building now shows each running check's current GitHub step,
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
+If a later GitHub request times out, the dashboard keeps the runs and job steps it already received.
+A job that could not be refreshed keeps its last known step for the same attempt. A rerun starts with its own steps.
 During Build and test it also shows the phase reported by the machine and a rough time left based on
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
 The live check card leads with what the machine is doing. Between phase reports, the latest observed tool
