@@ -603,6 +603,23 @@ class Feed(unittest.TestCase):
         self.assertEqual(row["progress"]["reservation"]["ahead"], 0)
         self.assertIsNone(row["progress"]["reservation"]["start_in"])
 
+    def test_upload_count_survives_sync_and_quiet_periods_without_a_stale_eta(self):
+        job = {"name": "Compile and test", "runner_name": "ALEX-PC-unreal-pr", "status": "in_progress",
+               "steps": [{"name": "Build and test", "status": "in_progress", "started_at": ago(15)}]}
+        w = self.watch_first({f"repos/{REPO}/actions/runs/7/jobs": {"jobs": [job]}})
+        upload = {"done": 2160, "total": 11391, "eta_seconds": 1080}
+        lease = {"purpose": "PR check #12 (GitHub run 7)", "since": ago(12), "alive": True}
+        for age, raw, expected in ((0, {**upload, "local_path": "private"}, upload),
+                                   (4, upload, {**upload, "eta_seconds": None}),
+                                   (0, {**upload, "done": 11500}, None)):
+            out = {"label": "Uploading generated assets", "at": ago(age), "upload": raw}
+            w.report("pc", {"host": "ALEX-PC", "lease": {**lease, "last_output": out}})
+            state = w.snapshot()
+            row = next(x for x in state["building"] if x.get("reservation_holder"))
+            self.assertEqual(row["last_output"].get("upload"), expected)
+            run = next(x for x in state["runs"] if x["id"] == 7)
+            self.assertEqual(run["progress"]["last_output"], row["last_output"])
+
     def test_machine_reports(self):
         w = self.watch()
         w.report("GAMING-PC", {"host": "ALEX-PC", "busy": True, "idle_seconds": 900, "procs": {"claude": 2, "unreal": 1},

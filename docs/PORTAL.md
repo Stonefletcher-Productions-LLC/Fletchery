@@ -173,6 +173,11 @@ and remove it at exit. The dashboard matches it to the current machine, run, att
 For a check that predates phase reporting, the Gaming PC can identify the latest tool output in the reserved
 checkout. Its timestamp remains visible during quiet periods so you can see how recently the job produced evidence.
 The GitHub step count describes the outer workflow. Several imports, builds and tests can happen within one step.
+For Git LFS uploads that report completed batches, the card shows the uploaded and total file counts.
+Its upload estimate uses the rate of recent completed batches. During a quiet period the last count stays visible
+with its observation time, and the estimate expires.
+If the runner is installed outside the usual folders beside the machine's reservation directory, set
+`runnerRoots` in the reporter configuration to a list of local runner installation paths containing `_diag/pages`.
 
 **Disk space.** When a disk guard writes `<lease folder>\disk.json` (LifeShare's `Tools/CI/DiskGuard.ps1`, every 10
 minutes: `drive`, `freeGB`, `totalGB`, `state` ok/low/full, `warnGB`, `runnerStopped`, `holders`), the reporter (version
