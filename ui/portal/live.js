@@ -480,6 +480,32 @@
       badges(c), ...bars(c), basis(c, true),
       c.why ? el('p', {class: 'why', text: 'Why: ' + c.why}) : null);
   }
+  // The Restart button and what became of the last restart. The question says what a restart ends and whether the
+  // machine comes back by itself, because the answer is the whole risk.
+  function restartAsk(m) {
+    const doing = (m.activities || []).filter(x => x.kind !== 'queued').map(x => x.title);
+    const ar = m.after_restart || {};
+    return 'Restart ' + m.name + ' now?' +
+      (doing.length ? '\n\nThis ends what it is doing: ' + doing.slice(0, 3).join('; ') + '.' : '\n\nNothing is running on it.') +
+      (ar.signs_in === false ? '\n\nIt does not sign in by itself after a restart: Fletchery and Claude stay away from it until someone signs in at the machine.' :
+        ar.signs_in === true ? '\n\nIt signs in by itself and reports again in a few minutes.' : '') +
+      (ar.guard === false ? '\n\nThe restart guard is not installed there, so a restart that hangs needs the power button.' : '');
+  }
+  function restartRow(m) {
+    const r = m.restart, kids = [];
+    if (r && (r.state === 'requested' || r.state === 'sent'))
+      kids.push(el('span', {class: 'chip ' + (r.overdue ? 'needs' : 'wait'), text: r.overdue ? 'Restart: not back yet' : r.state === 'sent' ? 'Restarting' : 'Restart requested'}),
+        el('span', {class: 'sub'}, ' asked ', ago(r.requested), r.by ? ' from ' + r.by : ''));
+    else if (r && r.state === 'back' && Date.now() - Date.parse(r.back) < 6 * 3600 * 1000)
+      kids.push(el('span', {class: 'sub'}, 'Restarted ', ago(r.back), ', back after ' + Math.max(1, Math.round((r.took || 0) / 60)) + ' min'));
+    else if (r && r.state === 'expired' && r.age < 6 * 3600)
+      kids.push(el('span', {class: 'chip needs', text: 'Restart was not picked up'}));
+    if (desk() && m.key && m.can_restart && !(r && (r.state === 'requested' || r.state === 'sent') && !r.overdue))
+      kids.push(control('Restart', '/api/machines/restart', {name: m.key, force: true}, restartAsk(m), m.name + ' was told to restart.'));
+    else if (desk() && m.key && !m.can_restart && m.online)
+      kids.push(el('span', {class: 'sub', text: 'Restart from here needs the newer reporter on this machine.'}));
+    return kids.length ? el('div', {class: 'ctl m-restart'}, ...kids) : null;
+  }
   let changeByKey = {};
   function machineRow(m) {
     const st = m.stats || {}, g = m.disk_guard;
@@ -498,7 +524,8 @@
       m.activities && m.activities.length ? el('ul', {class: 'acts'}, (seen => m.activities.map(x => { const c = changeByKey[x.change]; if (c && seen.has(c.key)) return null; if (c) seen.add(c.key); return actRow(x, c); }))(new Set())) :
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
       tools.length ? el('p', {class: 'sub', text: 'Running: ' + tools.join(', ')}) : null,
-      m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null);
+      m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null,
+      restartRow(m));
   }
   function runnerRow(r) {
     const j = r.job, stepFor = j && j.step_started ? (Date.now() - Date.parse(j.step_started)) / 60000 : 0;
@@ -522,11 +549,11 @@
     fillEl.style.width = Math.round(100 * Math.min(1, Math.max(0, part))) + '%';
     return el('div', {class: 'bar', 'aria-hidden': 'true'}, fillEl);
   }
-  function control(text, path, body, ask) {
+  function control(text, path, body, ask, done) {
     const b = el('button', {type: 'button', class: 'small', text});
     b.addEventListener('click', async () => {
       b.disabled = true;
-      if (await window.fletcheryAct(path, body, 'Sent to GitHub.', ask)) setTimeout(refresh, 1500);
+      if (await window.fletcheryAct(path, body, done || 'Sent to GitHub.', ask)) setTimeout(refresh, 1500);
       b.disabled = false;
     });
     return b;

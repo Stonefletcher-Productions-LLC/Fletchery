@@ -182,3 +182,32 @@ per request. Build upload requests allow 8 MiB for the encoded chunk. Limits app
 | `/v1/upload` | a finished build, in 4 MiB chunks (only for the machine's own `package` job) | `ok` |
 | `/v1/assets/list`, `/v1/assets/read` | the shared asset folders (above) | files, or one chunk |
 | `/v1/report` | what the machine is doing, from `reporter.py` | `ok` |
+
+## Restarting a machine
+
+Each machine's card on the Live tab has a **Restart** button (the window, and the phone when controls are on). A script
+or an agent does the same with `POST /api/machines/restart {"name": "<machine>", "force": false, "reason": "..."}` on
+the dashboard port (header `Origin: http://127.0.0.1:<port>`). Without `force` the request is refused while a live
+run holds the machine, so nobody ends a build by accident; the button asks first and then sends `force`.
+
+How it reaches the machine (`fletchery/restart.py`):
+
+1. The backend records the request. The machine's reporter collects it with its next report (about 10 seconds) and
+   runs `shutdown /r /f`. No admin rights, no new port, no new secret.
+2. The **restart guard** asks the backend the same question every 15 seconds. It is a startup task that runs as
+   SYSTEM, so it works with nobody signed in, and if Windows is still up 10 minutes after the polite restart it
+   restarts the machine the hard way. Install it once per machine from an elevated prompt:
+   `python fletchery\restart.py install-guard --config <reporter.json>`
+3. A request belongs to the boot it was made in. A machine that started after the request never gets it, so a restart
+   cannot loop. A request nobody collects in 10 minutes is dropped.
+4. The first report after the boot marks the restart "back" with how long it took. A machine that is not back after
+   15 minutes is flagged on the Live tab.
+
+The card says before you press whether the machine **signs in by itself** after a restart. A machine that does not
+comes back with its services (GitHub runners, the restart guard) but without anything that starts at sign-in: the
+reporter, the Fletchery backend, Claude. Turn on automatic sign-in (Sysinternals Autologon) on any machine that must
+come back with nobody at it. `python fletchery\restart.py status` prints what this machine will do.
+
+| Path | Body | Answer |
+| --- | --- | --- |
+| `/v1/restart` | `{boot, ack}` from the restart guard | `{restart}`: the request to act on, or null |

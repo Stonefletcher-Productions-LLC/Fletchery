@@ -1,6 +1,6 @@
-"""Fletchery reporter: tells the Live tab what this machine is doing, every few seconds. Read-only on the machine.
+"""Fletchery reporter: tells the Live tab what this machine is doing, every few seconds.
 
-What it reads (nothing here starts, stops or changes anything):
+What it reads (reading starts, stops and changes nothing):
   - LaneGuard's lease (heavy.json): who holds the machine, named by the run itself ("PR check #2290", "Hand merge batch
     7"), since when, and whether that process is still alive;
   - LaneGuard's queue (heavy.queue beside the lease): who waits for the machine;
@@ -12,6 +12,8 @@ What it reads (nothing here starts, stops or changes anything):
   - <lease folder>/disk.json, written by LifeShare's disk guard (Tools/CI/DiskGuard.ps1) every 10 minutes: the build
     drive's free and total space, its state (ok, low, full), the thresholds, the runner services it stopped and the
     biggest folders. Sent as it is, bounded; the Live tab warns from it.
+
+The one thing it does to the machine: restart it when the backend's answer says to (restart.py; the Restart button).
 
 It posts that to Fletchery's machines worker API (/v1/report), signed with this machine's existing node key, so no new
 secret and no new open port. The Live tab marks the machine silent after a minute without a report.
@@ -46,7 +48,10 @@ from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 
-VERSION = "5"  # reports measured progress of the reserved job's generated-asset uploads
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import restart as restartmod  # noqa: E402
+
+VERSION = "6"  # reports its boot time and acts on a restart request in the answer (restart.py)
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -514,6 +519,8 @@ class Reporter:
         self.runner_logs = RunnerLogProgress(roots)
         self.cpu = Cpu()
         self.idle_since = 0.0
+        self.restart_ack = ""
+        self.ready = (0.0, {})     # (read at, restart.readiness()): asked every 10 minutes, it starts a program
 
     def collect(self) -> dict:
         lease = None
@@ -567,7 +574,10 @@ class Reporter:
             self.idle_since = self.idle_since or time.time()
         else:
             self.idle_since = 0.0
+        if time.time() - self.ready[0] > 600:
+            self.ready = (time.time(), restartmod.readiness())
         return {"version": VERSION, "host": socket.gethostname(), "at": now_iso(), "lease": lease, "queue": queue[:10],
+                "boot": restartmod.boot_time(), "restart_ack": self.restart_ack, "after_restart": self.ready[1],
                 "activities": acts[:10], "procs": procs, "stats": stats, "disk_guard": guard,
                 "idle_seconds": round(time.time() - self.idle_since) if self.idle_since else 0,
                 "busy": bool(lease or procs.get("runner") or acts)}
@@ -591,11 +601,22 @@ def run(cfg: dict) -> int:
     log = Path(cfg.get("logFile") or Path(cfg["keyFile"]).parent.parent / "fletchery-reporter.log")
     rep = Reporter(cfg)
     said = ""
+
+    def note(text: str) -> None:
+        try:
+            with log.open("a", encoding="utf-8") as f:
+                f.write(f"{now_iso()} {text}\n")
+        except OSError:
+            pass
+
+    actor = restartmod.Actor(log=note)
     while True:
         started = time.monotonic()
         try:
-            rep.send(rep.collect())
+            answer = rep.send(rep.collect())
             msg = ""
+            if isinstance(answer, dict) and answer.get("restart"):
+                rep.restart_ack = actor.handle(answer["restart"]) or rep.restart_ack
         except urllib.error.HTTPError as e:
             msg = f"Fletchery refused the report: HTTP {e.code}"
         except Exception as e:  # keep reporting through any hiccup
