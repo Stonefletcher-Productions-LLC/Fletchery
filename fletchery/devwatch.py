@@ -1216,7 +1216,7 @@ class DevWatch:
                 if job.get("status") == "in_progress" and re.match(r"^Build and test(?:\s*\(|$)", row["step"], re.I):
                     row["attempt"] = r.get("run_attempt") or 1
                     start = _ts(job.get("started_at"))
-                    row["progress"] = {"eta": self.store.job_remaining(repo, row["job"], prn, max(0, at - start))
+                    row["progress"] = {"eta": self.store.job_remaining(repo, job, r, max(0, at - start))
                                        if start else {}}
                 heads = open_heads.get(repo)
                 row["pr_closed"] = bool(row["status"] in ACTIVE and row["event"].startswith("pull_request") and heads is not None

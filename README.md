@@ -17,8 +17,8 @@ the last confirmed count for each affected repository. Building now shows each r
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
 If a later GitHub request times out, the dashboard keeps the runs and job steps it already received.
 A job that could not be refreshed keeps its last known step for the same attempt. A rerun starts with its own steps.
-During Build and test it also shows the phase reported by the machine and a rough time left based on
-finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
+During Build and test, the GitHub step has its own clock. A phase start appears when the machine reports it.
+Whole-job time estimates use finished attempts for the same revision, event and runner that ran at least this long.
 The live check card leads with what the machine is doing. Between phase reports, the latest observed tool
 activity and its timestamp stay visible for the current reservation.
 During a Git LFS upload, the card shows how many files have uploaded and estimates the time left in the upload from recent batches.

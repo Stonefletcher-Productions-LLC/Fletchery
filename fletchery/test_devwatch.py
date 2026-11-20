@@ -200,14 +200,22 @@ class Feed(unittest.TestCase):
 
     def test_time_left_uses_job_runtime_and_excludes_shorter_or_cancelled_jobs(self):
         ledger = self.watch().store
-        for i, (minutes, pr, result) in enumerate([(1, 12, "success"), (30, 12, "failure"), (50, 13, "success"), (80, 12, "cancelled")], 100):
-            run = {"id": i, "status": "completed", "updated_at": ago(1), "pull_requests": [{"number": pr}]}
-            ledger.runs(REPO, [run])
-            ledger.jobs(REPO, run, [{"id": i, "status": "completed", "conclusion": result, "name": "Build",
+        run = {"status": "completed", "updated_at": ago(1), "pull_requests": [{"number": 12}],
+               "event": "pull_request", "head_sha": "a"*40}
+        job = {"name": "Build", "runner_name": "Node"}
+        for i, (minutes, result, run_changes, job_changes) in enumerate([
+                (1, "success", {}, {}), (30, "failure", {}, {}), (80, "cancelled", {}, {}),
+                (50, "success", {"pull_requests": [{"number": 13}]}, {}), (60, "success", {"head_sha": "b"*40}, {}),
+                (70, "success", {}, {"runner_name": "Other"}), (45, "success", {"event": "push"}, {})], 100):
+            past = {**run, **run_changes, "id": i}
+            ledger.runs(REPO, [past])
+            ledger.jobs(REPO, past, [{**job, **job_changes, "id": i, "status": "completed", "conclusion": result,
                                      "created_at": ago(400), "started_at": ago(100), "completed_at": ago(100 - minutes)}])
-        self.assertEqual(ledger.job_remaining(REPO, "Build", 12, 20*60), {"samples": 1, "seconds": 600, "same_pr": True})
-        self.assertEqual(ledger.job_remaining(REPO, "Build", 12, 40*60)["seconds"], 600)
-        self.assertIsNone(ledger.job_remaining(REPO, "Build", 12, 55*60)["seconds"])
+        self.assertEqual(ledger.job_remaining(REPO, job, run, 20*60),
+                         {"samples": 1, "seconds": 600, "same_pr": True, "same_revision": True})
+        self.assertEqual(ledger.job_remaining(REPO, job, run, 40*60)["samples"], 2)
+        self.assertIsNone(ledger.job_remaining(REPO, job, run, 40*60)["seconds"])
+        self.assertFalse(ledger.job_remaining(REPO, job, {**run, "head_sha": ""}, 20*60))
 
     def test_stuck_and_blocked(self):
         titles = " | ".join(b["title"] for b in self.watch().snapshot()["blockers"])
