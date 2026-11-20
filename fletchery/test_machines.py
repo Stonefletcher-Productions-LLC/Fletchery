@@ -60,7 +60,9 @@ class RegistryTests(Base):
         other = self.m.enqueue("checkout-only", SHA, {}, requested_by="PR check")
         build = self.m.enqueue("package", SHA, BUILD, requested_by="build 0.4.5")
         self.assertTrue(self.m.round_waiting("NODE-01"))   # the node keeps LaneGuard's marker: local runs wait
-        got = self.m.claim("NODE-01", rounds_only=True)
+        # Not handed out while the local run holds the node (it would run beside it); claimed once the lease is free.
+        self.assertIsNone(self.m.claim("NODE-01", rounds_only=True))
+        got = self.m.claim("NODE-01")
         self.assertEqual((got["id"], got["round"]), (build, True))   # it holds the lease for its whole length
         self.assertFalse(self.m.round_waiting("NODE-01"))   # a PR check's job never holds local runs off
         self.assertEqual(self.m.job(other)["state"], "queued")
