@@ -211,3 +211,7 @@ come back with nobody at it. `python fletchery\restart.py status` prints what th
 | Path | Body | Answer |
 | --- | --- | --- |
 | `/v1/restart` | `{boot, ack}` from the restart guard | `{restart}`: the request to act on, or null |
+
+### Restart when idle
+
+A machine that is running something offers two buttons. **Restart when idle** stops nothing: the request waits (up to 12 hours) until the machine reports that no build, runner job or slot hold is alive, and restarts it then. It can be withdrawn with **Cancel restart** while it waits. **Restart now** ends what is running. From a script: `POST /api/machines/restart {"name": "SF-NODE-01", "when_idle": true}`, and `{"name": ..., "cancel": true}` to withdraw.

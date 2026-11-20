@@ -208,11 +208,17 @@ const server = http.createServer((req, res) => {
     let asked = '';
     const hear = d => { asked = d.message(); };
     page.on('dialog', hear);
-    await page.click('#liveMachines button:has-text("Restart")');
+    await page.click('#liveMachines button:text-matches("^Restart( now)?$")');
     for (let i = 0; i < 80 && lastPost()[0] !== '/api/machines/restart'; i++) await page.waitForTimeout(50);
     page.off('dialog', hear);
     assert.deepEqual(lastPost(), ['/api/machines/restart', {name: 'NODE-01', force: true}]);
     assert.match(asked, /Restart SF-NODE-01 now\?[\s\S]*This ends what it is doing: [\s\S]*does not sign in by itself[\s\S]*restart guard is not installed/);
+    // A busy machine also offers a restart that waits for its build to end, and stops nothing.
+    if (await page.locator('#liveMachines button:has-text("Restart when idle")').count()) {
+      await page.click('#liveMachines button:has-text("Restart when idle") >> nth=0');
+      for (let i = 0; i < 80 && !lastPost()[1].when_idle; i++) await page.waitForTimeout(50);
+      assert.deepEqual(lastPost(), ['/api/machines/restart', {name: 'NODE-01', when_idle: true}]);
+    }
     // A check that gave no verdict (cancelled, or "No result") is re-run from its PR, one job.
     await page.click('#livePrs button:has-text("Re-run Cheap checks")');
     await page.waitForFunction(() => document.querySelector('#toast') && !document.querySelector('#toast').hidden);
