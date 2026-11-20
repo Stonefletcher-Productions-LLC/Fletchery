@@ -81,6 +81,7 @@ AGENT_HOURS = 24      # a branch quiet this long drops off the Agents card (work
 AGENT_ACTIVE_MINUTES = 15   # working now: a heartbeat this recent (or, for an agent that sends none, a push or PR update)
 CODING_FRESH = 30 * 60   # a push this recent counts as "coding"
 GENERIC_LABELS = {"self-hosted", "windows", "linux", "macos", "x64", "arm64"}
+FLOW_FRESH_DAYS = 3         # an open PR untouched for longer does not count as waiting to merge
 REPORT_STALE = 60          # a machine that has not reported for this long is shown as silent
 BACKFILL_RUNS = 30         # past runs read once at start when a repository has no step times yet
 RUNNER_REFUSED_RETRY = 3600   # a runner list GitHub refused (no admin rights) is asked again after an hour
@@ -1667,7 +1668,10 @@ class DevWatch:
             return kept
         waiting: dict = {}
         for p in prs_out:
-            if not p["draft"] and p["checks"]["state"] not in ("failed",):
+            # On its way: not a draft, not failed, and touched in the last FLOW_FRESH_DAYS. A PR left open for weeks in
+            # a quiet repository is not a stopped pipeline (2026-11-20: four of sixteen blockers were such repositories).
+            stale = _ts(p.get("updated")) and at - _ts(p.get("updated")) > FLOW_FRESH_DAYS * 86400
+            if not p["draft"] and p["checks"]["state"] not in ("failed",) and not stale:
                 waiting[p["repo"]] = waiting.get(p["repo"], 0) + 1
         try:
             kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at,

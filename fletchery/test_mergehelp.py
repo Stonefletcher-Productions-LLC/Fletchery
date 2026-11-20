@@ -200,5 +200,70 @@ class ConflictTests(unittest.TestCase):
         self.assertIn("needs a person", self.gh.posts[0][1]["body"])
 
 
+
+class UnionMergeTest(unittest.TestCase):
+    def table(self, keys, end):
+        return b"".join(b"%s,Text %s,note" % (k.encode(), k.encode()) + end for k in ["Key"] + keys)
+
+    def test_doubled_file_is_seen_and_rebuilt(self):
+        old = [f"K{i}" for i in range(400)]
+        base = self.table(old, b"\r\n")
+        theirs = self.table(old + ["Tip.A", "Tip.B"], b"\r\n")
+        mine = self.table(old + ["Mine.A"], b"\n")            # this branch rewrote the file with LF endings
+        merged = theirs + mine                                # what merge=union made of it
+        self.assertTrue(mergehelp.union_doubled(merged, mine, theirs))
+        out = mergehelp.union_rebuild(base, mine, theirs)
+        self.assertEqual(out, theirs + b"Mine.A,Text Mine.A,note\r\n")
+        self.assertFalse(mergehelp.union_doubled(out, mine, theirs))
+
+    def test_a_proper_union_merge_is_left_alone(self):
+        old = [f"K{i}" for i in range(400)]
+        theirs = self.table(old + ["Tip.A"], b"\r\n")
+        mine = self.table(old + ["Mine.A"], b"\r\n")
+        merged = self.table(old + ["Tip.A", "Mine.A"], b"\r\n")
+        self.assertFalse(mergehelp.union_doubled(merged, mine, theirs))
+
+    def test_rebuild_keeps_the_tips_bytes_and_adds_a_final_line_ending(self):
+        theirs = b"a\r\nb\nc"
+        out = mergehelp.union_rebuild(b"a\r\n", b"a\nx\nx\n\n", theirs)
+        self.assertEqual(out, b"a\r\nb\nc\r\nx\r\n")
+
+
+    def test_real_git_union_merge_is_repaired_before_the_push(self):
+        import shutil
+        import subprocess
+        import tempfile
+        if not shutil.which("git"):
+            self.skipTest("no git")
+        with tempfile.TemporaryDirectory() as d:
+            wt = Path(d)
+
+            def git(*a):
+                return subprocess.run(["git", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=d,
+                                      capture_output=True, text=True, check=True)
+            old = [f"K{i}" for i in range(300)]
+            git("init", "-q", "-b", "tip")
+            (wt / ".gitattributes").write_bytes(b"*.csv -text merge=union\n")
+            (wt / "s.csv").write_bytes(self.table(old, b"\r\n"))
+            git("add", "-A"); git("commit", "-q", "-m", "base")
+            git("checkout", "-q", "-b", "pr")
+            (wt / "s.csv").write_bytes(self.table(old + ["Mine.A"], b"\n"))
+            git("commit", "-q", "-am", "mine, with LF endings")
+            git("checkout", "-q", "tip")
+            (wt / "s.csv").write_bytes(self.table(old + ["Tip.A"], b"\r\n"))
+            git("commit", "-q", "-am", "tip")
+            git("checkout", "-q", "pr")
+            git("merge", "-q", "--no-edit", "--no-ff", "tip")
+            self.assertGreater((wt / "s.csv").read_bytes().count(b"K7,"), 1)      # the union merge doubled it
+            helper = object.__new__(mergehelp.MergeHelper)
+            helper._run, lines = subprocess.run, []
+            helper.log = lines.append
+            self.assertEqual(helper._repair_union(wt), ["s.csv"])
+            self.assertEqual((wt / "s.csv").read_bytes(), self.table(old + ["Tip.A"], b"\r\n") + b"Mine.A,Text Mine.A,note\r\n")
+            self.assertEqual(git("status", "--porcelain").stdout.strip(), "")
+            self.assertEqual(len(git("rev-list", "--parents", "-1", "HEAD").stdout.split()), 3)   # still the merge commit
+            self.assertEqual(helper._repair_union(wt), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -188,6 +188,11 @@ class App:
         self.builds = Builds(self)
         from mergehelp import MergeHelper
         self.merge = MergeHelper(cfg, self.gh, self.log)
+        from recheck import Recheck
+        live_conf = (cfg.portal or {}).get("live") if isinstance(getattr(cfg, "portal", None), dict) else None
+        self.recheck = Recheck(self.gh, self.log, self.state_dir,
+                               snapshot=lambda: self.portal.live.snapshot() if self.portal and self.portal.live is not None else None,
+                               enabled=not (isinstance(live_conf, dict) and live_conf.get("autoRerun") is False))
 
     # ---- activity ----
     def _load_activity(self) -> None:
@@ -277,6 +282,10 @@ class App:
                 self.merge.tick()
             except Exception as e:
                 self.merge.error = f"{type(e).__name__}: {e}"[:300]
+            try:
+                self.recheck.tick()
+            except Exception as e:
+                self.recheck.error = f"{type(e).__name__}: {e}"[:300]
             if self.cfg.scratch_roots and self.cfg.scratch_mode != "off" and time.monotonic() - last_scratch > SCRATCH_EVERY:
                 last_scratch = time.monotonic()
                 threading.Thread(target=self._scratch, name="fletchery-scratch", daemon=True).start()
@@ -378,7 +387,7 @@ class App:
                 "version": self.version,
                 "at": now_iso(), "errors": dict(self.errors), "builds": builds, "machines": machines,
                 "scratch": self.scratch_last, "log": list(self.lines)[-120:], "restarting": self.restart_reason,
-                "merge": self.merge.view()}
+                "merge": self.merge.view(), "recheck": self.recheck.view()}
 
     # ---- the controls (portal.py decides who may use them: the window always, the phone unless controls are off) ----
     def actions(self) -> dict:
