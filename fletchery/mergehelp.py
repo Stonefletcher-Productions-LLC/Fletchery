@@ -101,6 +101,51 @@ def claude_env(backend: str, key: str, base=None) -> dict:
     return env
 
 
+def _lines(data: bytes) -> list[tuple[bytes, bytes]]:
+    """(text, line ending) for each line."""
+    out = []
+    for raw in data.splitlines(keepends=True):
+        text = raw.rstrip(b"\r\n")
+        out.append((text, raw[len(text):]))
+    return out
+
+
+def union_doubled(merged: bytes, mine: bytes, theirs: bytes) -> bool:
+    """A union merge (.gitattributes merge=union) keeps both sides of every hunk that conflicts. When one side changed
+    the file's line endings, the whole file conflicts and every line is kept twice (2026-11-20: LifeShare's string
+    table went from 6,689 rows to 12,305 on three PRs, and their quick checks failed on duplicate keys).
+    True when the merged file repeats lines that neither side repeats."""
+    def counts(data):
+        c: dict = {}
+        for text, _ in _lines(data):
+            if text.strip():
+                c[text] = c.get(text, 0) + 1
+        return c
+    m, a, b = counts(merged), counts(mine), counts(theirs)
+    extra = sum(1 for text, n in m.items() if n > max(a.get(text, 0), b.get(text, 0)))
+    return extra > max(3, len(m) // 100)
+
+
+def union_rebuild(base: bytes, mine: bytes, theirs: bytes) -> bytes:
+    """What the union merge should have made: the base branch's file as it is, then the lines this branch added
+    (lines it has that neither the merge base nor the base branch has), compared without line endings and written
+    with the base branch's line ending."""
+    their_lines = _lines(theirs)
+    have = {text for text, _ in their_lines} | {text for text, _ in _lines(base)}
+    ends: dict = {}
+    for _, end in their_lines:
+        if end:
+            ends[end] = ends.get(end, 0) + 1
+    end = max(ends, key=ends.get) if ends else b"\n"
+    out = theirs if not theirs or theirs.endswith((b"\n", b"\r")) else theirs + end
+    seen = set()
+    for text, _ in _lines(mine):
+        if text.strip() and text not in have and text not in seen:
+            seen.add(text)
+            out += text + end
+    return out
+
+
 def conflict_prompt(pr: dict, base: str, files: list[str]) -> str:
     return f"""You are resolving a merge conflict so a pull request can land. Work only in this folder.
 
@@ -475,8 +520,10 @@ class MergeHelper:
         base = self.setting("base")
         m = self._git(["merge", "--no-edit", "--no-ff", f"origin/{base}", "-m", f"Merge {base} into {job['head']}"], wt, check=False)
         if m.returncode == 0:
+            fixed = self._repair_union(wt)
             self._push(job, wt)
-            return "pushed", f"merged {base} with no conflicts left (GitHub's view was stale)", {}
+            return "pushed", f"merged {base} with no conflicts left (GitHub's view was stale)" + (
+                f"; rebuilt {', '.join(fixed)} (the union merge had doubled it)" if fixed else ""), {}
         files = self._unmerged(wt)
         if not files:
             raise RuntimeError(f"merge failed without conflicts: {(m.stderr or m.stdout).strip()[-300:]}")
@@ -490,8 +537,33 @@ class MergeHelper:
             return "gave up", why + (". " + r["summary"][-600:] if r["summary"] and not r["is_error"] else ""), r
         self._git(["add", "-A"], wt)
         self._git(["commit", "--no-edit", "--no-verify"], wt)
+        fixed = self._repair_union(wt)
         self._push(job, wt)
-        return "pushed", f"resolved {len(files)} file(s). {r['summary'][-800:]}", r
+        return "pushed", f"resolved {len(files)} file(s)" + (f", rebuilt {', '.join(fixed)} (the union merge had doubled it)" if fixed else "") + \
+            f". {r['summary'][-800:]}", r
+
+    def _repair_union(self, wt: Path) -> list:
+        """After the merge commit: rebuild any merge=union file the merge doubled (union_doubled), and amend."""
+        def show(ref, path) -> bytes:
+            p = self._run(["git", "-c", "core.autocrlf=false", "show", f"{ref}:{path}"], cwd=str(wt), capture_output=True, timeout=600)
+            return p.stdout if p.returncode == 0 else b""
+        both = set(self._git(["diff", "--name-only", "HEAD^1", "HEAD"], wt, check=False).stdout.splitlines()) & \
+            set(self._git(["diff", "--name-only", "HEAD^2", "HEAD"], wt, check=False).stdout.splitlines())
+        fixed = []
+        for path in sorted(x for x in both if x.strip())[:200]:
+            if "merge: union" not in self._git(["check-attr", "merge", "--", path], wt, check=False).stdout:
+                continue
+            merged, mine, theirs = show("HEAD", path), show("HEAD^1", path), show("HEAD^2", path)
+            if not merged or len(merged) > 20 * 1024 * 1024 or b"\0" in merged[:8000] or not union_doubled(merged, mine, theirs):
+                continue
+            base = self._git(["merge-base", "HEAD^1", "HEAD^2"], wt, check=False).stdout.strip()
+            (wt / path).write_bytes(union_rebuild(show(base, path) if base else b"", mine, theirs))
+            self._git(["add", "--", path], wt)
+            fixed.append(path)
+        if fixed:
+            self._git(["commit", "--amend", "--no-edit", "--no-verify"], wt)
+            self.log(f"merge helper: the union merge doubled {', '.join(fixed)}; rebuilt from both sides")
+        return fixed
 
     def _fix(self, job: dict, wt: Path):
         repo, check = self._repo(), job["check"]
