@@ -207,7 +207,11 @@ def readiness() -> dict:
         pass
     try:
         r = subprocess.run(["schtasks", "/Query", "/TN", GUARD_TASK], capture_output=True, creationflags=NO_WINDOW, timeout=15)
-        out["guard"] = r.returncode == 0
+        # The task belongs to SYSTEM: a user who is not an administrator is refused when asking about it ("Access is
+        # denied"), which still says it is there. A missing task answers "cannot find the file" (Gaming PC, 2026-11-20:
+        # the guard was installed and the card kept saying it was not).
+        said = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace").lower()
+        out["guard"] = r.returncode == 0 or "access is denied" in said
     except (OSError, subprocess.SubprocessError):
         pass
     return out
