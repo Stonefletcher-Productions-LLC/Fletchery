@@ -218,7 +218,15 @@
     }
    ],
    "runners": [],
-   "version": "",
+   "version": "6",
+   "key": "NODE-01",
+   "boot": "2026-11-17T04:01:29Z",
+   "can_restart": true,
+   "after_restart": {
+    "signs_in": false,
+    "guard": false
+   },
+   "restart": null,
    "disk_guard": {
     "drive": "E:",
     "free_gb": 31.4,

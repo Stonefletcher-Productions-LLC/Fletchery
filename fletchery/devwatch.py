@@ -54,6 +54,7 @@ import alerts as alertsmod
 import flow as flowmod
 import pipeline  # beside this file, like every Fletchery module
 import presence
+import restart as restartmod
 import rules
 import store as storemod
 
@@ -537,6 +538,7 @@ class DevWatch:
         self.cancels: dict[tuple, dict] = {}        # (repo, run id) -> {"how", "who"}: who or what cancelled a run
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
+        self.restarts = restartmod.Restarts(Path(state_dir) / "restarts.json" if state_dir else None)   # the Restart button
         self.skip: dict[str, tuple[float, bool]] = {}  # path -> retry time, GitHub explicitly reported a missing ref
         self.last_ok = ""
         self.last_try = ""
@@ -625,7 +627,36 @@ class DevWatch:
                     self.log(f"live: disk history: {type(e).__name__}: {e}")
         if data.get("busy") and not was.get("busy"):
             self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
-        return {"ok": True, "every": 10}
+        cmd = self.restarts.poll(str(machine), data.get("boot"), _text(data.get("restart_ack"), 60))
+        return {"ok": True, "every": 10, **({"restart": cmd} if cmd else {})}
+
+    def restart_machine(self, name: str, by: str = "", reason: str = "", force: bool = False) -> dict:
+        """Tell one machine to restart (restart.py). `name` is its registered name, host name or display name.
+        Refused with ValueError when the machine cannot take the request, or is working and `force` is not set."""
+        want = str(name or "").strip().lower()
+        with self._lock:
+            reports = dict(self.reports)
+        hit = next(((k, r) for k, r in reports.items() if want and want in (
+            k.lower(), _text((r["data"] or {}).get("host") or k, 60).lower(),
+            self.display(_text((r["data"] or {}).get("host") or k, 60)).lower())), None)
+        if hit is None:
+            raise ValueError(f"No reporting machine is called {name!r}.")
+        key, rep = hit
+        d = rep["data"] or {}
+        shown = self.display(_text(d.get("host") or key, 60))
+        if _age(rep["at"]) > REPORT_STALE and not (d.get("after_restart") or {}).get("guard"):
+            raise ValueError(f"{shown} is not reporting, so it cannot be told to restart from here.")
+        if not d.get("boot"):
+            raise ValueError(f"{shown} runs an older reporter that cannot restart it. Update Fletchery on that machine first.")
+        lease = d.get("lease") if isinstance(d.get("lease"), dict) else None
+        doing = _scrub(lease.get("purpose"), 120) if lease and lease.get("alive") is not False else ""
+        if doing and not force:
+            raise ValueError(f"{shown} is running \"{doing}\". A restart ends it. Send force to restart anyway.")
+        rec = self.restarts.request(key, by, reason)
+        self.log(f"live: restart of {shown} requested by {by or 'someone'}" + (f" (ends \"{doing}\")" if doing else ""))
+        return {"ok": True, "id": rec["id"], "machine": shown,
+                "message": f"{shown} restarts in under a minute." + ("" if (d.get("after_restart") or {}).get("signs_in") is not False
+                            else " It does not sign in by itself, so someone must sign in before Fletchery and Claude are back.")}
 
     def agent(self, machine: str, data: dict) -> dict:
         """An agent's heartbeat from a registered machine (machines.py /v1/agent). Raises ValueError (400) or
@@ -2019,6 +2050,12 @@ class DevWatch:
                     block("disk", f"{self.display(host)}: {drive} will be full in about {_ago_text(full_in)}",
                           f"{x['free_gb']:.0f} GB free and falling. Clear old build output or worktrees before it runs out.",
                           key=f"diskfc:{host}:{drive}")
+            restart = self.restarts.view(name)
+            if restart and restart["overdue"]:
+                block("machine", f"{self.display(host)} was told to restart {_ago_text(restart['age'])} ago and is not back",
+                      "It may be stuck shutting down or waiting at the sign-in screen. It needs someone at the machine.",
+                      since=restart["requested"], key=f"restart:{host}:{restart['id']}")
+            ready = d.get("after_restart") if isinstance(d.get("after_restart"), dict) else {}
             silent = age > REPORT_STALE
             if silent:   # stays listed (and flagged) until it reports again or a week has passed
                 block("machine", f"{self.display(host)} stopped reporting",
@@ -2034,7 +2071,10 @@ class DevWatch:
                                           if isinstance(x, dict) and isinstance(x.get("free_gb"), (int, float))],
                                 "disk_guard": guard,
                                 "procs": {k: int(v) for k, v in procs.items() if isinstance(v, (int, float)) and v}, "activities": acts,
-                                "runners": [], "version": _text(d.get("version"), 20)}
+                                "runners": [], "version": _text(d.get("version"), 20),
+                                "key": _text(name, 63), "boot": _text(d.get("boot"), 30), "can_restart": bool(d.get("boot")),
+                                "after_restart": {k: ready.get(k) for k in ("signs_in", "guard") if isinstance(ready.get(k), bool)},
+                                "restart": restart}
         for r in runners:
             key = r["machine"].lower()
             # A runner belongs to the reporting machine whose name it starts with (<COMPUTERNAME>-<label>), even when

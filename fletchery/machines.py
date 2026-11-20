@@ -28,6 +28,7 @@ The worker API (all POST, JSON, `Authorization: Bearer <key>` and `X-Fletchery-M
                    sha256]]}], missing}: the PC folders nodes mirror before imports (workers.machines.assetRoots)
     /v1/assets/read {root, path, offset}                            -> {data (base64), size}: one chunk of one file
     /v1/report     {lease, queue, activities, procs, stats, ...}    -> {ok, every}: what the machine does (reporter.py)
+    /v1/restart    {boot, ack}                                      -> {restart}: restart this machine? (restart.py guard)
     /v1/agent      {agent, session, work, branch, step, state}      -> {ok, state}: a coding agent on the machine says
                    what it is doing (agent_status.py; docs/AGENT-PRESENCE.md). 400 on a bad field, 429 past the limits
 
@@ -855,6 +856,10 @@ class WorkerApi:
                 if self.reports is None:
                     return 503, {"error": "the Live tab is off (workers.portal)"}
                 return 200, self.reports.report(machine, data, ip)
+            if path == "/v1/restart":  # the restart guard asks whether to restart this machine (restart.py)
+                if self.reports is None:
+                    return 503, {"error": "the Live tab is off (workers.portal)"}
+                return 200, {"restart": self.reports.restarts.poll(machine, data.get("boot"), str(data.get("ack") or ""), "guard")}
             if path == "/v1/agent":    # a coding agent on this machine says what it is doing (agent_status.py)
                 if self.reports is None:
                     return 503, {"error": "the Live tab is off (workers.portal)"}

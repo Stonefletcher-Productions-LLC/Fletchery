@@ -204,6 +204,15 @@ const server = http.createServer((req, res) => {
     await page.waitForSelector('#toast:not([hidden])');
     assert.deepEqual(lastPost(), ['/api/actions/cancel', {repo: 'Acme/Game', id: 7}]);
     assert.match(await page.textContent('#toast'), /Sent to GitHub/);
+    // Restart a machine from its card: the question says what it ends and that this one does not sign in by itself.
+    let asked = '';
+    const hear = d => { asked = d.message(); };
+    page.on('dialog', hear);
+    await page.click('#liveMachines button:has-text("Restart")');
+    for (let i = 0; i < 80 && lastPost()[0] !== '/api/machines/restart'; i++) await page.waitForTimeout(50);
+    page.off('dialog', hear);
+    assert.deepEqual(lastPost(), ['/api/machines/restart', {name: 'NODE-01', force: true}]);
+    assert.match(asked, /Restart SF-NODE-01 now\?[\s\S]*This ends what it is doing: [\s\S]*does not sign in by itself[\s\S]*restart guard is not installed/);
     // A check that gave no verdict (cancelled, or "No result") is re-run from its PR, one job.
     await page.click('#livePrs button:has-text("Re-run Cheap checks")');
     await page.waitForFunction(() => document.querySelector('#toast') && !document.querySelector('#toast').hidden);

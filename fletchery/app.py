@@ -407,6 +407,12 @@ class App:
             self.log(f"machines: job {int(d.get('id') or 0)} queued again as job {job} (from {src(d)})")
             return {"id": job}
 
+        def machine_restart(d):
+            live = self.portal.live if self.portal else None
+            if live is None or not hasattr(live, "restart_machine"):
+                raise ValueError("The Live feed is off, so machines cannot be restarted from here.")
+            return live.restart_machine(str(d.get("name") or ""), src(d), str(d.get("reason") or ""), d.get("force") is True)
+
         def hold(d):
             on = need_machines().set_held(bool(d.get("on")))
             self.log(f"machines: all paused, running jobs finish (from {src(d)})" if on else f"machines: resumed (from {src(d)})")
@@ -519,6 +525,7 @@ class App:
                 "/api/builds/retry": build(self.builds.retry, "build again"),
                 "/api/jobs/cancel": job_cancel, "/api/jobs/retry": job_retry,
                 "/api/machines/pause": machine_pause, "/api/machines/hold": hold,
+                "/api/machines/restart": machine_restart,
                 "/api/actions/cancel": lambda d: run_action(d, "cancel"),
                 "/api/actions/rerun": lambda d: run_action(d, "rerun-failed" if d.get("failed") else "rerun"),
                 "/api/actions/rerun-job": lambda d: run_action(d, "rerun-job"),
