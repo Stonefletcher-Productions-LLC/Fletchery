@@ -420,7 +420,8 @@ class App:
             live = self.portal.live if self.portal else None
             if live is None or not hasattr(live, "restart_machine"):
                 raise ValueError("The Live feed is off, so machines cannot be restarted from here.")
-            return live.restart_machine(str(d.get("name") or ""), src(d), str(d.get("reason") or ""), d.get("force") is True)
+            return live.restart_machine(str(d.get("name") or ""), src(d), str(d.get("reason") or ""), d.get("force") is True,
+                                        when_idle=d.get("when_idle") is True, cancel=d.get("cancel") is True)
 
         def hold(d):
             on = need_machines().set_held(bool(d.get("on")))

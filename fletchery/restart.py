@@ -39,6 +39,7 @@ WINDOWS = os.name == "nt"
 PENDING = 600        # seconds a request waits for the machine to collect it
 OVERDUE = 900        # seconds after which a machine that was told to restart and is not back is flagged
 HARD_AFTER = 600     # seconds the guard gives the polite restart before the hard one
+WAIT_MAX = 12 * 3600      # a restart that waits for an idle machine is given up after this long
 DELAY = 20           # seconds Windows shows its "restarting" notice before it goes down
 SLACK = 5            # seconds of clock noise allowed when comparing a boot time with a request time
 GUARD_TASK = "Fletchery restart guard"
@@ -83,10 +84,12 @@ class Restarts:
         except OSError:
             pass   # the record still lives in memory; the restart itself does not depend on the file
 
-    def request(self, machine: str, by: str = "", reason: str = "") -> dict:
+    def request(self, machine: str, by: str = "", reason: str = "", wait: bool = False) -> dict:
+        """`wait`: hold the request until the machine reports that it is idle (poll with idle=True), so the build it
+        is running finishes first. A waiting request is given up after WAIT_MAX."""
         at = self.clock()
         rec = {"id": f"{int(at)}-{os.urandom(3).hex()}", "requested": at, "by": str(by)[:80], "reason": str(reason)[:200],
-               "state": "requested", "sent": 0.0, "back": 0.0, "via": ""}
+               "state": "waiting" if wait else "requested", "sent": 0.0, "back": 0.0, "via": "", "asked": at}
         with self._lock:
             self.records[str(machine)] = rec
             self._save()
@@ -96,23 +99,37 @@ class Restarts:
         """Only a request the machine has not collected yet can be withdrawn."""
         with self._lock:
             rec = self.records.get(str(machine))
-            if not rec or rec["state"] != "requested":
+            if not rec or rec["state"] not in ("requested", "waiting"):
                 return False
             rec["state"] = "cancelled"
             self._save()
             return True
 
-    def poll(self, machine: str, boot, ack: str = "", via: str = "reporter") -> dict | None:
+    def poll(self, machine: str, boot, ack: str = "", via: str = "reporter", idle: bool | None = None) -> dict | None:
         """One check-in from the machine: `boot` is when it started (ISO), `ack` the request it has just acted on.
-        Returns the request to act on, or None. A check-in with no boot time (an old reporter) never gets one."""
+        Returns the request to act on, or None. A check-in with no boot time (an old reporter) never gets one.
+        `idle` is True only when the caller knows the machine is running nothing: that releases a waiting request."""
         boot_ts = _ts(boot)
         at = self.clock()
         with self._lock:
             rec = self.records.get(str(machine))
-            if not rec or rec["state"] not in ("requested", "sent"):
+            if not rec or rec["state"] not in ("requested", "sent", "waiting"):
                 return None
             changed = False
             out = None
+            if rec["state"] == "waiting":
+                if boot_ts and boot_ts > rec["requested"] - SLACK:
+                    rec.update(state="back", back=at)     # it restarted some other way while it waited
+                elif at - rec["requested"] > WAIT_MAX:
+                    rec["state"] = "expired"
+                elif idle is True and boot_ts:
+                    rec.update(state="requested", requested=at)   # the clock for "pending" and "overdue" starts now
+                else:
+                    return None
+                changed = True
+                if rec["state"] != "requested":
+                    self._save()
+                    return None
             if boot_ts and boot_ts > rec["requested"] - SLACK:
                 rec.update(state="back", back=at)     # it started after the request: the restart happened
                 changed = True
@@ -137,6 +154,7 @@ class Restarts:
                 return None
             at = self.clock()
             out = {"id": rec["id"], "state": rec["state"], "by": rec["by"], "reason": rec["reason"],
+                   "asked": _iso(rec.get("asked") or rec["requested"]),
                    "requested": _iso(rec["requested"]), "sent": _iso(rec["sent"]), "back": _iso(rec["back"]),
                    "age": round(at - rec["requested"]), "via": rec.get("via") or ""}
             if rec["state"] == "back":

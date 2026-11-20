@@ -493,15 +493,22 @@
   }
   function restartRow(m) {
     const r = m.restart, kids = [];
-    if (r && (r.state === 'requested' || r.state === 'sent'))
+    if (r && r.state === 'waiting') {
+      kids.push(el('span', {class: 'chip wait', text: 'Restarts when idle'}),
+        el('span', {class: 'sub'}, ' asked ', ago(r.asked || r.requested), r.by ? ' from ' + r.by : ''));
+      if (desk() && m.key) kids.push(control('Cancel restart', '/api/machines/restart', {name: m.key, cancel: true}, '', 'The restart of ' + m.name + ' was withdrawn.'));
+    } else if (r && (r.state === 'requested' || r.state === 'sent'))
       kids.push(el('span', {class: 'chip ' + (r.overdue ? 'needs' : 'wait'), text: r.overdue ? 'Restart: not back yet' : r.state === 'sent' ? 'Restarting' : 'Restart requested'}),
         el('span', {class: 'sub'}, ' asked ', ago(r.requested), r.by ? ' from ' + r.by : ''));
     else if (r && r.state === 'back' && Date.now() - Date.parse(r.back) < 6 * 3600 * 1000)
       kids.push(el('span', {class: 'sub'}, 'Restarted ', ago(r.back), ', back after ' + Math.max(1, Math.round((r.took || 0) / 60)) + ' min'));
     else if (r && r.state === 'expired' && r.age < 6 * 3600)
       kids.push(el('span', {class: 'chip needs', text: 'Restart was not picked up'}));
-    if (desk() && m.key && m.can_restart && !(r && (r.state === 'requested' || r.state === 'sent') && !r.overdue))
-      kids.push(control('Restart', '/api/machines/restart', {name: m.key, force: true}, restartAsk(m), m.name + ' was told to restart.'));
+    if (desk() && m.key && m.can_restart && !(r && (r.state === 'waiting' || (r.state === 'requested' || r.state === 'sent') && !r.overdue))) {
+      if (m.busy) kids.push(control('Restart when idle', '/api/machines/restart', {name: m.key, when_idle: true},
+        'Restart ' + m.name + ' as soon as it has finished what it is running?\n\nNothing is stopped. It may pick up one more queued job first.', m.name + ' restarts when it is idle.'));
+      kids.push(control(m.busy ? 'Restart now' : 'Restart', '/api/machines/restart', {name: m.key, force: true}, restartAsk(m), m.name + ' was told to restart.'));
+    }
     else if (desk() && m.key && !m.can_restart && m.online)
       kids.push(el('span', {class: 'sub', text: 'Restart from here needs the newer reporter on this machine.'}));
     return kids.length ? el('div', {class: 'ctl m-restart'}, ...kids) : null;

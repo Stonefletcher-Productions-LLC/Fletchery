@@ -30,6 +30,30 @@ class RestartsTest(unittest.TestCase):
         self.r = restart.Restarts(clock=self.clock)
         self.boot = iso(self.clock.at - 86400)
 
+    def test_a_waiting_request_is_held_until_the_machine_is_idle(self):
+        rec = self.r.request("NODE", "claude", wait=True)
+        self.assertEqual(self.r.view("NODE")["state"], "waiting")
+        self.assertIsNone(self.r.poll("NODE", self.boot, idle=False))            # still building
+        self.assertIsNone(self.r.poll("NODE", self.boot, via="guard"))           # the guard never releases it
+        self.clock.at += 3 * 3600
+        self.assertFalse(self.r.view("NODE")["overdue"])                         # waiting is not "not back"
+        cmd = self.r.poll("NODE", self.boot, idle=True)                          # the build ended
+        self.assertEqual(cmd["id"], rec["id"])
+        view = self.r.view("NODE")
+        self.assertEqual((view["state"], view["age"]), ("requested", 0))         # pending and overdue count from now
+        self.clock.at += 90
+        self.assertIsNone(self.r.poll("NODE", iso(self.clock.at - 20), idle=True))
+        self.assertEqual(self.r.view("NODE")["state"], "back")
+
+    def test_a_waiting_request_can_be_withdrawn_and_is_given_up_after_half_a_day(self):
+        self.r.request("NODE", wait=True)
+        self.assertTrue(self.r.cancel("NODE"))
+        self.assertIsNone(self.r.poll("NODE", self.boot, idle=True))
+        self.r.request("NODE", wait=True)
+        self.clock.at += restart.WAIT_MAX + 1
+        self.assertIsNone(self.r.poll("NODE", self.boot, idle=True))
+        self.assertEqual(self.r.view("NODE")["state"], "expired")
+
     def test_request_reaches_the_machine_and_is_marked_back_after_the_boot(self):
         rec = self.r.request("NODE", "the window")
         cmd = self.r.poll("NODE", self.boot)
@@ -180,6 +204,23 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(m["after_restart"], {"signs_in": False, "guard": True})
         self.report(w, boot=iso(datetime.now(timezone.utc).timestamp() + 60))
         self.assertEqual(w.restarts.view("GAMING-PC")["state"], "back")
+
+    def test_restart_when_idle_waits_for_the_build_and_can_be_withdrawn(self):
+        w = self.watch()
+        lease = {"purpose": "PR check #12 (GitHub run 5)", "since": iso(datetime.now(timezone.utc).timestamp() - 60), "alive": True}
+        self.report(w, lease=lease, busy=True)
+        out = w.restart_machine("GAMING-PC", "claude", when_idle=True)
+        self.assertTrue(out["waiting"])
+        self.assertNotIn("restart", self.report(w, lease=lease, busy=True))      # the build is still running
+        self.assertNotIn("restart", self.report(w, busy=True))                   # a runner job with no lease counts too
+        self.assertEqual(self.report(w)["restart"]["id"], out["id"])             # idle: now it is told
+        w.restart_machine("GAMING-PC", "claude", force=True)
+        self.report(w, lease=lease, busy=True)
+        w.restart_machine("GAMING-PC", "claude", when_idle=True)
+        self.assertTrue(w.restart_machine("GAMING-PC", "claude", cancel=True)["ok"])
+        self.assertNotIn("restart", self.report(w))
+        with self.assertRaisesRegex(ValueError, "no restart request"):
+            w.restart_machine("GAMING-PC", "claude", cancel=True)
 
     def test_busy_machine_needs_force_and_unknown_or_old_machines_are_refused(self):
         w = self.watch()

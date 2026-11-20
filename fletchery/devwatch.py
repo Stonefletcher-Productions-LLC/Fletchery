@@ -628,12 +628,17 @@ class DevWatch:
                     self.log(f"live: disk history: {type(e).__name__}: {e}")
         if data.get("busy") and not was.get("busy"):
             self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
-        cmd = self.restarts.poll(str(machine), data.get("boot"), _text(data.get("restart_ack"), 60))
+        lease = data.get("lease") if isinstance(data.get("lease"), dict) else None
+        idle = not data.get("busy") and not (lease and lease.get("alive") is not False)
+        cmd = self.restarts.poll(str(machine), data.get("boot"), _text(data.get("restart_ack"), 60), idle=idle)
         return {"ok": True, "every": 10, **({"restart": cmd} if cmd else {})}
 
-    def restart_machine(self, name: str, by: str = "", reason: str = "", force: bool = False) -> dict:
+    def restart_machine(self, name: str, by: str = "", reason: str = "", force: bool = False, when_idle: bool = False,
+                        cancel: bool = False) -> dict:
         """Tell one machine to restart (restart.py). `name` is its registered name, host name or display name.
-        Refused with ValueError when the machine cannot take the request, or is working and `force` is not set."""
+        Refused with ValueError when the machine cannot take the request, or is working and neither `force` nor
+        `when_idle` is set. `when_idle` waits for the machine to finish what it runs and restarts it then.
+        `cancel` withdraws a request the machine has not collected yet."""
         want = str(name or "").strip().lower()
         with self._lock:
             reports = dict(self.reports)
@@ -651,8 +656,19 @@ class DevWatch:
             raise ValueError(f"{shown} runs an older reporter that cannot restart it. Update Fletchery on that machine first.")
         lease = d.get("lease") if isinstance(d.get("lease"), dict) else None
         doing = _scrub(lease.get("purpose"), 120) if lease and lease.get("alive") is not False else ""
+        if cancel:
+            if not self.restarts.cancel(key):
+                raise ValueError(f"{shown} has no restart request that can still be withdrawn.")
+            self.log(f"live: restart of {shown} withdrawn by {by or 'someone'}")
+            return {"ok": True, "machine": shown, "message": f"The restart of {shown} was withdrawn."}
+        busy = bool(doing or d.get("busy"))
+        if busy and when_idle and not force:
+            rec = self.restarts.request(key, by, reason, wait=True)
+            self.log(f"live: restart of {shown} when idle requested by {by or 'someone'}")
+            return {"ok": True, "id": rec["id"], "machine": shown, "waiting": True,
+                    "message": f"{shown} restarts as soon as it has finished what it is running."}
         if doing and not force:
-            raise ValueError(f"{shown} is running \"{doing}\". A restart ends it. Send force to restart anyway.")
+            raise ValueError(f"{shown} is running \"{doing}\". A restart ends it. Send when_idle to restart after it, or force to restart now.")
         rec = self.restarts.request(key, by, reason)
         self.log(f"live: restart of {shown} requested by {by or 'someone'}" + (f" (ends \"{doing}\")" if doing else ""))
         return {"ok": True, "id": rec["id"], "machine": shown,
