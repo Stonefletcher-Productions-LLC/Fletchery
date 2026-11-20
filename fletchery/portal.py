@@ -165,7 +165,30 @@ def summary(status: dict) -> dict:
             "scratch": {k: (_text(_scrub(v), 200) if isinstance(v, str) else v) for k, v in (s.get("scratch") or {}).items()
                         if k in ("checked_at", "mode", "error", "waiting", "freed_gb", "trimmed", "quarantined", "removed")},
             "log": [{"at": _text(r.get("at"), 40), "line": _text(_scrub(r.get("line")), 300)}
-                    for r in (s.get("log") or [])[-120:] if isinstance(r, dict)]}
+                    for r in (s.get("log") or [])[-120:] if isinstance(r, dict)],
+            "merge": _merge(s.get("merge"))}
+
+
+def _merge(m) -> dict | None:
+    """The merge helper (mergehelp.py), field by field: whether a key is set, never the key."""
+    if not isinstance(m, dict):
+        return None
+    sp = m.get("spend") or {}
+    num = lambda v: round(float(v or 0), 4) if isinstance(v, (int, float)) else 0.0
+    return {"enabled": bool(m.get("enabled")), "backend": _text(m.get("backend"), 20), "chosen": _text(m.get("chosen"), 20),
+            "model": _text(m.get("model"), 60), "models": [_text(x, 60) for x in (m.get("models") or [])[:8]],
+            "fix_checks": bool(m.get("fix_checks")), "base": _text(m.get("base"), 80), "key_set": bool(m.get("key_set")),
+            "busy": _text(m.get("busy"), 200), "waiting": _text(_scrub(m.get("waiting")), 200),
+            "note": _text(_scrub(m.get("note")), 200), "error": _text(_scrub(m.get("error")), 300),
+            "last_pass": _text(m.get("last_pass"), 40),
+            "spend": {k: (num(v) if k != "budget_until" else _text(v, 20)) for k, v in sp.items()
+                      if k in ("api_total_usd", "api_today_usd", "budget_usd", "budget_left_usd", "budget_until", "days_left",
+                               "per_day_to_use_it", "daily_cap_usd", "per_run_cap_usd", "subscription_runs",
+                               "subscription_equiv_usd", "runs_today")},
+            "runs": [{"at": _text(r.get("at"), 40), "pr": int(r.get("pr") or 0), "kind": _text(r.get("kind"), 20),
+                      "result": _text(r.get("result"), 20), "backend": _text(r.get("backend"), 20),
+                      "model": _text(r.get("model"), 60), "cost_usd": num(r.get("cost_usd")),
+                      "detail": _text(_scrub(r.get("detail")), 200)} for r in (m.get("runs") or [])[:12] if isinstance(r, dict)]}
 
 
 PATHS = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>|]*")

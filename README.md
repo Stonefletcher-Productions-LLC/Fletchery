@@ -110,6 +110,27 @@ The window and the phone have the same controls. Anything that stops work asks f
 
 `workers.portal.controls: false` in the profile makes the phone read-only; the window always has the controls.
 
+## Claude merge helper
+
+The **Claude merge helper** card (Live tab) keeps pull requests landable. Every 10 minutes it looks at the open PRs into
+the base branch. A PR that conflicts with the base gets the base merged in, and Claude resolves the conflicted files.
+With "Also fix failed quick checks" on, a PR whose quick check (`Cheap checks`) failed on its newest commit gets the
+smallest fix. Fletchery checks the result, commits it and pushes the PR's branch with a normal push (never forced), and
+comments on the PR once. It never merges, approves, re-runs or skips a check: the required checks and auto-merge decide.
+One PR at a time, one try per commit, Claude running at below-normal priority with file tools and read-only git.
+
+**Who pays** (switch any time on the card):
+- **API key (credit)**: the Anthropic API. Paste the key once into the card's *API key* box in the Fletchery window on
+  the PC (never on the phone). It is saved in Windows Credential Manager as `Fletchery:anthropic-api-key` and given only
+  to the `claude` process of each run. Or from a console: `cmdkey /generic:Fletchery:anthropic-api-key /user:anthropic
+  /pass:<key>`. Limits: `perRunUsd` per run, `dailyUsd` a day, `budgetUsd` in all; after `budgetUntil` it moves to the
+  subscription by itself.
+- **Claude subscription**: the Claude Code sign-in on this PC. Any `ANTHROPIC_*` key is removed from the run.
+
+The card shows what the API credit has spent, today and in all, what is left, and every run with its cost. **Test the
+backend** makes a one-line call to prove the key or sign-in works. Settings: `workers.mergeHelper` (see
+`fletchery/mergehelp.py`); add the `no-claude` label to a PR to keep the helper off it.
+
 ## Read API
 
 `/api/v2/state` (the whole Live snapshot, `"schema": 2`, fields only ever added), `/api/v2/history` (merges, runs,

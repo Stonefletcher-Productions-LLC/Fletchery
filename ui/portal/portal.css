@@ -393,3 +393,4 @@ body.arranging .col:empty { min-height: 120px; margin-bottom: 10px; border: 2px 
 .layout-cols { display: inline-flex; gap: 4px; margin-left: 4px; }
 .layout-cols button[aria-pressed="true"] { background: var(--accent); color: var(--paper); border-color: var(--accent); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+body:not(.desktop) .desk-only { display: none; }

@@ -38,6 +38,7 @@ WORKER_KEYS = {
     "scratchRoots": "scratch_roots", "scratchMode": "scratch_mode", "scratchKeep": "scratch_keep",
     "scratchTrimHours": "scratch_trim_hours", "scratchRemoveDays": "scratch_remove_days",
     "scratchDisposable": "scratch_disposable", "scratchBackupDir": "scratch_backup_dir",
+    "mergeHelper": "merge_helper",
 }
 # profile key (top level) -> Config field
 PROFILE_KEYS = {"name": "name", "repo": "repo"}
@@ -54,6 +55,7 @@ class Config:
     builds: dict = None                      # builds.py: {"outDir", "nodeLabels", "timeoutMinutes", "publish"}
     machines: dict = None                    # machines.py: {"listen": "<Tailscale IP>:8771", "assetRoots": [...]}
     portal: dict = None                      # portal.py: {"port": 8772, "users": [...], "push": {...}, "live": {...}}
+    merge_helper: dict = None                # mergehelp.py: Claude keeps PRs landable (conflicts, quick-check fixes)
     # Scratch retention (scratch.py; 2026-11-16: sessions' own worktrees filled both machines). Folders directly under
     # `scratch_roots`: build output is trimmed once idle `scratch_trim_hours`; in "remove" mode a clean, pushed,
     # unlocked worktree idle `scratch_remove_days` is listed, a day later quarantined, and a week after that removed

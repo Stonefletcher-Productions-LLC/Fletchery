@@ -259,7 +259,56 @@
         el('p', {class: 'sub', text: sc.error || sc.waiting || ('Last ran ' + ago(sc.checked_at) + (sc.freed_gb ? ', freed ' + sc.freed_gb + ' GB' : ''))})) : null,
       ...d.errors.map(t => el('li', null, el('div', {class: 'title', text: 'Problem'}), el('p', {class: 'sub', text: t})))].filter(Boolean), '');
     fill($('log'), d.log.slice().reverse().map(r => el('li', null, el('time', {text: when(r.at)}), r.line)), 'Nothing yet.');
+    drawMerge(d.merge);
   }
+
+  // The Claude merge helper (fletchery/mergehelp.py): which backend pays, what it spent, what it did.
+  const usd = v => '$' + Number(v || 0).toFixed(2);
+  function drawMerge(m) {
+    $('mergeCard').hidden = !m;
+    if (!m) return;
+    const sp = m.spend || {};
+    const api = m.backend === 'api';
+    const state = !m.enabled ? ['Off', ''] : m.busy ? ['Working', 'run'] : m.waiting ? ['Waiting', 'wait'] : m.error ? ['Problem', 'bad'] : ['Watching', 'run'];
+    $('n-merge').textContent = m.enabled ? '(' + (api ? 'API' : 'subscription') + ')' : '(off)';
+    const rows = [
+      el('li', null, el('div', {class: 'title', text: m.busy || (api ? 'Paid from the API credit' : 'Uses the Claude subscription on this PC')}),
+        el('span', {class: 'chip ' + state[1], text: state[0]}),
+        el('p', {class: 'sub', text: [m.model, 'into ' + m.base, m.fix_checks ? 'conflicts and quick-check fixes' : 'conflicts only',
+          m.last_pass ? 'last check ' + ago(m.last_pass) : ''].filter(Boolean).join(' · ')}),
+        (m.waiting || m.error || m.note) ? el('p', {class: 'sub', text: m.error || m.waiting || m.note}) : null),
+      el('li', null, el('div', {class: 'title', text: 'API credit: ' + usd(sp.api_total_usd) + ' spent of ' + usd(sp.budget_usd) + ', ' + usd(sp.budget_left_usd) + ' left'}),
+        el('span', {class: 'chip' + (m.key_set ? ' run' : ' needs'), text: m.key_set ? 'Key saved' : 'No key'}),
+        el('p', {class: 'sub', text: 'Today ' + usd(sp.api_today_usd) + ' of ' + usd(sp.daily_cap_usd) + ' a day, at most ' + usd(sp.per_run_cap_usd) + ' a run' +
+          (sp.budget_until ? ' · credit ends ' + sp.budget_until + (sp.days_left ? ' (' + sp.days_left + ' days; ' + usd(sp.per_day_to_use_it) + ' a day uses it all)' : '') : '') +
+          (sp.subscription_runs ? ' · subscription: ' + sp.subscription_runs + ' runs (about ' + usd(sp.subscription_equiv_usd) + ' at API prices)' : '')}))];
+    fill($('mergeStatus'), rows, '');
+    fill($('mergeRuns'), (m.runs || []).map(r => el('li', null,
+      el('div', {class: 'title', text: (r.pr ? '#' + r.pr + ' ' : '') + (r.kind === 'conflict' ? 'conflicts' : r.kind === 'fix' ? 'quick-check fix' : r.kind)}),
+      el('span', {class: 'chip ' + (r.result === 'pushed' || r.result === 'ok' ? 'run' : r.result === 'no change' ? '' : 'bad'), text: r.result || '?'}),
+      el('p', {class: 'sub', text: [when(r.at), r.backend, r.model, usd(r.cost_usd)].filter(Boolean).join(' · ')}),
+      r.detail ? el('p', {class: 'sub', text: r.detail}) : null)), 'No runs yet.');
+    if (document.activeElement && $('mergeForm').contains(document.activeElement)) return;   // don't fight the user's edit
+    $('mOn').checked = m.enabled;
+    $('mBackend').value = m.chosen || m.backend;
+    $('mFix').checked = m.fix_checks;
+    const models = m.models && m.models.length ? m.models : [m.model];
+    if ($('mModel').options.length !== models.length) $('mModel').replaceChildren(...models.map(x => el('option', {value: x, text: x})));
+    $('mModel').value = m.model;
+    $('mKeySum').textContent = m.key_set ? 'API key (saved)' : 'API key (not set yet)';
+  }
+  function mergeSave() {
+    act('/api/merge/settings', {enabled: $('mOn').checked, backend: $('mBackend').value, model: $('mModel').value, fixChecks: $('mFix').checked}, 'Saved.');
+  }
+  for (const id of ['mOn', 'mBackend', 'mModel', 'mFix']) $(id).addEventListener('change', mergeSave);
+  $('mNow').addEventListener('click', () => act('/api/merge/now', {}, 'Checking the open PRs now.'));
+  $('mTest').addEventListener('click', async () => { $('mTest').disabled = true; $('mMsg').textContent = 'Asking Claude…'; await act('/api/merge/test', {}, 'The backend answered.'); $('mMsg').textContent = ''; $('mTest').disabled = false; });
+  $('mKeySave').addEventListener('click', async () => {
+    const key = $('mKey').value.trim();
+    if (!key) return toast('Paste the key first.', true);
+    if (await act('/api/merge/key', {key}, 'API key saved in Credential Manager.')) $('mKey').value = '';
+  });
+  $('mKeyDel').addEventListener('click', () => act('/api/merge/key', {key: ''}, 'API key removed.', 'Remove the saved API key?'));
 
   function freshness() {
     const dot = $('dot'), text = $('freshText');

@@ -186,6 +186,8 @@ class App:
         self._stop = threading.Event()
         from builds import Builds
         self.builds = Builds(self)
+        from mergehelp import MergeHelper
+        self.merge = MergeHelper(cfg, self.gh, self.log)
 
     # ---- activity ----
     def _load_activity(self) -> None:
@@ -271,6 +273,10 @@ class App:
                 self.errors.pop("builds", None)
             except Exception as e:
                 self.errors["builds"] = f"Builds: {type(e).__name__}: {e}"[:300]
+            try:
+                self.merge.tick()
+            except Exception as e:
+                self.merge.error = f"{type(e).__name__}: {e}"[:300]
             if self.cfg.scratch_roots and self.cfg.scratch_mode != "off" and time.monotonic() - last_scratch > SCRATCH_EVERY:
                 last_scratch = time.monotonic()
                 threading.Thread(target=self._scratch, name="fletchery-scratch", daemon=True).start()
@@ -371,7 +377,8 @@ class App:
         return {"project": self.cfg.name, "repo": self.cfg.repo, "github_login": self.accounts.login, "pid": os.getpid(), "started": self.started,
                 "version": self.version,
                 "at": now_iso(), "errors": dict(self.errors), "builds": builds, "machines": machines,
-                "scratch": self.scratch_last, "log": list(self.lines)[-120:], "restarting": self.restart_reason}
+                "scratch": self.scratch_last, "log": list(self.lines)[-120:], "restarting": self.restart_reason,
+                "merge": self.merge.view()}
 
     # ---- the controls (portal.py decides who may use them: the window always, the phone unless controls are off) ----
     def actions(self) -> dict:
@@ -471,6 +478,42 @@ class App:
         def add(d):
             return self.builds.add({k: v for k, v in d.items() if k != "_from"})
 
+        def merge_set(d):
+            out = self.merge.set({k: v for k, v in d.items() if k != "_from"})
+            if out["changed"]:
+                self.log(f"merge helper: {', '.join(out['changed'])} (from {src(d)})")
+            self.wake()
+            return out
+
+        def merge_key(d):
+            """The API key goes into Windows Credential Manager, from the window on this PC only. It is never logged,
+            stored in a file or sent back."""
+            if src(d) != "the window":
+                raise ValueError("Set the API key in the Fletchery window on the PC.")
+            import credstore
+            import mergehelp
+            key = str(d.get("key") or "").strip()
+            if not key:
+                credstore.delete(mergehelp.KEY_TARGET)
+                self.log(f"merge helper: API key removed (from {src(d)})")
+                return {"key_set": False}
+            if not key.startswith("sk-ant-") or len(key) < 40 or any(c.isspace() for c in key):
+                raise ValueError("That does not look like an Anthropic API key (sk-ant-...).")
+            credstore.write(mergehelp.KEY_TARGET, key)
+            self.log(f"merge helper: API key saved in Credential Manager (from {src(d)})")
+            return {"key_set": True}
+
+        def merge_test(d):
+            out = self.merge.test()
+            self.log(f"merge helper: test call on {out['backend']} answered (${out['cost_usd']:.3f}, from {src(d)})")
+            return {**out, "message": f"The {out['backend']} backend answered (${out['cost_usd']:.3f})."}
+
+        def merge_now(d):
+            self.merge.run_now()
+            self.wake()
+            self.log(f"merge helper: check now (from {src(d)})")
+            return {"ok": True}
+
         return {"/api/builds/add": add, "/api/builds/cancel": build(self.builds.cancel, "stop or cancel"),
                 "/api/builds/now": build(self.builds.run_now, "start now"),
                 "/api/builds/retry": build(self.builds.retry, "build again"),
@@ -479,6 +522,8 @@ class App:
                 "/api/actions/cancel": lambda d: run_action(d, "cancel"),
                 "/api/actions/rerun": lambda d: run_action(d, "rerun-failed" if d.get("failed") else "rerun"),
                 "/api/actions/rerun-job": lambda d: run_action(d, "rerun-job"),
+                "/api/merge/settings": merge_set, "/api/merge/key": merge_key, "/api/merge/test": merge_test,
+                "/api/merge/now": merge_now,
                 "/api/github/account": switch_account, "/api/live/refresh": live_refresh, "/api/alerts/snooze": alert_snooze, "/api/restart": restart}
 
     def job_log(self, job_id: int) -> str:
