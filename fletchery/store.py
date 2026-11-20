@@ -158,7 +158,10 @@ class Store:
     def jobs(self, repo: str, run: dict, jobs: list) -> None:
         """Jobs that started (queue wait = started - created) or finished."""
         created_run = ts((run or {}).get("created_at"))
-        self._write("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+        # Named columns: a history file a newer build wrote may have more (2026-11-20: #258's pr_build_created made
+        # every write fail with "table jobs has 12 columns but 11 values were supplied" after main was installed).
+        self._write("INSERT OR REPLACE INTO jobs (repo, id, run, name, workflow, runner, labels, result, created, started, "
+                    "finished) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
             (repo, int(j["id"]), int((run or {}).get("id") or j.get("run_id") or 0), str(j.get("name") or "")[:120],
              str((run or {}).get("name") or j.get("workflow_name") or "")[:120], str(j.get("runner_name") or "")[:80],
              ",".join(str(x) for x in (j.get("labels") or []) if isinstance(x, str))[:300],
