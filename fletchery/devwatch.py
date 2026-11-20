@@ -452,6 +452,14 @@ def _iso_after(iso: str, seconds: float) -> str:
     return now_iso_at(t + seconds) if t else "~"
 
 
+def _is_pr_build(run: dict) -> bool:
+    """A pull request's PR check run. Actions can put the PR title in name; the workflow path survives re-runs and
+    custom run-name expressions."""
+    path = str(run.get("path") or "").split("@")[0]
+    return run.get("event") == "pull_request" and (
+        path == ".github/workflows/pr-check.yml" or not path and run.get("name") == "PR check")
+
+
 def _workload(title: str) -> str:
     """Recognize a dispatch's named task across checkout revisions (e.g. 'Node checks <sha> CityPictures')."""
     suffix = re.split(r"\b[0-9a-fA-F]{7,40}\b\s*", title)[-1]
@@ -517,6 +525,7 @@ class DevWatch:
         self.runner_note = ""
         self.runs: dict[str, list] = {}             # repo -> recent runs
         self.jobs: dict[int, list] = {}             # run id -> jobs
+        self.pr_build_queues = {}                   # repository -> queued PR compile jobs from a complete live read
         self.partial_jobs = {}                      # repo -> run attempts whose job pages still need a complete read
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
@@ -691,6 +700,7 @@ class DevWatch:
             if not errors or len(errors) < len(got):
                 self.last_ok = now_iso()
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
+            self.pr_build_queues = {repo: g.get("pr_build_queue") for repo, g in got.items()}
             self.partial_jobs = {repo: g["partial_jobs"] for repo, g in got.items()}
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
@@ -908,6 +918,7 @@ class DevWatch:
     def _read_actions(self, repo, out):
         previous = {r["id"]: r for r in out["runs"]}
         recent = self._try(f"repos/{repo}/actions/runs?per_page=20")
+        out["pr_build_queue"] = None  # set below only from a complete read of every active PR build
         if recent is None:
             if previous:
                 out["error"] = f"{repo}: GitHub did not return the recent Actions runs"
@@ -944,7 +955,10 @@ class DevWatch:
             if rid not in observed:
                 continue
             key = (rid, attempt)
-            if (run.get("status") in ACTIVE or old.get("status") in ACTIVE or key in out["partial_jobs"]
+            # A PR build seen finished for the first time (or on a new attempt) is read once, so its wait is recorded.
+            newly_finished = _is_pr_build(run) and run.get("conclusion") in ("success", "failure") and (
+                before is None or old.get("status") != "completed")
+            if (newly_finished or run.get("status") in ACTIVE or old.get("status") in ACTIVE or key in out["partial_jobs"]
                     or any(j.get("status") in ACTIVE for j in before or [])):
                 path = f"repos/{repo}/actions/runs/{rid}/jobs?per_page=30"
                 batch, finished = self._action_pages(repo, path, "jobs", 30, out)
@@ -963,6 +977,24 @@ class DevWatch:
                         received = {j.get("id") for j in batch}
                         jobs[rid] = batch + [j for j in before or [] if j.get("id") not in received]
         out["jobs"] = jobs
+        # Queued PR compile jobs, only when every active run and every active PR build's jobs were read in full:
+        # a partial read must not report a shorter line than the real one.
+        queued, queue_complete = {}, complete
+        for rid, run in runs.items():
+            if not _is_pr_build(run) or run.get("status") not in ACTIVE:
+                continue
+            attempt = run.get("run_attempt") or 1
+            if rid not in observed or (rid, attempt) in out["partial_jobs"] or rid not in jobs:
+                queue_complete = False
+                continue
+            for job in jobs[rid]:
+                if job.get("name") != storemod.PR_BUILD or job.get("status") != "queued" or job.get("runner_name"):
+                    continue
+                if not isinstance(job.get("id"), int):
+                    queue_complete = False
+                    continue
+                queued[job["id"]] = storemod.ts(job.get("created_at"))
+        out["pr_build_queue"] = {"times": list(queued.values()), "at": time.time()} if queue_complete else None
 
     def _read_repo(self, repo: str, prs: list, out: dict) -> None:
         self._read_actions(repo, out)
@@ -1185,7 +1217,7 @@ class DevWatch:
         feed_age = _age(last_ok, at) if last_ok else _age(self.started, at)
         if error:
             block("feed", "GitHub can't be read right now", error, since=last_ok, key="feed")
-        elif feed_age > max(180, self.interval * 4):
+        elif feed_age > self.feed_stale_after():
             block("feed", "The GitHub feed stopped updating", f"Last good read {int(feed_age // 60)} min ago.", since=last_ok, key="feed")
 
         # jobs per runner (from runs still going)
@@ -1593,6 +1625,10 @@ class DevWatch:
         out += [{"name": full.split("/")[-1], "repos": [full]} for low, full in sorted(watched.items()) if low not in used]
         return out
 
+    def feed_stale_after(self) -> float:
+        # A multi-repository poll can itself take longer than the delay between polls.
+        return max(180, self.interval * 4)
+
     def flow_now(self, prs_out: list, at: float) -> dict:
         """The Flow strip (flow.py), worked out at most every 15 s."""
         when, kept = self._flow_cache
@@ -1604,7 +1640,9 @@ class DevWatch:
                 waiting[p["repo"]] = waiting.get(p["repo"], 0) + 1
         try:
             kept = self.flow.compute([r["full_name"] for r in self.repos], waiting, at,
-                                     projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1})
+                                     projects={p["name"]: p["repos"] for p in self.projects_now() if len(p["repos"]) > 1},
+                                     build_queues={r: q for r, q in self.pr_build_queues.items()
+                                                   if q and at - q["at"] <= self.feed_stale_after()})
         except Exception as e:
             self.log(f"live: flow: {type(e).__name__}: {e}")
             kept = {}

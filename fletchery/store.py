@@ -21,7 +21,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 5
+SCHEMA = 6
+PR_BUILD = "PR check / Compile and test"
 KEEP_DAYS = 90
 
 # GitHub conclusion -> OpenTelemetry cicd.pipeline.result
@@ -100,6 +101,13 @@ class Store:
             cols = {r[1] for r in self.db.execute("PRAGMA table_info(merges)")}
             if "sha" not in cols:      # schema 1 -> 2: the merge commit, to place a merge on its base branch
                 self.db.execute("ALTER TABLE merges ADD COLUMN sha TEXT")
+            if "pr_build_created" not in {r[1] for r in self.db.execute("PRAGMA table_info(jobs)")}:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN pr_build_created REAL")
+            if self.db.execute("SELECT v FROM meta WHERE k='schema'").fetchone() != (str(SCHEMA),):
+                # Older rows substituted the run creation time if the job omitted its own. Recover only unambiguous times.
+                self.db.execute("""UPDATE jobs SET pr_build_created=created WHERE name=?
+                    AND EXISTS (SELECT 1 FROM runs r WHERE r.repo=jobs.repo AND r.id=jobs.run
+                                AND r.event='pull_request' AND r.created<>jobs.created)""", (PR_BUILD,))
             if "sources" not in {r[1] for r in self.db.execute("PRAGMA table_info(base_checks)")}:
                 self.db.execute("ALTER TABLE base_checks ADD COLUMN sources TEXT NOT NULL DEFAULT ''")
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
@@ -158,15 +166,17 @@ class Store:
     def jobs(self, repo: str, run: dict, jobs: list) -> None:
         """Jobs that started (queue wait = started - created) or finished."""
         created_run = ts((run or {}).get("created_at"))
+        pr_build = (run or {}).get("event") == "pull_request"
         # Named columns: a history file a newer build wrote may have more (2026-11-20: #258's pr_build_created made
         # every write fail with "table jobs has 12 columns but 11 values were supplied" after main was installed).
         self._write("INSERT OR REPLACE INTO jobs (repo, id, run, name, workflow, runner, labels, result, created, started, "
-                    "finished) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (
+                    "finished, pr_build_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
             (repo, int(j["id"]), int((run or {}).get("id") or j.get("run_id") or 0), str(j.get("name") or "")[:120],
              str((run or {}).get("name") or j.get("workflow_name") or "")[:120], str(j.get("runner_name") or "")[:80],
              ",".join(str(x) for x in (j.get("labels") or []) if isinstance(x, str))[:300],
              result_of(j.get("conclusion")) if j.get("status") == "completed" else "",
-             ts(j.get("created_at")) or created_run, ts(j.get("started_at")), ts(j.get("completed_at")))
+             ts(j.get("created_at")) or created_run, ts(j.get("started_at")), ts(j.get("completed_at")),
+             ts(j.get("created_at")) if pr_build and j.get("name") == PR_BUILD and j.get("conclusion") in ("success", "failure") else None)
             for j in jobs if isinstance(j, dict) and isinstance(j.get("id"), int) and j.get("started_at")
             and j.get("status") in ("in_progress", "completed")))
 

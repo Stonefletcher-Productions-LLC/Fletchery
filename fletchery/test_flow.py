@@ -151,6 +151,24 @@ class FlowTest(unittest.TestCase):
         self.assertIsNone(g["lead_p50"])
         self.assertEqual(g["verdict"]["state"], "idle")
 
+    def test_build_wait_uses_real_pr_job_times_and_observed_attempts(self):
+        repo = "Acme/LifeShare"
+        run = {"id": 1, "name": "#12 Bus lines", "path": ".github/workflows/pr-check.yml", "event": "pull_request", "created_at": at(220)}
+        job = {"id": 1, "name": store.PR_BUILD, "status": "completed", "conclusion": "success",
+               "runner_name": "node", "created_at": at(110), "started_at": at(100), "completed_at": at(70)}
+        self.s.jobs(repo, run, [job, job, {**job, "id": 2, "created_at": at(190), "conclusion": "failure"},
+                                {**job, "id": 3, "created_at": None}, {**job, "id": 4, "conclusion": "skipped"},
+                                {**job, "id": 5, "name": "Cheap checks"}, {**job, "id": 6, "runner_name": ""},
+                                {**job, "id": 7, "conclusion": "cancelled"}])
+        self.s.jobs(repo, {**run, "event": "push"}, [{**job, "id": 8}])
+        def build(current):
+            return self.f.compute([repo], {}, NOW, build_queues={repo: current})["all"]["build_queues"][0]
+        b = build({"times": [NOW - 1200, NOW - 2400]})
+        self.assertEqual((b["samples"], b["median"], b["p90"], b["waiting"], b["oldest"]), (2, 3000, 5400, 2, 2400))
+        self.assertIsNone(build(None)["waiting"])
+        self.assertEqual(build({"times": []})["waiting"], 0)
+        self.assertIsNone(build({"times": [None]})["oldest"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -157,7 +157,8 @@ const server = http.createServer((req, res) => {
     await page.click('#tab-live');
     await page.waitForSelector('#liveFlow:not([hidden])');
     // Flow: is work moving? A verdict with its reason, the numbers, 24 hourly bars.
-    assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*Wait for a machine7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
+    assert.match(await page.textContent('#liveFlow'), /Moving\s*Last merge 21 min ago[\s\S]*Merges2\s*last hour · 9 today[\s\S]*Since last merge21 min[\s\S]*PR to merge4.4 h\s*median, 7 days[\s\S]*All jobs · machine wait7 min\s*p90 55 min[\s\S]*Base went red18%\s*of 22 runs/);
+    assert.match(await page.textContent('[aria-label="Acme/Game PR build queue"]'), /Median build wait1.5 h\s*17 observed · last 24 h[\s\S]*90th percentile5 h[\s\S]*Waiting now4[\s\S]*Oldest wait2 h/);
     assert.equal(await page.$$eval('#liveFlow .hours i', l => l.length), 24);
     assert.match(await page.getAttribute('#liveFlow .hours', 'aria-label'), /^Merges per hour, last 24 hours: 0, 0, 1/);
     assert.ok(await fits(), 'Live fits the phone');
