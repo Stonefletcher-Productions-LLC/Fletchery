@@ -35,7 +35,7 @@ const live = JSON.parse(fs.readFileSync(path.join(__dirname, 'test-live-fixture.
 const uploadOutput = {label: 'Uploading generated assets', at: ago(0), upload: {done: 2160, total: 11391, eta_seconds: 1080}};
 Object.assign(live.building[0], {change: 'Acme/Game#12', job_name: 'Compile and test', step: 'Build editor',
   step_started: new Date(Date.now() - 60000).toISOString(), steps_done: 2, steps_total: 5,
-  progress: {phase: {label: 'Importing environments', since: ago(1)}, last_output: uploadOutput, eta: {seconds: 720, samples: 3, same_pr: true}}});
+  progress: {phase: {label: 'Importing environments', since: ago(1)}, last_output: uploadOutput, eta: {seconds: 720, samples: 3, same_pr: true, same_revision: true}}});
 let liveAt = new Date().toISOString();
 let off = false;   // the whole PC is unreachable: not even the page's own files answer
 const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.webmanifest': 'application/manifest+json', '.png': 'image/png'};
@@ -269,8 +269,15 @@ const server = http.createServer((req, res) => {
     await refreshLive();
     await page.waitForFunction(() => document.querySelector('#liveBuilding .task-title').textContent === 'Importing environments');
     assert.equal(await meter.count(), 0, 'an upload from before the current phase cannot supply its meter');
-    assert.match(await page.textContent('#liveBuilding'), /About 12 min left in this job · 3 past checks on this PR/);
+    assert.match(await page.textContent('#liveBuilding'), /About 12 min left in the whole job · 3 earlier jobs for this revision on this runner/);
     const latestOutput = {label: 'Building the town', at: ago(8)};
+    live.building[0] = {...activeJob, step: 'Build and test', step_started: ago(91), progress: {last_output: latestOutput,
+      eta: {samples: 40, same_pr: false, seconds: null}}};
+    await refreshLive();
+    await page.waitForSelector('#liveBuilding [data-ago="' + latestOutput.at + '"]');
+    assert.match(await page.innerText('#liveBuilding'), /Last observed activity · 8 min ago · Activity start time unknown/);
+    assert.match(await page.innerText('#liveBuilding .workflow-steps'), /Build and test · running for 1 h 31 min/);
+    assert.doesNotMatch(await page.innerText('#liveBuilding'), /In this step for|outlasted|40 earlier/);
     const rawJob = {kind: 'check', title: 'PR check #12 (GitHub run 7): PrCheckJob.ps1',
       since: ago(45), reservation_holder: true, machine: 'Gaming PC', last_output: latestOutput};
     const suspect = live.bases.find(b => b.state === 'red').suspects.find(s => s.first_bad);
@@ -278,7 +285,7 @@ const server = http.createServer((req, res) => {
     live.building[0] = rawJob;
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('fletchery-tab', {detail: 'live'})));
     await page.waitForSelector('#liveBuilding [data-ago="' + latestOutput.at + '"]');
-    assert.match(await page.innerText('#liveBuilding'), /Building the town[\s\S]*Last observed activity · 8 min ago[\s\S]*Machine held for 45 min[\s\S]*Finish time unknown[\s\S]*PR #12 · Gaming PC/);
+    assert.match(await page.innerText('#liveBuilding'), /Building the town[\s\S]*Last observed activity · 8 min ago[\s\S]*Machine held for 45 min[\s\S]*Job finish time unknown[\s\S]*PR #12 · Gaming PC/);
     assert.doesNotMatch(await page.innerText('#liveBuilding'), /PrCheckJob|GitHub steps/);
     assert.match(await page.innerText('#baseBanner'), /Merged before the failure/);
     assert.doesNotMatch(await page.innerText('#baseBanner'), /First bad/);

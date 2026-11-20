@@ -207,18 +207,20 @@ class Store:
         """Anything else worth remembering (an alert fired or cleared, a problem opened or closed)."""
         self._write("INSERT OR REPLACE INTO events VALUES (?,?,?,?)", [(kind, key, at or time.time(), data[:2000])])
 
-    def job_remaining(self, repo: str, name: str, pr: int, elapsed: float) -> dict:
-        """Time remaining among comparable finished jobs that ran at least this long. Never use queue time."""
-        rows = self.query("""SELECT j.finished-j.started,
-                             EXISTS(SELECT 1 FROM runs r WHERE r.repo=j.repo AND r.id=j.run AND r.pr=?)
-                             FROM jobs j WHERE j.repo=? AND j.name=? AND j.result IN ('success','failure')
-                             AND j.finished>j.started ORDER BY j.started DESC LIMIT 100""", (pr or -1, repo, name))
-        longer = [d for d, own in rows if d > elapsed and own]
-        same_pr = bool(longer)
-        if not longer:
-            longer = [d for d, _ in rows if d > elapsed]
+    def job_remaining(self, repo: str, job: dict, run: dict, elapsed: float) -> dict:
+        """Whole-job durations on this runner for the same revision and event. Each job ID is one observation."""
+        runner, sha, event = job.get("runner_name"), run.get("head_sha"), run.get("event")
+        pr = ((run.get("pull_requests") or [{}])[0] or {}).get("number") or 0
+        if not runner or not sha or not event or event.startswith("pull_request") and not pr:
+            return {}
+        rows = self.query("""SELECT j.finished-j.started FROM jobs j WHERE j.repo=? AND j.name=? AND j.runner=?
+                             AND j.result IN ('success','failure') AND j.finished>j.started
+                             AND EXISTS(SELECT 1 FROM runs r WHERE r.repo=j.repo AND r.id=j.run
+                                        AND r.event=? AND r.sha=? AND r.pr=?)
+                             ORDER BY j.started DESC LIMIT 100""", (repo, job.get("name"), runner, event, sha, pr))
+        longer = [duration for duration, in rows if duration > elapsed]
         return {"seconds": round(statistics.median(longer) - elapsed) if longer else None,
-                "samples": len(longer) if longer else len(rows), "same_pr": same_pr}
+                "samples": len(longer) if longer else len(rows), "same_pr": bool(pr and rows), "same_revision": True}
 
     def job_seconds(self, repo: str, workflow: str, name: str, keep: int = 20):
         """The median time a job takes when it passes (its last `keep` runs), or None with fewer than 3."""

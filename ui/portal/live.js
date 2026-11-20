@@ -317,28 +317,28 @@
     const observed = output && !waiting;
     // A later phase supersedes a transfer recorded earlier in the same check.
     const upload = observed && (!phase?.since || Date.parse(output.at) >= Date.parse(phase.since)) ? uploadDetail(output) : null;
-    const count = eta.samples + (eta.samples === 1 ? ' past check' : ' past checks') + (eta.same_pr ? ' on this PR' : '');
+    const count = eta.samples + (eta.samples === 1 ? ' earlier job' : ' earlier jobs') + ' for this revision on this runner';
     const estimate = waiting ? 'Start time unknown until the machine reports its reservation' :
-      eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in this job · ' + count :
-      eta.samples ? 'Finish time unknown · this job has outlasted ' + count :
-      'Finish time unknown · no comparable timing yet';
+      eta.same_revision && eta.seconds != null ? 'About ' + mins(eta.seconds) + ' left in the whole job · ' + count :
+      eta.same_revision && eta.samples ? 'Job finish time unknown · already longer than ' + count :
+      'Job finish time unknown · no matching run for this revision on this runner';
     let timing;
     if (waiting && (phase?.since || job.since)) timing = ['Waiting for ', since(phase?.since || job.since)];
     else if (phase?.since) timing = [upload ? phase.label + ' started ' : 'Phase started ', ago(phase.since)];
-    else if (job.step_started) timing = ['In this step for ', since(job.step_started)];
-    else if (job.reservation_holder && job.since) timing = ['Machine held for ', since(job.since)];
+    else if (!job.step_started && job.reservation_holder && job.since) timing = ['Machine held for ', since(job.since)];
     const status = join(timing, !waiting && !phase && !observed ? 'Waiting for a task update from the runner' : '');
     return el('div', {class: 'build-detail'},
       upload || el('p', {class: 'task-title', text: label}),
       observed && !upload ? el('p', {class: 'sub'}, phase ? ['Latest output · ', output.label, ' · '] : 'Last observed activity · ',
-        ago(output.at)) : null,
+        ago(output.at), phase ? null : ' · Activity start time unknown') : null,
       status.length ? el('p', {class: 'sub'}, ...sep(status)) : null,
       upload ? null : waiting && progress.reservation ? reservationDetail(progress.reservation) :
         el('p', {class: 'sub', text: estimate}));
   }
   function githubSteps(x) {
     if (!x.steps_total) return null;
-    return el('p', {class: 'sub workflow-steps'}, ...sep(join('GitHub steps · ' + x.steps_done + ' of ' + x.steps_total + ' complete', x.step)));
+    return el('p', {class: 'sub workflow-steps'}, ...sep(join('GitHub steps · ' + x.steps_done + ' of ' + x.steps_total + ' complete',
+      x.step && x.step_started ? [x.step, ' · running for ', since(x.step_started)] : x.step)));
   }
   function actRow(x, c) {
     const leasePR = /\bPR check #(\d+)\b/i.exec(x.title || '');
@@ -349,7 +349,6 @@
       return el('li', {class: 'mact'},
         x.alive === false ? el('p', {class: 'task-title', text: 'The check stopped while holding the machine'}) :
           progress ? buildDetail(progress, x) : el('p', {class: 'task-title'}, x.step || x.job_name || 'GitHub job running'),
-        !progress && x.step_started ? el('p', {class: 'sub'}, 'In this step for ', since(x.step_started)) : null,
         el('p', {class: 'sub task-context'}, ...sep(join(a(x.url || c?.url, '', title), x.machine, x.job_name))),
         githubSteps(x));
     }

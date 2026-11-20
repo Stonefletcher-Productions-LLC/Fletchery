@@ -177,7 +177,10 @@ human-readable `detail`, and the phase's UTC start time in `since`. Refresh the 
 and remove it at exit. The dashboard matches it to the current machine, run, attempt and step start time.
 For a check that predates phase reporting, the Gaming PC can identify the latest tool output in the reserved
 checkout. Its timestamp remains visible during quiet periods so you can see how recently the job produced evidence.
-The GitHub step count describes the outer workflow. Several imports, builds and tests can happen within one step.
+The GitHub step clock starts when that outer step begins. Several imports, builds and tests can happen within one
+step. When the reporter supplies only a recent output, the card shows the observation's age and marks the activity
+start time unknown. Whole-job estimates compare the same job, revision, runner and event, including the PR number
+for pull requests. The dashboard leaves the finish time unknown when there are no matching attempts.
 For Git LFS uploads that report completed batches, the card shows the uploaded and total file counts.
 Its upload estimate uses the rate of recent completed batches. During a quiet period the last count stays visible
 with its observation time, and the estimate expires.
