@@ -178,18 +178,28 @@ GENERIC_NOTE = re.compile(r"^(process completed with exit code|the job (was|has)
                           r"node\.js \d+ actions are deprecated|the `set-output`|##\[)", re.I)
 
 
+# A check that ends with its own summary ("Gate failed: <command>", "Gate(s) failed: ...") names what failed there;
+# any other error lines it printed on the way are a passing self-test's deliberate failures (LifeShare's
+# TestPushWithLfs.ps1 prints fake "LFS upload failed" errors) or detail, and only confuse the base banner (2026-11-20).
+SUMMARY_NOTE = re.compile(r"^gate(\(s\)|s)? failed\b", re.I)
+# The interpreter in front of a gate's command says nothing: "Gate failed: "C:\Python315\python.exe" Tools/X.py" -> "Gate failed: Tools/X.py"
+_INTERPRETER = re.compile(r'(?i)("[^"]*[\\/](?:python[0-9.]*|pwsh|powershell|node)(?:\.exe)?"|(?:[A-Z]:)?[^\s"]*[\\/](?:python[0-9.]*|pwsh|powershell|node)\.exe)\s+')
+
+
 def test_names(annotations: list) -> list:
     """The test or spec names a failed check's annotations give (title, else the message's first line), without
-    GitHub's own generic lines ("Process completed with exit code 1")."""
+    GitHub's own generic lines ("Process completed with exit code 1"). When the check names its failed gates, only those."""
     out = []
     for n in annotations or []:
         if not isinstance(n, dict) or n.get("annotation_level") not in (None, "failure"):
             continue
         lines = str(n.get("message") or "").strip().splitlines()
-        text = re.sub(r"\s+", " ", str(n.get("title") or "").strip() or (lines[0] if lines else ""))[:100]
+        text = re.sub(r"\s+", " ", str(n.get("title") or "").strip() or (lines[0] if lines else ""))
+        text = _INTERPRETER.sub("", text)[:100]
         if text and not GENERIC_NOTE.search(text) and text not in out:
             out.append(text)
-    return out[:10]
+    gates = [t for t in out if SUMMARY_NOTE.search(t)]
+    return (gates or out)[:10]
 
 
 def required_sources(branch_rules, protection) -> dict:

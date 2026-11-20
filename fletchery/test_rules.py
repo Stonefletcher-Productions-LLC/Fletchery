@@ -157,6 +157,16 @@ class HelpersTest(unittest.TestCase):
                  {"annotation_level": "failure", "title": "LifeShare.Town.Fishing"}]
         self.assertEqual(rules.test_names(notes), ["LifeShare.Town.Fishing", "RouteScale pedestrian 5.0 ms"])
 
+    def test_named_gates_hide_a_self_tests_deliberate_errors(self):
+        """2026-11-20: Test-Staging's banner listed TestPushWithLfs.ps1's fake LFS errors (a passing self-test) as failures."""
+        notes = [{"annotation_level": "failure", "message": 'Gate failed: "C:\\Python315\\python.exe" Tools/TownCrosswalks.py --check'},
+                 {"annotation_level": "failure", "message": "LFS upload failed at file 0 of 170. Nothing was pushed to feature/lfs-fixture."},
+                 {"annotation_level": "failure", "message": "Could not enumerate LFS objects. Nothing was pushed."},
+                 {"annotation_level": "failure", "message": "Gate failed: python Tools/TownPlan/v6_households.py --check"}]
+        self.assertEqual(rules.test_names(notes), ["Gate failed: Tools/TownCrosswalks.py --check",
+                                                   "Gate failed: python Tools/TownPlan/v6_households.py --check"])
+        self.assertEqual(rules.test_names(notes[1:3]), [notes[1]["message"], notes[2]["message"]])
+
     def test_required_checks(self):
         branch_rules = [{"type": "deletion"}, {"type": "required_status_checks", "parameters": {
             "required_status_checks": [{"context": "PR check / Cheap checks"}, {"context": "PR check / Compile and test"}]}}]
