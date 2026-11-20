@@ -41,6 +41,36 @@ def _age(ts: str) -> float:
         return 0.0
 
 
+JOB_KIND = {"package": "builds", "checkout-only": "builds"}   # machines.KIND, without importing the worker API here
+
+
+def job_waits_for(job: dict, machines: list) -> list[tuple[str, str]]:
+    """Each registered machine that could run a queued node job (it has every label and the RAM), with why it has not
+    taken it yet, in plain words. Empty when no machine has the labels."""
+    out = []
+    want = set(job.get("labels") or [])
+    for m in machines:
+        if m.get("revoked") or not want <= set(m.get("labels") or []):
+            continue
+        st = m.get("stats") or {}
+        if not m.get("online"):
+            why = "its build worker is not calling in"
+        elif JOB_KIND.get(job.get("recipe"), "") in (m.get("paused_work") or []):
+            why = "builds are paused on this machine (Machines card)"
+        elif m.get("job"):
+            why = f"running job #{m['job'].get('id')} first"
+        elif st.get("yield"):
+            why = f"someone is playing ({st['yield']})"
+        elif st.get("pause_file"):
+            why = "paused by its pause file"
+        elif st.get("lease"):
+            why = f"next, once {st['lease']} ends"
+        else:
+            why = "next (the machine takes it at its next call)"
+        out.append((m["name"], why))
+    return out
+
+
 def code_fingerprint() -> str:
     """The backend's own Python, by content (tests excluded: changing a test needs no restart)."""
     digest = hashlib.sha256()
@@ -291,18 +321,34 @@ class App:
                             "detail": "Builds cannot run there until it is back (the 'Fletchery node worker' task)."})
         for j in waiting:
             if _age(j.get("created") or "") > NO_MACHINE_MINUTES * 60:
+                where = job_waits_for(j, view["machines"])
                 out.append({"kind": "stuck", "key": f"job:{j.get('id')}", "since": j.get("created") or "",
                             "title": f"{j.get('requested_by') or 'Job ' + str(j.get('id'))} has waited "
                                      f"{int(_age(j.get('created') or '') // 60)} min for a build machine",
-                            "detail": "No online machine with the labels it needs has taken it."})
+                            "detail": "; ".join(f"{name}: {why}" for name, why in where) if where
+                                      else "No registered machine has the labels it needs."})
         return out
 
     def machine_jobs(self) -> list:
-        """For Live: the builds this backend runs on its machines, as machine activities ("Building now")."""
+        """For Live: the builds this backend runs on its machines, as machine activities ("Building now"), and each
+        queued one as a "queued" activity on the machine(s) that could take it, so it shows on the Queue tab
+        ("What waits for a machine's hold") with why it waits. 2026-11-20: build 0.4.6 (job 756) waited unseen for
+        half an hour because the Queue tab listed only GitHub runs."""
         if self.machines is None:
             return []
         out = []
-        for m in self.machines.machines.view(jobs=1)["machines"]:
+        view = self.machines.machines.view(jobs=60)
+        for j in sorted((j for j in view["jobs"] if j.get("state") == "queued"), key=lambda j: j.get("id") or 0):
+            params = j.get("params") or {}
+            what = f"Fletchery build {params.get('version')}" if j.get("recipe") == "package" else f"Fletchery job: {j.get('recipe')}"
+            where = job_waits_for(j, view["machines"])
+            online = {m["name"] for m in view["machines"] if m.get("online")}
+            where = [w for w in where if w[0] in online] or where   # an offline machine only when no online one fits
+            for name, why in where or [("no build machine", "no registered machine has the labels it needs")]:
+                out.append({"machine": name, "kind": "queued", "since": j.get("created") or "",
+                            "title": f"{what} (job #{j.get('id')})",
+                            "detail": " · ".join(x for x in (why, f"from {j.get('ref')}" if j.get("ref") else "") if x)})
+        for m in view["machines"]:
             j = m.get("job")
             if m.get("revoked") or not j or j.get("state") != "running" or not j.get("machine"):
                 continue

@@ -162,6 +162,14 @@ def claim_rank(requested_by: str) -> int:
     who = (requested_by or "").lower()
     return 0 if who.startswith("round ") else 1 if who.startswith("build ") else 2
 
+
+def goes_first(requested_by: str) -> bool:
+    """A job that takes a node ahead of its local runs: a merge round's, or a build Alex scheduled. 2026-11-20: rounds
+    are retired, so only round jobs had this; build 0.4.6 (job 756) then sat queued for good while GitHub PR checks
+    held SF-NODE-01's heavy lease back to back. Now a build also gets the round marker (LaneGuard holds new local runs)
+    and holds the lease for its whole length once the current run ends."""
+    return claim_rank(requested_by) <= 1
+
 class Machines:
     """The registry and the job queue, in <state_dir>/machines.db. Safe to use from several threads and from the
     command line while the backend runs (SQLite with a busy timeout; every change is one short transaction)."""
@@ -441,8 +449,8 @@ class Machines:
                 for row in sorted(rows, key=lambda r: (claim_rank(r["requested_by"]), r["id"])):
                     if KIND.get(row["recipe"]) in off:
                         continue
-                    if rounds_only and claim_rank(row["requested_by"]) != 0:
-                        continue   # the node is busy with a local run: only a merge round's job waits for it (#208)
+                    if rounds_only and not goes_first(row["requested_by"]):
+                        continue   # the node is busy with a local run: only a round's or a build's job waits for it (#208)
                     if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
                         t = now()
                         db.execute("UPDATE jobs SET state='running', machine=?, started=?, heartbeat=?, attempts=attempts+1 "
@@ -451,7 +459,7 @@ class Machines:
                         return {"id": row["id"], "recipe": row["recipe"], "repo": row["repo"], "sha": row["sha"],
                                 "ref": row["ref"], "params": json.loads(row["params"]),
                                 "timeout_minutes": row["timeout_minutes"],
-                                "round": claim_rank(row["requested_by"]) == 0}
+                                "round": goes_first(row["requested_by"])}
                 db.execute("COMMIT")
                 return None
             except Exception:
@@ -469,7 +477,7 @@ class Machines:
                 return False
             have, off = set(json.loads(m["labels"] or "[]")), set(self._paused(db, machine))
             for row in db.execute("SELECT * FROM jobs WHERE state='queued'").fetchall():
-                if claim_rank(row["requested_by"]) != 0 or KIND.get(row["recipe"]) in off:
+                if not goes_first(row["requested_by"]) or KIND.get(row["recipe"]) in off:
                     continue
                 if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
                     return True
@@ -770,7 +778,7 @@ def _job(r) -> dict:
             "state": r["state"], "machine": r["machine"], "created": r["created"], "started": r["started"] or "",
             "finished": r["finished"] or "", "exit_code": r["exit_code"], "summary": r["summary"], "context": r["context"],
             "attempts": r["attempts"], "requested_by": r["requested_by"], "cancel": bool(r["cancel"]),
-            "log_bytes": r["log_bytes"], "pr": r["pr"]}
+            "log_bytes": r["log_bytes"], "pr": r["pr"], "labels": json.loads(r["labels"] or "[]")}
 
 
 def _desc(text: str) -> str:

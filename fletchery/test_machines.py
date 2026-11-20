@@ -53,6 +53,25 @@ class RegistryTests(Base):
         self.assertTrue(self.m.authenticate("NODE-01", new))
         self.assertFalse(self.m.authenticate("NODE-01", key))
 
+    def test_a_build_goes_first_on_a_node_held_by_a_local_run(self):
+        # 2026-11-20, job 756: GitHub PR checks held SF-NODE-01's lease back to back and only round jobs (retired)
+        # could be claimed meanwhile, so the scheduled build never started.
+        self.node()
+        other = self.m.enqueue("checkout-only", SHA, {}, requested_by="PR check")
+        build = self.m.enqueue("package", SHA, BUILD, requested_by="build 0.4.5")
+        self.assertTrue(self.m.round_waiting("NODE-01"))   # the node keeps LaneGuard's marker: local runs wait
+        got = self.m.claim("NODE-01", rounds_only=True)
+        self.assertEqual((got["id"], got["round"]), (build, True))   # it holds the lease for its whole length
+        self.assertFalse(self.m.round_waiting("NODE-01"))   # a PR check's job never holds local runs off
+        self.assertEqual(self.m.job(other)["state"], "queued")
+
+    def test_paused_builds_are_not_waited_for(self):
+        self.node()
+        self.m.enqueue("package", SHA, BUILD, requested_by="build 0.4.5")
+        self.m.set_paused("NODE-01", "builds", True)
+        self.assertFalse(self.m.round_waiting("NODE-01"))
+        self.assertIsNone(self.m.claim("NODE-01", rounds_only=True))
+
     def test_bad_names_are_refused(self):
         for name in ("", "../x", "a b", "x" * 80):
             with self.assertRaises(ValueError):
