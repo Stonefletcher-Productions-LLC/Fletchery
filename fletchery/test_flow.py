@@ -72,6 +72,31 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(b.query("SELECT number FROM merges"), [(5,)])
             b.close()
 
+    def test_base_history_upgrade_keeps_other_commits_and_retires_exact_snapshot_rows(self):
+        import sqlite3
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "old.db"
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE base_checks (repo TEXT, branch TEXT, sha TEXT, name TEXT, result TEXT, at REAL, "
+                       "PRIMARY KEY (repo, branch, sha, name))")
+            db.executemany("INSERT INTO base_checks VALUES ('A/B','main',?,?, 'failure',?)",
+                           [("old", "Test", NOW - 30), ("tip", "Test", NOW - 25), ("tip", "Retired", NOW - 20)])
+            db.commit()
+            db.close()
+            s = store.Store(path)
+            try:
+                newest = {"name": "Test", "status": "queued", "created_at": at(1), "head_sha": "tip"}
+                s.base_checks("A/B", "main", "tip", [newest], required_sources={"Test": {17}})
+                self.assertEqual(s.query("SELECT name FROM base_checks WHERE sha='tip' ORDER BY name"), [("Retired",), ("Test",)])
+                s.base_checks("A/B", "main", "tip", [newest], complete=True, required_sources={"Test": {17}})
+                self.assertEqual(s.query("SELECT sha, name, result, sources FROM base_checks ORDER BY sha"),
+                                 [("old", "Test", "failure", ""), ("tip", "Test", "", "17")])
+                s.base_checks("A/B", "main", "tip", [], complete=True)
+                self.assertEqual(s.query("SELECT sha FROM base_checks"), [("old",)])
+            finally:
+                s.close()
+
 
 class FlowTest(unittest.TestCase):
     def setUp(self):

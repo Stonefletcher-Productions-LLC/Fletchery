@@ -15,7 +15,12 @@ The header shows your GitHub sign-in and selected project. Click the sign-in to 
 The open PR total follows the project selection. If GitHub times out, Live marks the total as partial and keeps
 the last confirmed count for each affected repository. Building now shows each running check's current GitHub step,
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
+<<<<<<< HEAD
 Flow shows how long PR compile jobs waited for a runner, including the oldest still queued, alongside the all-jobs figure.
+=======
+If a later GitHub request times out, the dashboard keeps the runs and job steps it already received.
+A job that could not be refreshed keeps its last known step for the same attempt. A rerun starts with its own steps.
+>>>>>>> origin/main
 During Build and test it also shows the phase reported by the machine and a rough time left based on
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
 The live check card leads with what the machine is doing. Between phase reports, the latest observed tool
@@ -67,6 +72,10 @@ or 24 hours from its row: it stays listed, the phone is not told. Nothing merged
 alert too. Alerts and snoozes survive a restart.
 
 <p><img src="docs/images/fletchery/portal-alerts.png" width="300" alt="Stuck or blocked on the phone: rows marked Alerted with snooze buttons, Snoozed until a time, and Not alerted yet with the minutes left, and the alerts cleared recently"></p>
+
+**Branch health.** A protected branch turns green once every required check passes on its current commit. While a
+result is missing, running or skipped, the banner names the check still awaiting a pass. A confirmed required failure
+appears in red immediately. Fletchery reads both check runs and commit statuses and ignores the retired Buildlane runner's reports.
 
 **Cheap to run.** GitHub is read with ETags, so "nothing changed" costs nothing against GitHub's limit and no Actions
 minutes. It reads every 15 s while anything runs and every 90 s when idle, and slows down by itself when the hourly
@@ -228,6 +237,7 @@ machines run the same pass from `node_worker.py` ([MACHINES.md](docs/MACHINES.md
   host names in `hosts`, and same-origin checks on every button. Folder paths on the PC are removed from what it shows.
 - **Machines run recipes, not commands.** A build machine has its own list of what it agrees to run and its own
   read-only deploy key. Fletchery holds no machine's key, only its hash.
+  Machine reports use the portal's 8 KiB request limit and 30-second inactivity timeout.
 - **No hidden credentials.** Fletchery uses your `gh` sign-in. No token is kept in a profile, the repository or the
   log.
 - **No windows.** Everything Fletchery starts runs hidden and below normal priority, so a game or a build always wins.

@@ -70,6 +70,7 @@ NEEDS_PERSON_LABEL = re.compile(r"^(?:[\w .-]{1,20}[:/]\s*)?(?:needs[\s_:-]*(?:a
 FAILED = ("failure", "timed_out", "action_required", "startup_failure")
 # A check that gave no verdict on the PR: cancelled, or a run whose machine stayed busy (LifeShare's PrCheckJob exits 2
 # with "No result: ... Re-run this check"). It needs a re-run, not a fix, so it is not a blocker.
+RETIRED_STATUS = re.compile(r"(?:(?:Running|Passed|Failed) on the build PC|Cancelled|Skipped) \(run 900[0-9]{9}\)")
 NO_RESULT = re.compile(r"no result", re.I)
 # Coding agents' branches (and PR authors): one Agents row per branch with recent activity.
 AGENTS = (("claude/", "Claude"), ("codex/", "Codex"))     # branch prefix -> agent (workers.portal.live.agents)
@@ -141,6 +142,44 @@ def _latest_checks(cr: list) -> list:
         if b is None or (c.get("id") or 0) > (b.get("id") or 0):
             best[k] = c
     return list(best.values())
+
+
+def _base_evidence(runs, statuses, sources):
+    """Keep the latest result per producer. A required context can have both a check run and a commit status."""
+    required = {name.casefold(): name for name in sources}
+    latest = {}
+    for row in [*runs, *statuses]:
+        name = str(row.get("name") or "").casefold()
+        if not name or (required and name not in required):
+            continue
+        app = (row.get("app") or {}).get("id")
+        context = required.get(name, row["name"])
+        pinned = sources.get(context, set()) - {None}
+        if pinned and app not in pinned:
+            continue
+        if row.get("source") == "status" and not required and not row.get("html_url"):
+            continue
+        key = (context.casefold(), row.get("source", "check"), app)
+        if key not in latest or (row.get("id") or 0) > (latest[key].get("id") or 0):
+            latest[key] = dict(row, name=context)
+    grouped = {}
+    for (name, _, _), row in latest.items():
+        grouped.setdefault(name, []).append(row)
+    result = []
+    for rows in grouped.values():
+        context = rows[0]["name"]
+        pinned = sources.get(context, set()) - {None}
+        observed = {(r.get("app") or {}).get("id") for r in rows}
+        # Show a genuine failure immediately. Otherwise all required producers must give a passing result.
+        failed = next((r for r in rows if r.get("status") == "completed" and r.get("conclusion") in FAILED), None)
+        unfinished = next((r for r in rows if r.get("status") != "completed" or r.get("conclusion") != "success"), None)
+        if failed:
+            result.append(failed)
+        elif pinned - observed:
+            result.append({"name": context, "status": "queued"})
+        else:
+            result.append(unfinished or rows[0])
+    return result
 
 
 def _ago_text(seconds: float) -> str:
@@ -413,6 +452,14 @@ def _iso_after(iso: str, seconds: float) -> str:
     return now_iso_at(t + seconds) if t else "~"
 
 
+def _is_pr_build(run: dict) -> bool:
+    """A pull request's PR check run. Actions can put the PR title in name; the workflow path survives re-runs and
+    custom run-name expressions."""
+    path = str(run.get("path") or "").split("@")[0]
+    return run.get("event") == "pull_request" and (
+        path == ".github/workflows/pr-check.yml" or not path and run.get("name") == "PR check")
+
+
 def _workload(title: str) -> str:
     """Recognize a dispatch's named task across checkout revisions (e.g. 'Node checks <sha> CityPictures')."""
     suffix = re.split(r"\b[0-9a-fA-F]{7,40}\b\s*", title)[-1]
@@ -479,6 +526,7 @@ class DevWatch:
         self.runs: dict[str, list] = {}             # repo -> recent runs
         self.jobs: dict[int, list] = {}             # run id -> jobs
         self.pr_build_queues = {}                   # repository -> queued PR compile jobs from a complete live read
+        self.partial_jobs = {}                      # repo -> run attempts whose job pages still need a complete read
         self.prs: dict[str, list] = {}              # repo -> open PRs
         self.checks: dict[tuple, list] = {}         # (repo, sha) -> check runs
         self.pushes: dict[str, list] = {}           # repo -> recent pushes to agent branches (from repository events)
@@ -544,9 +592,8 @@ class DevWatch:
             except re.error:
                 self.log(f"live: causes.machine pattern {str(x)[:60]!r} ignored: not a regular expression")
         self.red_issue_labels = [str(x) for x in conf.get("redIssueLabels") or rules.RED_ISSUE_LABELS][:20]
-        self.bases: dict[str, dict] = {}            # repo -> {branch: {"checking", "required"}}
+        self.bases: dict[str, dict] = {}            # branch tip, effective requirements and observations by repository
         self.notes: dict[int, list] = {}            # completed base check run id -> test names
-        self._required: dict[tuple, tuple] = {}     # (repo, branch) -> (asked at, required check names)
         # Which blockers reach a person, and when (alerts.py): a wait before firing, a hold after, groups and snoozes.
         self.alerts = alertsmod.Alerts(Path(state_dir) / "alerts.json" if state_dir else None, conf.get("alerts"), self.store, self.log)
 
@@ -654,6 +701,7 @@ class DevWatch:
                 self.last_ok = now_iso()
             self.runs, self.jobs, self.prs, self.checks, self.issues, self.pushes = runs, jobs, prs, checks, issues, pushes
             self.pr_build_queues = {repo: g.get("pr_build_queue") for repo, g in got.items()}
+            self.partial_jobs = {repo: g["partial_jobs"] for repo, g in got.items()}
             self.closed, self.merged, self.releases = closed, merged, releases
             self.bases = bases
             self.runners = {k: rows for k, (rows, _) in found.items() if rows is not None}
@@ -717,6 +765,7 @@ class DevWatch:
                 continue
             status, conclusion = state[str(st["state"])]
             row = {"id": st.get("id"), "name": st.get("context"), "status": status, "conclusion": conclusion,
+                   "app": st.get("performed_via_github_app") or st.get("app"),
                    "html_url": st.get("target_url"), "started_at": st.get("created_at"),
                    "completed_at": st.get("updated_at") if status == "completed" else None, "source": "status"}
             if conclusion == "failure" and isinstance(st.get("id"), int):
@@ -737,10 +786,12 @@ class DevWatch:
                 now_s = time.time()
                 if len(self.skip) > 500:
                     self.skip = {k: v for k, v in self.skip.items() if v[0] > now_s}
-                missing = (e.code == 422 and "no commit found for sha:" in str(e).lower()) or str(e).lower() == "404 ref not found"
+                missing = (e.code == 422 and "no commit found for sha:" in str(e).lower()) or str(e).lower() in (
+                    "404 ref not found", "404 branch not found")
                 self.skip[path] = (now_s + quiet_for, missing)
                 return missing_ref if missing else None
-            raise
+            message = str(e).removeprefix(f"{e.code} ")
+            raise GitHubError(e.code, f"{path}: {message}") from e
 
     def _poll_open_prs(self, repo: str) -> tuple:
         """Publish a repository's PR rows only after every page succeeds, including the terminal empty page."""
@@ -763,21 +814,20 @@ class DevWatch:
             return self.prs.get(repo, []), "", f"{repo}: {e}"
 
     def _poll_repo(self, repo: str, prs: list) -> dict:
-        """A detail timeout keeps older check and issue data alongside the independent PR inventory."""
-        out = {"runs": [], "jobs": {}, "prs": prs, "checks": {}, "issues": [], "pushes": [], "closed": [], "merged": [], "releases": [],
-               "merged_all": []}
+        """Stage the repository privately; each successful read replaces only the data it owns."""
+        with self._lock:
+            runs = self.runs.get(repo, [])
+            heads = {(repo, (p.get("head") or {}).get("sha")) for p in prs}
+            out = {"runs": runs, "prs": prs, "issues": self.issues.get(repo, []), "pushes": self.pushes.get(repo, []),
+                   "closed": self.closed.get(repo, []), "merged": self.merged.get(repo, []), "merged_all": [],
+                   "releases": self.releases.get(repo, []), "jobs": {r["id"]: self.jobs[r["id"]] for r in runs if r["id"] in self.jobs},
+                   "checks": {k: self.checks[k] for k in heads if k in self.checks},
+                   "partial_jobs": set(self.partial_jobs.get(repo, ()))}
         try:
-            return self._read_repo(repo, prs, out)
-        except GitHubError as e:
-            with self._lock:
-                old = {"runs": self.runs.get(repo, []), "prs": prs, "issues": self.issues.get(repo, []),
-                       "pushes": self.pushes.get(repo, []), "closed": self.closed.get(repo, []),
-                       "merged": self.merged.get(repo, []), "releases": self.releases.get(repo, []),
-                       "jobs": {k: v for k, v in self.jobs.items() if any(r["id"] == k for r in self.runs.get(repo, []))},
-                       "checks": {k: v for k, v in self.checks.items() if k[0] == repo}}
-            old["error"] = f"{repo}: {e}"
-            old["pr_build_queue"] = out.get("pr_build_queue")  # a later PR or branch lookup cannot invalidate the jobs read
-            return old
+            self._read_repo(repo, prs, out)
+        except GitHubError as exc:
+            out.setdefault("error", f"{repo}: {exc}")
+        return out
 
     def _read_holder_times(self, repo, runs, jobs):
         """Look up the same runner, dispatch workload, job and step, only while a reported reservation has waiters."""
@@ -829,72 +879,131 @@ class DevWatch:
                         samples.append((end - start, s["conclusion"]))
         return samples
 
-    def _read_repo(self, repo: str, prs: list, out: dict) -> dict:
-        recent = self._try(f"repos/{repo}/actions/runs?per_page=20") or {}
-        complete = isinstance(recent.get("workflow_runs"), list)
-        runs = recent.get("workflow_runs") or []
-        if len(runs) == 20 or recent.get("total_count", len(runs)) > len(runs):
-            # GitHub's recent list is ordered by creation time. A long check can disappear from it while still running.
-            by_id = {r["id"]: r for r in runs}
+    def _action_pages(self, repo, path, field, size, out):
+        """Keep pages already received on timeout and tell the caller when absence is authoritative."""
+        rows, seen = [], set()
+        page = 1
+        try:
+            while True:
+                page_path = f"{path}&page={page}"
+                response = self._try(page_path)
+                if response is None:  # endpoint unavailable (e.g. Actions disabled)
+                    if rows:
+                        raise GitHubError(0, f"GitHub did not return {page_path}")
+                    return rows, False
+                batch = response.get(field) if isinstance(response, dict) else None
+                if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
+                    raise GitHubError(0, f"Incomplete {field} response for {path}")
+                ids = [row["id"] for row in batch if row.get("id") is not None]
+                if (field == "workflow_runs" or len(batch) >= size) and len(ids) != len(batch):
+                    raise GitHubError(0, f"Missing IDs in {field} for {path}")
+                if len(ids) != len(set(ids)):
+                    raise GitHubError(0, f"Duplicate IDs in {field} for {path}")
+                rows.extend(row for row in batch if row.get("id") not in seen)
+                if seen.intersection(ids):
+                    raise GitHubError(0, f"{field} changed while paging {path}")
+                seen.update(ids)
+                total = response.get("total_count")
+                if len(batch) < size or len(rows) == total:
+                    if total is not None and len(rows) != total:
+                        raise GitHubError(0, f"Incomplete {field} list for {path}")
+                    return rows, True
+                if field == "workflow_runs" and page == 10:
+                    raise GitHubError(0, f"Active run list exceeds GitHub's 1,000-result limit for {path}")
+                page += 1
+        except GitHubError as exc:
+            out.setdefault("error", f"{repo}: {exc}")
+            return rows, False
+
+    def _read_actions(self, repo, out):
+        previous = {r["id"]: r for r in out["runs"]}
+        recent = self._try(f"repos/{repo}/actions/runs?per_page=20")
+        out["pr_build_queue"] = None  # set below only from a complete read of every active PR build
+        if recent is None:
+            if previous:
+                out["error"] = f"{repo}: GitHub did not return the recent Actions runs"
+            return
+        if not isinstance(recent, dict) or not isinstance(recent.get("workflow_runs"), list):
+            raise GitHubError(0, f"Incomplete recent Actions runs for {repo}")
+        recent_runs = recent["workflow_runs"]
+        if any(not isinstance(r, dict) or type(r.get("id")) is not int for r in recent_runs):
+            raise GitHubError(0, f"Invalid recent Actions run for {repo}")
+        observed = {r["id"]: r for r in recent_runs}
+        complete = True
+        if len(recent_runs) == 20 or recent.get("total_count", 0) > len(recent_runs):
+            # A long-running job can fall outside the recent window. A partial active list cannot retire unseen jobs.
             for status in ("in_progress", "queued"):
-                page = 1
-                seen = set()
-                while True:
-                    path = f"repos/{repo}/actions/runs?status={status}&per_page=100&page={page}"
-                    response = self._try(path) or {}
-                    complete = complete and isinstance(response.get("workflow_runs"), list) and response.get("total_count", 0) <= 1000
-                    batch = response.get("workflow_runs") or []
-                    by_id.update((r["id"], r) for r in batch)
-                    seen.update(r["id"] for r in batch)
-                    if len(batch) < 100 or page == 10:
-                        complete = complete and len(seen) >= response.get("total_count", len(seen))
-                        break
-                    page += 1
-            runs = list(by_id.values())
-        out["runs"] = runs
-        previous = {r["id"]: r for r in self.runs.get(repo, [])}
-        queued = {}
-        for run in runs:
-            before = self.jobs.get(run["id"])
-            # Actions can put the PR title in name. The workflow path survives re-runs and custom run-name expressions.
-            path = str(run.get("path") or "").split("@")[0]
-            pr_build = run.get("event") == "pull_request" and (
-                path == ".github/workflows/pr-check.yml" or not path and run.get("name") == "PR check")
-            old = previous.get(run["id"], {})
-            newly_finished = pr_build and run.get("conclusion") in ("success", "failure") and (
-                before is None or old.get("status") != "completed" or old.get("run_attempt") != run.get("run_attempt"))
-            if newly_finished or run.get("status") in ACTIVE or before is None and run.get("status") != "completed" or \
-                    before and any(j.get("status") in ACTIVE for j in before):
-                path = f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=30"
-                response = self._try(path) or {}
-                jobs = list(response.get("jobs") or [])
-                if pr_build:
-                    expected = response.get("total_count", len(jobs))
-                    page = 1
-                    while len(jobs) < expected:
-                        page += 1
-                        more = (self._try(f"{path}&page={page}") or {}).get("jobs") or []
-                        if not more:
-                            break
-                        jobs.extend(more)
-                    if run.get("status") in ACTIVE:
-                        complete = complete and isinstance(response.get("jobs"), list) and len({j.get("id") for j in jobs}) >= expected
-                out["jobs"][run["id"]] = jobs
-            elif before is not None:
-                out["jobs"][run["id"]] = before
-            if pr_build and run.get("status") in ACTIVE:
-                for job in out["jobs"].get(run["id"], []):
-                    if job.get("name") != storemod.PR_BUILD or job.get("status") != "queued" or job.get("runner_name"):
-                        continue
-                    if job.get("run_attempt", run.get("run_attempt", 1)) == run.get("run_attempt", 1):
-                        if not isinstance(job.get("id"), int):
-                            complete = False
-                            continue
-                        queued[job["id"]] = storemod.ts(job.get("created_at"))
-        out["pr_build_queue"] = {"times": list(queued.values()), "at": time.time()} if complete else None
+                path = f"repos/{repo}/actions/runs?status={status}&per_page=100"
+                batch, finished = self._action_pages(repo, path, "workflow_runs", 100, out)
+                observed.update((r["id"], r) for r in batch)
+                complete = complete and finished
+            if not complete:
+                out.setdefault("error", f"{repo}: GitHub did not return all active runs")
+        runs = dict(observed)
+        if not complete:
+            runs.update((rid, r) for rid, r in previous.items() if rid not in runs and r.get("status") in ACTIVE)
+        out["runs"] = list(runs.values())
+        out["partial_jobs"].intersection_update((rid, r.get("run_attempt") or 1) for rid, r in runs.items())
+        jobs = {}
+        for rid, run in runs.items():
+            old = previous.get(rid, {})
+            attempt = run.get("run_attempt") or 1
+            same_attempt = (old.get("run_attempt") or 1) == attempt
+            before = out["jobs"].get(rid) if same_attempt else None
+            if before is not None:
+                jobs[rid] = before
+            if rid not in observed:
+                continue
+            key = (rid, attempt)
+            # A PR build seen finished for the first time (or on a new attempt) is read once, so its wait is recorded.
+            newly_finished = _is_pr_build(run) and run.get("conclusion") in ("success", "failure") and (
+                before is None or old.get("status") != "completed")
+            if (newly_finished or run.get("status") in ACTIVE or old.get("status") in ACTIVE or key in out["partial_jobs"]
+                    or any(j.get("status") in ACTIVE for j in before or [])):
+                path = f"repos/{repo}/actions/runs/{rid}/jobs?per_page=30"
+                batch, finished = self._action_pages(repo, path, "jobs", 30, out)
+                # /jobs defaults to the latest attempt, which may advance during this poll.
+                if any((j.get("run_attempt") or attempt) > attempt for j in batch):
+                    finished = False
+                    out.setdefault("error", f"{repo}: run {rid} changed attempts during its job refresh")
+                batch = [j for j in batch if (j.get("run_attempt") or attempt) == attempt]
+                if finished:
+                    jobs[rid] = batch
+                    out["partial_jobs"].discard(key)
+                else:
+                    out["partial_jobs"].add(key)
+                    out.setdefault("error", f"{repo}: GitHub did not return all jobs for run {rid}")
+                    if batch:
+                        received = {j.get("id") for j in batch}
+                        jobs[rid] = batch + [j for j in before or [] if j.get("id") not in received]
+        out["jobs"] = jobs
+        # Queued PR compile jobs, only when every active run and every active PR build's jobs were read in full:
+        # a partial read must not report a shorter line than the real one.
+        queued, queue_complete = {}, complete
+        for rid, run in runs.items():
+            if not _is_pr_build(run) or run.get("status") not in ACTIVE:
+                continue
+            attempt = run.get("run_attempt") or 1
+            if rid not in observed or (rid, attempt) in out["partial_jobs"] or rid not in jobs:
+                queue_complete = False
+                continue
+            for job in jobs[rid]:
+                if job.get("name") != storemod.PR_BUILD or job.get("status") != "queued" or job.get("runner_name"):
+                    continue
+                if not isinstance(job.get("id"), int):
+                    queue_complete = False
+                    continue
+                queued[job["id"]] = storemod.ts(job.get("created_at"))
+        out["pr_build_queue"] = {"times": list(queued.values()), "at": time.time()} if queue_complete else None
+
+    def _read_repo(self, repo: str, prs: list, out: dict) -> None:
+        self._read_actions(repo, out)
+        runs = out["runs"]
         self._read_holder_times(repo, runs, out["jobs"])
         for run in runs:
             # A cancelled run in the last day: who or what cancelled it, from its job's annotations, asked once.
+            if (run["id"], run.get("run_attempt") or 1) in out["partial_jobs"]:
+                continue
             if run.get("conclusion") == "cancelled" and (repo, run["id"]) not in self.cancels and _age(run.get("updated_at")) < 86400:
                 jobs = out["jobs"].get(run["id"])
                 if jobs is None:
@@ -904,17 +1013,20 @@ class DevWatch:
                 notes = self._try(f"repos/{repo}/check-runs/{job['id']}/annotations?per_page=20") or [] if job and job.get("id") else []
                 how, who = rules.cancel_reason(notes)
                 self.cancels[(repo, run["id"])] = {"how": how, "who": who}
+        checked = set()
         for pr in prs:
             sha = (pr.get("head") or {}).get("sha")
-            if not sha or (repo, sha) in out["checks"]:
+            if not sha or sha in checked:
                 continue
             # A rerun can add a check to the same commit. Revalidate each open head once per poll using GitHub's ETag.
-            out["checks"][(repo, sha)] = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
-            if not out["checks"][(repo, sha)]:
+            checks = (self._try(f"repos/{repo}/commits/{sha}/check-runs?per_page=50") or {}).get("check_runs") or []
+            if not checks:
                 # A commit pushed with a workflow's token starts no check run; the job posts its result as a commit status
                 # instead (LifeShare's PR check on generated content). Without this such a PR looked unchecked, not failed.
-                out["checks"][(repo, sha)] = self._statuses(repo, sha)
-            for c in out["checks"][(repo, sha)]:
+                checks = self._statuses(repo, sha)
+            out["checks"][(repo, sha)] = checks
+            checked.add(sha)
+            for c in checks:
                 # A failed check's annotations, once per check run (they never change): "No result" = needs a re-run.
                 if c.get("conclusion") in FAILED and c.get("id") and c["id"] not in self.no_result \
                         and (c.get("output") or {}).get("annotations_count"):
@@ -931,7 +1043,9 @@ class DevWatch:
                     step = next((st.get("name") for st in j.get("steps") or [] if st.get("conclusion") in FAILED), "")
                     self.fail_jobs[c["id"]] = {"step": _text(step, 120), "runner": _text(j.get("runner_name"), 80)}
         # Pushes to agent branches (claude/..., codex/...): what the Agents card shows before a PR exists. One call, ETag.
-        for e in self._try(f"repos/{repo}/events?per_page=100") or []:
+        events = self._try(f"repos/{repo}/events?per_page=100") or []
+        out["pushes"] = []
+        for e in events:
             if not isinstance(e, dict) or e.get("type") != "PushEvent":
                 continue
             ref = str((e.get("payload") or {}).get("ref") or "")
@@ -940,7 +1054,9 @@ class DevWatch:
                 out["pushes"].append({"branch": _text(branch, 120), "at": _text(e.get("created_at"), 30),
                                       "actor": _text((e.get("actor") or {}).get("login"), 60)})
         # Agent branches whose PR was merged or closed: their work is done, so they leave the Agents card.
-        for p in self._try(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50") or []:
+        closed = self._try(f"repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=50") or []
+        out["closed"], out["merged"] = [], []
+        for p in closed:
             branch = str((p.get("head") or {}).get("ref") or "")
             if isinstance(p, dict) and p.get("closed_at") and _agent_of(branch, ""):
                 out["closed"].append({"branch": _text(branch, 120), "at": _text(p.get("closed_at"), 30), "number": p.get("number")})
@@ -949,9 +1065,8 @@ class DevWatch:
             if isinstance(p, dict) and p.get("merged_at") and _age(p["merged_at"]) < pipeline.MERGED_HOURS * 3600:
                 out["merged"].append({k: p.get(k) for k in ("number", "title", "html_url", "merged_at", "base", "head", "labels")})
         # Releases: the last step of a change's road. One call, ETag; only asked while something merged recently.
-        if out["merged"]:
-            out["releases"] = [r for r in self._try(f"repos/{repo}/releases?per_page=5") or []
-                               if isinstance(r, dict) and not r.get("draft")]
+        releases = self._try(f"repos/{repo}/releases?per_page=5") if out["merged"] else []
+        out["releases"] = [r for r in releases or [] if isinstance(r, dict) and not r.get("draft")]
         issues = self._try(f"repos/{repo}/issues?state=open&sort=updated&direction=desc&per_page=50") or []
         out["issues"] = [i for i in issues if "pull_request" not in i]
         week = time.time() - 7 * 86400
@@ -960,57 +1075,82 @@ class DevWatch:
                  | set(self.bases_conf.get(repo.lower(), []))) - {""}
         out["bases"] = {b: info for b in sorted(names)[:8] if (info := self._read_base(repo, b)) is not None}
         self._read_status_issue(repo)
-        return out
+
+    def _base_get(self, path, **kwargs):
+        try:
+            return self._try(path, **kwargs)
+        except GitHubError as exc:
+            self.log(f"live: incomplete branch health while reading {path}: {exc}")
+            return None
+
+    def _base_pages(self, repo, sha, endpoint, field):
+        """Read check runs or combined statuses pinned to the tip SHA. Never certify a truncated collection."""
+        rows = []
+        ids = set()
+        path = f"repos/{repo}/commits/{sha}/{endpoint}?per_page=100"
+        for page in range(1, 11):
+            data = self._base_get(path if page == 1 else f"{path}&page={page}")
+            if not isinstance(data, dict) or not isinstance(data.get(field), list):
+                return rows, False
+            if field == "statuses" and data.get("sha") != sha:
+                return rows, False
+            batch = data[field]
+            if any(not isinstance(c, dict) for c in batch):
+                return rows, False
+            if field == "check_runs" and any(c.get("head_sha") != sha for c in batch):
+                return rows, False
+            batch_ids = [c["id"] for c in batch if c.get("id") is not None]
+            if ids.intersection(batch_ids) or len(batch_ids) != len(set(batch_ids)):
+                return rows, False
+            ids.update(batch_ids)
+            rows.extend(batch)
+            total = data.get("total_count")
+            if len(batch) < 100 or (total is not None and len(rows) >= total):
+                return rows, total is None or len(rows) == total
+        return rows, False
 
     def _read_base(self, repo: str, branch: str) -> dict | None:
-        """A base branch's newest commit: its checks go to the store (rules.base_health reads the streak), the names of
-        the tests a failed one reports are kept, and the branch's required checks are asked every 10 minutes."""
+        """Resolve the tip once. Both sources and every page must describe that exact revision."""
         ref = urllib.parse.quote(branch, safe="")
-        checks = self._try(f"repos/{repo}/commits/{ref}/check-runs?per_page=100", missing_ref=_MISSING_REF)
-        if checks is _MISSING_REF:
+        head = self._base_get(f"repos/{repo}/branches/{ref}", missing_ref=_MISSING_REF)
+        if head is _MISSING_REF or (head and head.get("name", branch) != branch):
             return None
-        cr = (checks or {}).get("check_runs") or []
-        all_checks = isinstance(checks, dict) and checks.get("total_count", len(cr)) <= len(cr)
-        st = None
-        if not cr:
-            st = self._try(f"repos/{repo}/commits/{ref}/status?per_page=100", missing_ref=_MISSING_REF) or {}
-            if st is _MISSING_REF:
-                return None
-            # Only statuses that link to where they ran: an old local runner (LifeShare's retired Buildlane task) kept
-            # posting failures with no link, from no workflow anyone can open or re-run, and turned main red (11-19).
-            cr = [dict(c, head_sha=st.get("sha")) for c in self._statuses(repo, ref, st) if c.get("html_url")] if st.get("sha") else []
-        sha = str((cr[0] if cr else {}).get("head_sha") or (st or {}).get("sha") or "")
-        if sha:
-            if all_checks:
-                self._reconcile_base_statuses(repo, branch, sha, cr, st)
-            self.store.base_checks(repo, branch, sha, cr)
+        sha = ((head or {}).get("commit") or {}).get("sha")
+        if not sha:
+            if branch in self.bases.get(repo, {}):
+                return {"sha": "", "checks": [], "required": [], "reason": "GitHub could not confirm the current branch commit."}
+            return None
+        ruleset = self._base_get(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600)
+        classic = (head.get("protection") or {}).get("required_status_checks")
+        if classic is None and head.get("protected") is not False:
+            classic = self._base_get(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=3600)
+        sources = rules.required_sources(ruleset, classic)
+        known_rules = head.get("protected") is False or (isinstance(classic, dict) and isinstance(ruleset, list))
+        runs, full_runs = self._base_pages(repo, sha, "check-runs", "check_runs")
+        statuses, full_statuses = self._base_pages(repo, sha, "status", "statuses")
+        # The retired Buildlane runner emitted this exact description with its private run-ID range.
+        # Its optional target_url could make an obsolete result look like a live check of the same name.
+        statuses = [st for st in statuses if not RETIRED_STATUS.fullmatch(str(st.get("description") or ""))]
+        status_rows = self._statuses(repo, sha, {"statuses": statuses})
+        checks = _base_evidence(runs, status_rows, sources)
+        reason = ""
+        if not known_rules:
+            reason = "GitHub has not returned the full set of branch rules."
+        elif not (full_runs and full_statuses):
+            reason = "GitHub has not returned all check results for this commit."
+        if not reason:
+            self.store.base_checks(repo, branch, sha, checks, complete=True, required_sources=sources)
         notes = {}
-        for c in cr:
+        for c in checks:
             if c.get("conclusion") in FAILED and c.get("source") != "status" and isinstance(c.get("id"), int) \
                     and (c.get("output") or {}).get("annotations_count"):
                 if c["id"] not in self.notes:
-                    found = self._try(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50") or []
-                    self.notes[c["id"]] = rules.test_names(found)
-                notes[c.get("name")] = self.notes[c["id"]]
-        asked, req = self._required.get((repo, branch), (0.0, ()))
-        if time.time() - asked > 600:
-            req = rules.required_checks(self._try(f"repos/{repo}/rules/branches/{ref}", quiet_for=3600) or [],
-                                        self._try(f"repos/{repo}/branches/{ref}/protection/required_status_checks", quiet_for=6 * 3600) or {})
-            self._required[(repo, branch)] = (time.time(), tuple(req))
-        return {"checking": any(c.get("status") != "completed" for c in cr), "required": list(req), "notes": notes}
-
-    def _reconcile_base_statuses(self, repo, branch, sha, checks, status_response):
-        """Drop older observations only when GitHub identifies their names as unlinked statuses on this exact commit."""
-        saved = self.store.query("SELECT name FROM base_checks WHERE repo=? AND branch=? AND sha=?", (repo, branch, sha))
-        unexplained = {row[0] for row in saved} - {str(c.get("name") or "")[:120] for c in checks}
-        if not unexplained:
-            return
-        if status_response is None:
-            status_response = self._try(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}
-        if status_response.get("sha") == sha:
-            unlinked = {str(st.get("context") or "")[:120] for st in status_response.get("statuses") or []
-                        if not st.get("target_url")}
-            self.store.forget_base_checks(repo, branch, sha, unexplained & unlinked)
+                    found = self._base_get(f"repos/{repo}/check-runs/{c['id']}/annotations?per_page=50")
+                    if found is not None:
+                        self.notes[c["id"]] = rules.test_names(found)
+                notes[c.get("name")] = self.notes.get(c["id"], [])
+        return {"sha": sha, "checks": checks, "required": list(sources), "sources": sources, "known_rules": known_rules, "reason": reason,
+                "checking": any(c.get("status") != "completed" for c in checks), "notes": notes}
 
     def _read_status_issue(self, repo: str) -> None:
         """Cloud agents' heartbeats: comments on the repository's status issue edited in the last day. `since` is
@@ -1320,8 +1460,6 @@ class DevWatch:
     def _record(self, got: dict) -> None:
         """Keep what this poll saw (store.py): merged PRs, finished runs, started and finished jobs."""
         for repo, g in got.items():
-            if g.get("error"):
-                continue
             self.store.merges(repo, g.get("merged_all") or [], _agent_of)
             self.store.runs(repo, g.get("runs") or [])
             for run in g.get("runs") or []:
@@ -1461,10 +1599,14 @@ class DevWatch:
                 try:
                     h = rules.base_health(self.store, repo, branch, required=info.get("required"), prs=prs, issues=issues,
                                           notes=info.get("notes"), checking=info.get("checking"), fix_labels=self.fix_labels,
+                                          tip_sha=info.get("sha"), tip_checks=info.get("checks"), required_sources=info.get("sources"),
                                           red_issue_labels=self.red_issue_labels, now=at)
                 except Exception as e:      # one branch's history never costs the feed
                     self.log(f"live: base health {repo} {branch}: {type(e).__name__}: {e}")
                     h = None
+                if info.get("reason") and (not h or h["state"] != "red" or not (info.get("known_rules") or info["required"])):
+                    h = {"repo": repo, "branch": branch, "sha": info["sha"][:12], "state": "checking", "checking": True,
+                         "required": bool(info["required"]), "waiting": (h or {}).get("waiting", []), "reason": info["reason"]}
                 if h:
                     out.append(h)
         out.sort(key=lambda h: (h["state"] != "red", -(h.get("for") or 0), h["repo"], h["branch"]))

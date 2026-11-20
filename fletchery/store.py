@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA = 4
+SCHEMA = 6
 PR_BUILD = "PR check / Compile and test"
 KEEP_DAYS = 90
 
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_at ON jobs (started);
 CREATE TABLE IF NOT EXISTS base_checks (
   repo TEXT NOT NULL, branch TEXT NOT NULL, sha TEXT NOT NULL, name TEXT NOT NULL, result TEXT, at REAL,
-  PRIMARY KEY (repo, branch, sha, name));
+  sources TEXT NOT NULL DEFAULT '', PRIMARY KEY (repo, branch, sha, name));
 CREATE INDEX IF NOT EXISTS base_checks_at ON base_checks (repo, branch, at);
 CREATE TABLE IF NOT EXISTS disks (machine TEXT NOT NULL, drive TEXT NOT NULL, at REAL NOT NULL, free_gb REAL,
   PRIMARY KEY (machine, drive, at));
@@ -76,6 +76,14 @@ def result_of(conclusion) -> str:
     return RESULT.get(str(conclusion or ""), "")
 
 
+def base_result(check) -> str:
+    """Keep non-passing terminal results distinct when evaluating a required check."""
+    conclusion = check.get("conclusion")
+    if check.get("status") != "completed":
+        return ""
+    return conclusion if conclusion in ("neutral", "stale") else result_of(conclusion) or "unknown"
+
+
 class Store:
     def __init__(self, path=None, keep_days: float = KEEP_DAYS, log=None):
         """`path` None keeps everything in memory (tests, or a backend with no state folder)."""
@@ -100,6 +108,8 @@ class Store:
                 self.db.execute("""UPDATE jobs SET pr_build_created=created WHERE name=?
                     AND EXISTS (SELECT 1 FROM runs r WHERE r.repo=jobs.repo AND r.id=jobs.run
                                 AND r.event='pull_request' AND r.created<>jobs.created)""", (PR_BUILD,))
+            if "sources" not in {r[1] for r in self.db.execute("PRAGMA table_info(base_checks)")}:
+                self.db.execute("ALTER TABLE base_checks ADD COLUMN sources TEXT NOT NULL DEFAULT ''")
             self.db.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)", (str(SCHEMA),))
             self.db.commit()
         self._pruned = 0.0
@@ -157,7 +167,10 @@ class Store:
         """Jobs that started (queue wait = started - created) or finished."""
         created_run = ts((run or {}).get("created_at"))
         pr_build = (run or {}).get("event") == "pull_request"
-        self._write("INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+        # Named columns: a history file a newer build wrote may have more (2026-11-20: #258's pr_build_created made
+        # every write fail with "table jobs has 12 columns but 11 values were supplied" after main was installed).
+        self._write("INSERT OR REPLACE INTO jobs (repo, id, run, name, workflow, runner, labels, result, created, started, "
+                    "finished, pr_build_created) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
             (repo, int(j["id"]), int((run or {}).get("id") or j.get("run_id") or 0), str(j.get("name") or "")[:120],
              str((run or {}).get("name") or j.get("workflow_name") or "")[:120], str(j.get("runner_name") or "")[:80],
              ",".join(str(x) for x in (j.get("labels") or []) if isinstance(x, str))[:300],
@@ -167,16 +180,33 @@ class Store:
             for j in jobs if isinstance(j, dict) and isinstance(j.get("id"), int) and j.get("started_at")
             and j.get("status") in ("in_progress", "completed")))
 
-    def base_checks(self, repo: str, branch: str, sha: str, checks: list) -> None:
-        """The finished checks on a base branch's commit (base health reads the streak)."""
-        self._write("INSERT OR REPLACE INTO base_checks VALUES (?,?,?,?,?,?)", (
-            (repo, branch, sha, str(c.get("name") or "")[:120], result_of(c.get("conclusion")),
-             ts(c.get("completed_at")) or time.time())
-            for c in checks if isinstance(c, dict) and c.get("status") == "completed" and c.get("name")))
-
-    def forget_base_checks(self, repo: str, branch: str, sha: str, names) -> None:
-        self._write("DELETE FROM base_checks WHERE repo=? AND branch=? AND sha=? AND name=?",
-                    ((repo, branch, sha, name) for name in names))
+    def base_checks(self, repo: str, branch: str, sha: str, checks: list, *, complete=False, required_sources=None) -> None:
+        """Record the selected current attempts. Only a complete observation can retire absent names on this SHA."""
+        if not sha:
+            return
+        key = (repo, branch, sha)
+        sources = required_sources or {}
+        with self._lock, self.db:
+            saved = {n: (r, t) for n, r, t in self.db.execute(
+                "SELECT name, result, at FROM base_checks WHERE repo=? AND branch=? AND sha=?", key)}
+            seen = set()
+            rows = []
+            for c in checks:
+                if not isinstance(c, dict) or not c.get("name") or (c.get("head_sha") and c["head_sha"] != sha):
+                    continue
+                name = str(c["name"])
+                result = base_result(c)
+                old_result, old_at = saved.get(name, (None, None))
+                at = ts(c.get("completed_at")) or ts(c.get("started_at")) or ts(c.get("created_at"))
+                at = at or (old_at if old_result == result else None) or time.time()
+                pins = ",".join(str(i) for i in sorted(i for i in sources.get(name, ()) if i is not None))
+                rows.append((*key, name, result, at, pins))
+                seen.add(name)
+            self.db.executemany("INSERT OR REPLACE INTO base_checks (repo, branch, sha, name, result, at, sources) "
+                                "VALUES (?,?,?,?,?,?,?)", rows)
+            if complete:
+                self.db.executemany("DELETE FROM base_checks WHERE repo=? AND branch=? AND sha=? AND name=?",
+                                    ((*key, name) for name in saved.keys() - seen))
 
     def disk(self, machine: str, drive: str, free_gb: float, at: float | None = None) -> None:
         """One disk reading; at most one a minute is kept per drive."""

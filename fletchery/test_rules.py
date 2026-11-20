@@ -63,6 +63,53 @@ class BaseHealthTest(unittest.TestCase):
         self.assertTrue(h["required"])
         self.assertEqual(self.health(required=["Cheap checks"])["state"], "green")
 
+    def test_all_required_pass_on_the_exact_tip(self):
+        required = ["Cheap checks", "Compile and test"]
+        tip = "r3"
+        cheap = dict(check(required[0], "success", 5), head_sha=tip)
+        foreign_compile = dict(check(required[1], "success", 4), head_sha="r2")
+        def verdict(checks):
+            return self.health(tip_sha=tip, tip_checks=checks, required=required)
+        self.assertEqual(verdict([cheap, foreign_compile])["waiting"], [required[1]])
+        for conclusion in ("skipped", "neutral", "cancelled", "stale", None):
+            with self.subTest(conclusion=conclusion):
+                compile_check = dict(check(required[1], conclusion, 3), status="completed" if conclusion else "in_progress")
+                h = verdict([cheap, compile_check])
+                self.assertEqual((h["sha"], h["state"], h["waiting"]), (tip, "checking", [required[1]]))
+                self.assertNotIn("first_bad", h)
+        self.assertEqual(verdict([cheap, check(required[1], "success", 1)])["state"], "green")
+        self.assertEqual(verdict([])["waiting"], required)
+        self.assertIsNone(self.health(tip_sha=tip, tip_checks=[]))
+
+    def test_current_attempt_ignores_old_failures_on_same_commit(self):
+        h = self.health(tip_sha="r2", tip_checks=[check("Cheap checks", "success", 1)],
+                        required=["Cheap checks", "Compile and test"])
+        self.assertEqual((h["state"], h["waiting"]), ("checking", ["Compile and test"]))
+        self.assertNotIn("failing", h)
+
+    def test_unprotected_terminal_checks_without_a_verdict_leave_no_notice(self):
+        done = [check("Build", "cancelled", 6), check("Lint", "skipped", 4), check("Other", None, 2)]
+        self.assertIsNone(self.health(tip_sha="r2", tip_checks=done))
+        h = self.health(tip_sha="r2", tip_checks=done + [{"name": "Test", "status": "in_progress"}])
+        self.assertEqual((h["state"], h["required"], h["waiting"]), ("checking", False, ["Test"]))
+
+    def test_current_failure_and_unfinished_required_check_keep_first_bad_merge(self):
+        self.s.base_checks(REPO, BASE, "g1", [check("Compile and test", "success", 1)])  # old commit reran after r2
+        h = self.health(tip_sha="r2", tip_checks=[check("Compile and test", "failure", 6)],
+                        required=["Compile and test", "Cheap checks"])
+        self.assertEqual((h["state"], h["first_bad"], h["last_green"], h["since"]), ("red", "r1", "g1", at(240)))
+        self.assertEqual(h["waiting"], ["Cheap checks"])
+        self.assertEqual([p["number"] for p in h["suspects"] if p["first_bad"]], [2])
+
+    def test_old_unverified_check_cannot_extend_a_pinned_app_incident(self):
+        pins = {"Compile and test": {42}}
+        live = [check("Compile and test", "failure", 2)]
+        h = self.health(tip_sha="r2", tip_checks=live, required=list(pins), required_sources=pins)
+        self.assertEqual(h["first_bad"], "r2")
+        self.s.base_checks(REPO, BASE, "r1", [check("Compile and test", "failure", 240)], required_sources=pins)
+        h = self.health(tip_sha="r2", tip_checks=live, required=list(pins), required_sources=pins)
+        self.assertEqual((h["first_bad"], h["since"]), ("r1", at(240)))
+
     def test_fix_in_line_held_red_and_issue(self):
         issues = [{"number": 50, "title": "Test-Staging is red", "url": "u", "labels": ["tip-red"]},
                   {"number": 51, "title": "main is red", "labels": ["tip-red"]},
@@ -116,6 +163,13 @@ class HelpersTest(unittest.TestCase):
         prot = {"contexts": ["PR check / Cheap checks", "legacy"], "checks": [{"context": "legacy"}]}
         self.assertEqual(rules.required_checks(branch_rules, prot), ["PR check / Cheap checks", "PR check / Compile and test", "legacy"])
         self.assertEqual(rules.required_checks(None, None), [])
+
+    def test_required_context_producers_combine_classic_and_ruleset_pins(self):
+        contexts = [{"context": "compile", "integration_id": 77}, {"context": "test", "integration_id": -1}]
+        branch_rules = [{"type": "required_status_checks", "parameters": {"required_status_checks": contexts}}]
+        protection = {"contexts": ["compile", "lint"], "checks": [{"context": "compile", "app_id": 88},
+                                                                  {"context": "lint", "app_id": 33}]}
+        self.assertEqual(rules.required_sources(branch_rules, protection), {"compile": {77, 88}, "test": {None}, "lint": {33}})
 
 
 class CausesTest(unittest.TestCase):

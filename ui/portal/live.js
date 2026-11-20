@@ -145,20 +145,31 @@
       el('div', {class: 'axis', 'aria-hidden': 'true'}, el('span', {text: '24 h ago'}), el('span', {text: 'now'})),
       lastBits.length ? el('p', {class: 'bases', text: 'Last merge into ' + lastBits.join(' · ')}) : null);
   }
-  // ---- Base health: a red base branch (rules.py), on top of every tab ----
+  // ---- Base health on top of every tab ----
   const CHK = {running: 'checks running', queued: 'checks queued', passed: 'checks pass', failed: 'checks failing', rerun: 'needs a re-run', none: 'no checks yet'};
   function drawBases(full) {
     const box = $('baseBanner');
-    const red = (full.bases || []).filter(h => h.state === 'red');
-    box.hidden = !red.length;
-    box.replaceChildren(...red.map(h => {
+    const branches = (full.bases || []).filter(h => h.state === 'red' || h.state === 'checking');
+    box.hidden = !branches.length;
+    box.setAttribute('role', branches.some(h => h.state === 'red') ? 'alert' : 'status');
+    box.replaceChildren(...branches.map(h => {
       const name = (full.repos || []).length > 1 ? (h.repo.split('/')[1] || h.repo) + ' ' + h.branch : h.branch;
+      const waiting = (h.waiting || []).join(' · ');
+      const pendingChecks = waiting ? el('p', {class: 'base-waiting'}, el('b', {text: 'Awaiting a passing result: '}), waiting) : null;
+      if (h.state === 'checking') {
+        const commit = /^[0-9a-f]{7,40}$/i.test(h.sha || '') ? a('https://github.com/' + h.repo + '/commit/' + h.sha, '', h.sha.slice(0, 7)) : null;
+        const heading = name + (waiting ? (h.required ? ' is awaiting required checks' : ' has checks in progress') : ' · check status incomplete');
+        return el('section', {class: 'base-pending', 'aria-label': heading},
+          el('h2', {text: heading}), pendingChecks, h.reason ? el('p', {text: h.reason}) : null,
+          commit ? el('p', {class: 'sub'}, 'Commit ', commit) : null);
+      }
       const tests = f => f.tests && f.tests.length ? ' (' + f.tests.join(', ') + ')' : '';
       const sus = h.suspects || [], first = sus.find(x => x.first_bad) || sus[sus.length - 1];
       const prLink = x => a('https://github.com/' + h.repo + '/pull/' + x.number, '', '#' + x.number);
       return el('section', {class: 'base-red', 'aria-label': name + ' is red'},
-        el('h2', null, name + ' is red · for ', since(h.since), h.checking ? ' · a new commit is being checked' : ''),
+        el('h2', null, name + ' is red · for ', since(h.since), h.checking && !waiting ? ' · a new commit is being checked' : ''),
         el('p', null, el('b', {text: 'Failing: '}), (h.failing || []).map(f => f.name + tests(f)).join(' · ') || 'a check'),
+        pendingChecks,
         first ? el('p', null, el('b', {text: first.first_bad ? 'First bad: ' : 'Merged before the failure: '}), prLink(first), ' ' + (first.title || '') + (first.agent ? ' (' + first.agent + ')' : ''),
           sus.length > 1 ? [' · also merged since the last green: ', ...sep(sus.filter(x => x !== first).map(prLink))] : '') : null,
         el('p', null, el('b', {text: 'Fix in line: '}), (h.fixes || []).length ? sep(h.fixes.map(f => [a(f.url, '', '#' + f.number), ' ' + (f.title || '') +

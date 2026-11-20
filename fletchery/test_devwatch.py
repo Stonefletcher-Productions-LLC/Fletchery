@@ -2,6 +2,7 @@
 free 304s, and the /v1/report route. No real GitHub: a fake answers by path, and a local server stands in for ETags."""
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -35,10 +36,15 @@ class FakeGitHub:
     def get(self, path):
         self.asked.append(path)
         for prefix, answer in self.answers.items():
+            # A run-list response cannot answer an individual run's jobs endpoint.
+            if prefix.endswith("/actions/runs") and path.startswith(prefix + "/"):
+                continue
             if path.startswith(prefix):
                 if isinstance(answer, Exception):
                     raise answer
                 return answer
+        if re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/\d+/jobs", path.partition("?")[0]):
+            return {"jobs": []}
         raise devwatch.GitHubError(404, "Not Found")
 
 
@@ -77,6 +83,11 @@ def world(**over):
     }
     answers.update(over)
     return answers
+
+
+def base_branch(sha, *, required=None):
+    return {"commit": {"sha": sha}, "protected": bool(required),
+            "protection": {"required_status_checks": {"checks": required or []}}}
 
 
 class Feed(unittest.TestCase):
@@ -140,7 +151,8 @@ class Feed(unittest.TestCase):
         self.assertEqual(len(w.pr_build_queues[REPO]["times"]), 1)
         del w.gh.answers[f"repos/{REPO}/commits/"]
         w.gh.answers[path + "&page=2"] = devwatch.GitHubError(403, "forbidden")
-        w.poll()
+        with self.assertRaises(devwatch.GitHubError):  # an incomplete job list is reported as a feed error
+            w.poll()
         self.assertIsNone(w.pr_build_queues[REPO])
 
     def test_inner_phase_is_for_the_current_run_attempt_and_machine(self):
@@ -251,7 +263,9 @@ class Feed(unittest.TestCase):
     def test_red_base_branch_is_a_banner_and_one_blocker(self):
         main = "c" * 40
         w = self.watch_first({
-            f"repos/{REPO}/commits/main/check-runs": {"check_runs": [
+            f"repos/{REPO}/branches/main": base_branch(main),
+            f"repos/{REPO}/commits/{main}/status": {"sha": main, "statuses": []},
+            f"repos/{REPO}/commits/{main}/check-runs": {"check_runs": [
                 {"id": 70, "name": "Compile and test", "status": "completed", "conclusion": "failure", "head_sha": main,
                  "completed_at": ago(50), "output": {"annotations_count": 1}}]},
             f"repos/{REPO}/check-runs/70/annotations": [{"annotation_level": "failure", "title": "LifeShare.Town.Fishing"}],
@@ -269,20 +283,78 @@ class Feed(unittest.TestCase):
         w.poll()                                    # the same commit again changes nothing
         self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks"), [(1,)])
 
+    def test_protected_tip_combines_check_runs_and_statuses_from_the_required_producers(self):
+        sha = "c" * 40
+        root = f"repos/{REPO}/commits/{sha}"
+        branch = f"repos/{REPO}/branches/main"
+        gate = {"id": 10, "name": "Build", "app": {"id": 7}, "head_sha": sha, "status": "completed", "conclusion": "success"}
+        legacy = {"id": 20, "context": "Assets", "state": "failure", "description": "Failed on the build PC (run 900000000123)",
+                  "target_url": "https://example.org/retired"}
+        w = self.watch_first({
+            branch: base_branch(sha, required=[{"context": "Build", "app_id": 7}, {"context": "Assets"}]),
+            f"repos/{REPO}/rules/branches/main": [],
+            root + "/check-runs": {"check_runs": [gate, dict(gate, id=11, app={"id": 8}, conclusion="failure")]},
+            root + "/status": {"sha": sha, "statuses": [legacy]},
+        })
+
+        def current():
+            return w.snapshot()["bases"][0]
+
+        self.assertEqual((current()["state"], current()["waiting"]), ("checking", ["Assets"]))
+        # A current required status is valid even without a link. The retired publisher had a link.
+        status = {"id": 21, "context": "Assets", "state": "success"}
+        w.gh.answers[root + "/status"] = {"sha": sha, "statuses": [status, legacy]}
+        w.poll()
+        self.assertEqual(current()["state"], "green")
+        w.gh.answers[root + "/status"] = {"sha": sha, "statuses": [dict(status, state="failure")]}
+        w.poll()
+        self.assertEqual([f["name"] for f in current()["failing"]], ["Assets"])
+        # A branch advance cannot reuse either the saved green verdict or the old status endpoint's response.
+        new = "d" * 40
+        w.gh.answers[branch] = base_branch(new, required=[{"context": "Build", "app_id": 7}, {"context": "Assets"}])
+        w.gh.answers[f"repos/{REPO}/commits/{new}/check-runs"] = {"check_runs": [dict(gate, head_sha=new)]}
+        w.gh.answers[f"repos/{REPO}/commits/{new}/status"] = {"sha": sha, "statuses": [status]}
+        w.poll()
+        self.assertEqual((current()["sha"], current()["state"], current()["waiting"]), (new[:12], "checking", ["Assets"]))
+        self.assertIn("all check results", current()["reason"])
+
+    def test_protected_tip_waits_on_incomplete_pages_rules_and_unverified_app(self):
+        sha = "e" * 40
+        root = f"repos/{REPO}/commits/{sha}"
+        branch_rules = f"repos/{REPO}/rules/branches/main"
+        gate = {"id": 5, "name": "Build", "status": "completed", "conclusion": "success", "app": {"id": 8}, "head_sha": sha}
+        w = self.watch_first({f"repos/{REPO}/branches/main": base_branch(sha, required=[{"context": "Build", "app_id": 7}]),
+                              branch_rules: [], root + "/check-runs": {"check_runs": [gate]},
+                              root + "/status": {"sha": sha, "statuses": [{"id": 6, "context": "Build", "state": "success"}]}})
+        self.assertEqual(w.snapshot()["bases"][0]["waiting"], ["Build"])
+        w.gh.answers[root + "/check-runs"] = {"total_count": 2, "check_runs": [dict(gate, app={"id": 7})]}
+        w.poll()
+        self.assertEqual(w.snapshot()["bases"][0]["state"], "checking")
+        w.gh.answers[root + "/check-runs"]["total_count"] = 1
+        w.gh.answers[branch_rules] = devwatch.GitHubError(0, "timed out")
+        w.poll()
+        self.assertIn("branch rules", w.snapshot()["bases"][0]["reason"])
+        self.assertEqual(w.snapshot()["bases"][0]["state"], "checking")
+        w.gh.answers[branch_rules] = []
+        w.poll()
+        self.assertEqual(w.snapshot()["bases"][0]["state"], "green")
+
     def test_base_ignores_statuses_that_link_nowhere(self):
         # Main with no check runs, only statuses: a retired local runner's failures (no link) do not turn it red;
         # a status that links to its run still counts.
         main = "d" * 40
         legacy = [{"id": 90 + i, "context": name, "state": "failure", "description": "Failed on the build PC (run 9000000001)",
                    "created_at": ago(20), "updated_at": ago(20)} for i, name in enumerate(("Nightly full tests (node)", "preview-receipt", "sync"))]
-        w = self.watch_first({f"repos/{REPO}/commits/main/check-runs": {"check_runs": []},
-                              f"repos/{REPO}/commits/main/status": {"sha": main, "statuses": legacy}})
+        w = self.watch_first({f"repos/{REPO}/branches/main": base_branch(main),
+                              f"repos/{REPO}/commits/{main}/check-runs": {"check_runs": []},
+                              f"repos/{REPO}/commits/{main}/status": {"sha": main, "statuses": legacy}})
         s = w.snapshot()
         self.assertNotIn("red", [b.get("state") for b in s["bases"]])
         self.assertNotIn("base", [b["kind"] for b in s["blockers"]])
         linked = dict(legacy[0], id=99, context="Nightly full", target_url="https://github.com/Acme/Game/actions/runs/77")
-        w = self.watch_first({f"repos/{REPO}/commits/main/check-runs": {"check_runs": []},
-                              f"repos/{REPO}/commits/main/status": {"sha": main, "statuses": legacy + [linked]}})
+        w = self.watch_first({f"repos/{REPO}/branches/main": base_branch(main),
+                              f"repos/{REPO}/commits/{main}/check-runs": {"check_runs": []},
+                              f"repos/{REPO}/commits/{main}/status": {"sha": main, "statuses": legacy + [linked]}})
         base = w.snapshot()["bases"][0]
         self.assertEqual((base["state"], [f["name"] for f in base["failing"]]), ("red", ["Nightly full"]))
 
@@ -294,14 +366,16 @@ class Feed(unittest.TestCase):
         legacy = [dict(check, name=name) for name in names]
         statuses = [{"context": name, "state": "failure", "target_url": "https://example.org/report" if name == "Published report" else None}
                     for name in names]
-        check_path = f"repos/{REPO}/commits/main/check-runs"
+        check_path = f"repos/{REPO}/commits/{sha}/check-runs"
         status_path = f"repos/{REPO}/commits/{sha}/status"
-        w = self.watch_first({check_path: {"total_count": 2, "check_runs": [check]},
+        w = self.watch_first({f"repos/{REPO}/branches/main": base_branch(sha),
+                              check_path: {"total_count": 2, "check_runs": [check]},
                               status_path: {"sha": sha, "statuses": statuses}})
         w.store.base_checks(REPO, "main", sha, legacy)
         w.store.base_checks(REPO, "other", sha, legacy)
         w.poll()  # One of two real checks was returned. The absent one might share an unlinked status name.
-        self.assertEqual({f["name"] for f in w.snapshot()["bases"][0]["failing"]}, set(names))
+        self.assertEqual({f["name"] for f in w.snapshot()["bases"][0]["failing"]}, {nightly, "Published report"})
+        self.assertEqual(w.store.query("SELECT COUNT(*) FROM base_checks WHERE branch='main'"), [(4,)])
         w.gh.answers[check_path]["total_count"] = 1
         w.poll()
         self.assertEqual({f["name"] for f in w.snapshot()["bases"][0]["failing"]}, {nightly, "Published report"})
@@ -309,32 +383,36 @@ class Feed(unittest.TestCase):
 
     def test_a_deleted_base_branch_is_not_a_feed_error(self):
         # The last watched base had a failure in history before it was deleted.
-        path = f"repos/{REPO}/commits/claude%2Fold-stack"
+        path = f"repos/{REPO}/branches/claude%2Fold-stack"
         check = {"name": "Compile", "head_sha": "c" * 40, "status": "completed", "conclusion": "failure", "completed_at": ago(40)}
         merged = {"number": 30, "title": "Stacked", "merged_at": ago(60), "closed_at": ago(60), "base": {"ref": "claude/old-stack"},
                   "head": {"ref": "claude/top"}, "html_url": "https://github.com/Acme/Game/pull/30"}
         w = self.watch_first({f"repos/{REPO}/pulls?state=open": [], f"repos/{REPO}/pulls?state=closed": [merged],
-                              path: {"check_runs": [check]}})
+                              path: base_branch(check["head_sha"]),
+                              f"repos/{REPO}/commits/{check['head_sha']}/check-runs": {"check_runs": [check]},
+                              f"repos/{REPO}/commits/{check['head_sha']}/status": {"sha": check["head_sha"], "statuses": []}})
         self.assertEqual(w.snapshot()["bases"][0]["state"], "red")
-        w.gh.answers[path] = devwatch.GitHubError(422, "No commit found for SHA: claude/old-stack")
+        w.gh.answers[path] = devwatch.GitHubError(404, "Branch not found")
         w.poll()
         self.assertEqual(w.snapshot()["bases"], [])
         w.poll()  # a cached missing ref must also hide the branch
         self.assertEqual(w.error, "")
         self.assertFalse({"base", "feed"} & {b["kind"] for b in w.snapshot()["blockers"]})
-        # A generic permission failure is inconclusive. Preserve the last known check in that case.
+        # An inaccessible branch does not resurrect a failure from the deleted tip.
         w.skip.clear()
         w.gh.answers[path] = devwatch.GitHubError(403, "Forbidden")
         w.poll()
-        self.assertEqual(w.snapshot()["bases"][0]["state"], "red")
+        self.assertNotIn("red", [h["state"] for h in w.snapshot()["bases"]])
 
     def test_base_failure_details_belong_to_the_current_check_run(self):
         def check(cid):
             return {"check_runs": [{"id": cid, "name": "Compile", "status": "completed", "conclusion": "failure",
                                     "head_sha": str(cid) * 40, "completed_at": ago(10), "output": {"annotations_count": 1}}]}
 
-        main_path = f"repos/{REPO}/commits/main/check-runs"
-        w = self.watch_first({main_path: check(1), f"repos/{REPO}/commits/staging/check-runs": check(2),
+        main_path = f"repos/{REPO}/branches/main"
+        w = self.watch_first({main_path: base_branch("1" * 40), f"repos/{REPO}/branches/staging": base_branch("2" * 40),
+                              **{f"repos/{REPO}/commits/{str(i)*40}/check-runs": check(i) for i in (1, 2, 3)},
+                              **{f"repos/{REPO}/commits/{str(i)*40}/status": {"sha": str(i)*40, "statuses": []} for i in (1, 2, 3)},
                               **{f"repos/{REPO}/check-runs/{i}/annotations": [{"annotation_level": "failure", "title": f"Test {i}"}]
                                  for i in (1, 2, 3)}})
         w.bases_conf[REPO.lower()] = ["staging"]
@@ -342,7 +420,7 @@ class Feed(unittest.TestCase):
         def details():
             return {b["branch"]: b["failing"][0]["tests"] for b in w.snapshot()["bases"]}
         self.assertEqual(details(), {"main": ["Test 1"], "staging": ["Test 2"]})
-        w.gh.answers[main_path] = check(3)
+        w.gh.answers[main_path] = base_branch("3" * 40)
         w.poll()
         self.assertEqual(details(), {"main": ["Test 3"], "staging": ["Test 2"]})
 
@@ -350,7 +428,9 @@ class Feed(unittest.TestCase):
         # PR #13 fails the same check as its red base (inherited); PR #12 fails in a setup step (the machine).
         main, sha_ok, sha_bad = "c" * 40, "a" * 40, "b" * 40
         w = self.watch_first({
-            f"repos/{REPO}/commits/main/check-runs": {"check_runs": [
+            f"repos/{REPO}/branches/main": base_branch(main),
+            f"repos/{REPO}/commits/{main}/status": {"sha": main, "statuses": []},
+            f"repos/{REPO}/commits/{main}/check-runs": {"check_runs": [
                 {"id": 70, "name": "Compile and test", "status": "completed", "conclusion": "failure", "head_sha": main, "completed_at": ago(50)}]},
             f"repos/{REPO}/commits/{sha_ok}/check-runs": {"check_runs": [
                 {"id": 81, "name": "Cheap checks", "status": "completed", "conclusion": "failure", "completed_at": ago(9),
@@ -633,15 +713,15 @@ class Feed(unittest.TestCase):
         w.gh.answers = world(**{"user/repos": [{"full_name": other, "owner": {"login": ORG}, "pushed_at": ago(1)}],
                                 f"repos/{other}/pulls?state=open": []})
         started, resume = threading.Event(), threading.Event()
-        read_repo = w._read_repo
+        poll_repo = w._poll_repo
 
-        def pending_details(repo, prs, out):
+        def pending_details(repo, prs):
             started.set()
             if not resume.wait(10):
                 raise RuntimeError("test detail read timed out")
-            return read_repo(repo, prs, out)
+            return poll_repo(repo, prs)
 
-        w._read_repo = pending_details
+        w._poll_repo = pending_details
         worker = threading.Thread(target=w.poll)
         worker.start()
         try:
@@ -962,6 +1042,124 @@ class Feed(unittest.TestCase):
         for text, kind in (("PR check #2290 (GitHub run 1)", "check"), ("Hand merge batch 7", "merging"),
                            ("NavCheck proof for #12", "proof"), ("Build 0.4.5", "building"), ("something", "working")):
             self.assertEqual(devwatch.kind_of(text), kind, text)
+
+
+class PartialRunRefresh(unittest.TestCase):
+    runs = f"repos/{REPO}/actions/runs"
+    issues = f"repos/{REPO}/issues?state=open"
+    timeout = devwatch.GitHubError(0, "GitHub timed out")
+
+    def setUp(self):
+        self.github = FakeGitHub(world())
+        self.watch = devwatch.DevWatch(github=self.github)
+        self.addCleanup(self.watch.store.close)
+
+    def answers(self, changes):
+        self.github.answers = {**changes, **{k: v for k, v in self.github.answers.items() if k not in changes}}
+
+    def run_list(self, *runs):
+        self.answers({self.runs + "?per_page=20": {"workflow_runs": list(runs)}})
+
+    def job_list(self, run_id, value):
+        self.answers({f"{self.runs}/{run_id}/jobs": value if isinstance(value, Exception) else {"jobs": value}})
+
+    def partial(self):
+        with self.assertRaises(devwatch.GitHubError):
+            self.watch.poll()
+        s = self.watch.snapshot()
+        self.assertTrue(s["pr_count_status"]["partial"])
+        self.assertIn(REPO, s["pr_count_status"]["stale"])
+        self.assertEqual(s["open_pr_counts"], {REPO: 2})
+        return s
+
+    @staticmethod
+    def active(n, attempt=1):
+        return {"id": n, "name": "CI", "status": "in_progress", "run_attempt": attempt,
+                "created_at": ago(20), "updated_at": ago(1)}
+
+    @staticmethod
+    def job(n, name):
+        return {"id": n, "name": name, "status": "in_progress", "runner_name": "NODE-unreal-pr", "started_at": ago(10)}
+
+    def test_observed_runs_jobs_and_history_survive_later_detail_timeout(self):
+        self.answers({self.issues: self.timeout})
+        self.run_list(self.active(7), {**self.active(6), "status": "completed", "conclusion": "success"})
+        self.job_list(7, [self.job(71, "Compile")])
+        cold = self.partial()
+        self.assertEqual({r["id"]: (r["status"], r["job"]) for r in cold["runs"]},
+                         {7: ("in_progress", "Compile"), 6: ("completed", "")})
+        self.assertEqual(self.watch.store.query("SELECT id, result FROM runs WHERE repo=?", (REPO,)), [(6, "success")])
+        self.assertEqual(self.watch.store.query("SELECT id, name FROM jobs WHERE repo=?", (REPO,)), [(71, "Compile")])
+        self.run_list(self.active(7), self.active(9))
+        self.job_list(7, [self.job(72, "Run specs")])
+        self.job_list(9, [self.job(91, "Package")])
+        warm = self.partial()
+        self.assertEqual({r["id"]: r["job"] for r in warm["runs"]}, {7: "Run specs", 9: "Package"})
+
+    def test_confirmed_empty_jobs_then_empty_runs_replace_older_records(self):
+        self.run_list(self.active(7))
+        self.job_list(7, [self.job(71, "Compile")])
+        self.watch.poll()
+        self.answers({self.issues: self.timeout})
+        self.job_list(7, [])
+        self.assertEqual([(r["id"], r["job"]) for r in self.partial()["runs"]], [(7, "")])
+        self.run_list()
+        self.assertEqual(self.partial()["runs"], [])
+        self.assertFalse(self.watch.jobs)
+        self.answers({self.issues: []})
+        self.watch.poll()
+        self.assertEqual(self.watch.snapshot()["pr_count_status"], {"partial": False, "inventory_complete": True, "stale": {}})
+
+    def test_job_timeout_preserves_only_matching_attempt_and_all_successful_siblings(self):
+        self.run_list(*(self.active(n) for n in (7, 8, 9, 10)))
+        for n in (7, 8, 9, 10):
+            self.job_list(n, [self.job(n * 10, "Earlier job")])
+        self.watch.poll()
+        self.run_list(self.active(7), self.active(8), self.active(9, attempt=2), self.active(10))
+        self.job_list(7, [self.job(71, "First update")])
+        self.job_list(8, self.timeout)
+        self.job_list(9, self.timeout)
+        self.job_list(10, [self.job(101, "Last update")])
+        self.assertEqual({r["id"]: r["job"] for r in self.partial()["runs"]},
+                         {7: "First update", 8: "Earlier job", 9: "", 10: "Last update"})
+        self.job_list(8, [])
+        self.job_list(9, [self.job(91, "Second attempt")])
+        self.watch.poll()
+        s = self.watch.snapshot()
+        self.assertFalse(s["pr_count_status"]["partial"])
+        self.assertEqual({r["id"]: r["job"] for r in s["runs"]}[9], "Second attempt")
+
+    def test_second_active_run_page_timeout_keeps_received_runs_and_unseen_active(self):
+        self.run_list(self.active(7), self.active(8))
+        self.watch.poll()
+        finished = [{**self.active(n), "status": "completed", "conclusion": "success"} for n in range(20, 40)]
+        self.run_list(*finished)
+        active_page = self.runs + "?status=in_progress&per_page=100&page="
+        self.answers({active_page + "1": {"workflow_runs": [self.active(n) for n in range(100, 200)]},
+                      active_page + "2": self.timeout,
+                      self.runs + "?status=queued": {"workflow_runs": []}})
+        s = self.partial()
+        self.assertEqual(s["counts"]["runs"], 102)
+        self.assertEqual({r["id"] for r in self.watch.runs[REPO]}, {7, 8, *range(20, 40), *range(100, 200)})
+        self.answers({active_page + "2": {"workflow_runs": []}})
+        self.watch.poll()
+        self.assertEqual(self.watch.snapshot()["counts"]["runs"], 100)
+        self.assertNotIn(7, {r["id"] for r in self.watch.runs[REPO]})
+
+    def test_finished_run_retries_an_interrupted_jobs_page(self):
+        self.run_list(self.active(7))
+        self.job_list(7, [self.job(99, "Last known job")])
+        self.watch.poll()
+        self.run_list({**self.active(7), "status": "completed", "conclusion": "success"})
+        path = self.runs + "/7/jobs?per_page=30&page="
+        complete = [{**self.job(n, f"Task {n}"), "status": "completed", "conclusion": "success"} for n in range(30)]
+        self.answers({path + "1": {"jobs": complete, "total_count": 31}, path + "2": self.timeout})
+        self.partial()
+        self.assertEqual({j["id"] for j in self.watch.jobs[7]}, {*range(30), 99})
+        self.answers({path + "2": {"jobs": [{**complete[0], "id": 31}], "total_count": 31}})
+        self.watch.poll()
+        self.assertFalse(self.watch.snapshot()["pr_count_status"]["partial"])
+        self.assertEqual({j["id"] for j in self.watch.jobs[7]}, {*range(30), 31})
 
 
 class StuckNotifications(unittest.TestCase):
