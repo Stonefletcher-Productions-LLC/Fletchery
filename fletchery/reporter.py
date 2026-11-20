@@ -592,7 +592,19 @@ class Reporter:
             return json.loads(r.read() or b"{}")
 
 
-def run(cfg: dict) -> int:
+def code_stamp() -> tuple:
+    """Changes when the reporter's code on disk does (an update was installed)."""
+    out = []
+    for name in ("reporter.py", "restart.py"):
+        try:
+            st = (Path(__file__).resolve().parent / name).stat()
+            out.append((name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((name, 0, 0))
+    return tuple(out)
+
+
+def run(cfg: dict, argv=None) -> int:
     lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         lock.bind(("127.0.0.1", int(cfg.get("lockPort") or LOCK_PORT)))
@@ -610,6 +622,7 @@ def run(cfg: dict) -> int:
             pass
 
     actor = restartmod.Actor(log=note)
+    stamp = code_stamp()
     while True:
         started = time.monotonic()
         try:
@@ -628,6 +641,18 @@ def run(cfg: dict) -> int:
             except OSError:
                 pass
             said = msg
+        if argv is not None and code_stamp() != stamp:
+            # New code was installed: hand over to it, so an update never needs anyone to stop this process by hand.
+            time.sleep(5)          # the installer may still be copying
+            note("new code installed; starting it")
+            lock.close()
+            try:
+                import subprocess
+                subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *argv], close_fds=True,
+                                 creationflags=0x08000008 if WINDOWS else 0)   # no window, detached
+            except OSError as e:
+                note(f"could not start the new code ({e}); the scheduled task will")
+            return 0
         time.sleep(max(1.0, cfg["every"] - (time.monotonic() - started)))
 
 
@@ -658,7 +683,7 @@ def main(argv=None) -> int:
     if a.command == "once":
         print(json.dumps(Reporter(cfg).collect(), indent=2))
         return 0
-    return run(cfg)
+    return run(cfg, list(argv) if argv is not None else sys.argv[1:])
 
 
 if __name__ == "__main__":
