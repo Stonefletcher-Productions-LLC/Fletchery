@@ -27,6 +27,11 @@ const data = {
   jobs: [job(7, 'running'), job(6, 'failed', {recipe: 'checkout-only', finished: ago(40), summary: 'git fetch failed', steps: []})],
   scratch: {checked_at: ago(20), mode: 'trim', freed_gb: 3.2},
   log: [{at: ago(5), line: 'builds: 0.4.6: job 7 queued'}, {at: ago(1), line: '<script>window.hacked = 1</script>'}],
+  merge: {enabled: true, backend: 'api', chosen: 'api', model: 'claude-opus-5-5', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-2'],
+    fix_checks: true, base: 'Test-Staging', key_set: true, busy: '', waiting: '', note: '#41 conflict: pushed', error: '', last_pass: ago(3),
+    spend: {api_total_usd: 12.4, api_today_usd: 3.1, budget_usd: 230, budget_left_usd: 217.6, budget_until: '2026-12-01', days_left: 11,
+      per_day_to_use_it: 19.78, daily_cap_usd: 40, per_run_cap_usd: 6, subscription_runs: 0, subscription_equiv_usd: 0, runs_today: 4},
+    runs: [{at: ago(3), pr: 41, kind: 'conflict', result: 'pushed', backend: 'api', model: 'claude-opus-5-5', cost_usd: 1.37, detail: 'resolved 2 file(s).'}]},
 };
 let mode = 'phone';   // phone | readonly | desktop: what the backend tells this screen it may do
 let push = {available: true, key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U', events: [], phones: 0};
@@ -307,6 +312,15 @@ const server = http.createServer((req, res) => {
     assert.equal(await page.locator('#liveBuilding .task-title').textContent(), 'Waiting for Gaming PC');
     assert.doesNotMatch(await page.innerText('#liveBuilding'), /Building the town|GitHub steps/);
     live.building[0] = activeJob;
+
+    // The Claude merge helper: who pays, what it spent, what it did; the key box only in the window on the PC.
+    assert.match(await page.textContent('#mergeStatus'), /\$12\.40 spent of \$230\.00, \$217\.60 left[\s\S]*Key saved[\s\S]*credit ends 2026-12-01/);
+    assert.match(await page.textContent('#mergeRuns'), /#41 conflicts[\s\S]*pushed[\s\S]*\$1\.37/);
+    assert.equal(await page.isVisible('#mKeyBox'), false, 'no key box on the phone');
+    await page.selectOption('#mBackend', 'subscription');
+    await page.waitForFunction(() => document.querySelector('#toast') && !document.querySelector('#toast').hidden);
+    assert.deepEqual(posts[posts.length - 1], ['/api/merge/settings', {enabled: true, backend: 'subscription', model: 'claude-opus-5-5', fixChecks: true}]);
+    if (shots) await page.locator('#mergeCard').screenshot({path: path.join(shots, 'portal-merge.png')});
 
     // Builds on the phone: running and coming up first (with the running one's steps), start a build, finished ones.
     await page.click('#tab-builds');
