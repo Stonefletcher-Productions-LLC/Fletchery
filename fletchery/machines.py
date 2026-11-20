@@ -449,8 +449,12 @@ class Machines:
                 for row in sorted(rows, key=lambda r: (claim_rank(r["requested_by"]), r["id"])):
                     if KIND.get(row["recipe"]) in off:
                         continue
-                    if rounds_only and not goes_first(row["requested_by"]):
-                        continue   # the node is busy with a local run: only a round's or a build's job waits for it (#208)
+                    if rounds_only and claim_rank(row["requested_by"]) != 0:
+                        # The node is busy with a local run: only a merge round's job waits for it (#208). A build is
+                        # not handed out yet: its worker would stop waiting after 30 min and run beside the local run
+                        # (job 756, 2026-11-20: Package ran next to PR check #2417 on SF-NODE-01). round_waiting keeps
+                        # LaneGuard's marker up instead, so the build is claimed the moment the lease frees.
+                        continue
                     if set(json.loads(row["labels"])) <= have and float(row["min_ram_gb"] or 0) <= float(m["ram_gb"] or 0):
                         t = now()
                         db.execute("UPDATE jobs SET state='running', machine=?, started=?, heartbeat=?, attempts=attempts+1 "
