@@ -62,6 +62,16 @@ class RecheckTest(unittest.TestCase):
         state["snap"] = snap([group("machine", "MY-PC-unreal-pr", [(11, 101)])])     # the hold cleared
         self.assertEqual([d["pr"] for d in r.round()], [11])
 
+    def test_waits_while_the_base_branch_is_red(self):
+        s = snap([{**group("machine", "NODE-unreal-pr", [(11, 101)]), "base": "Test-Staging"}])
+        s["bases"] = [{"repo": REPO, "branch": "Test-Staging", "state": "red", "required": True}]
+        state = {"snap": s}
+        r = self.make(state)
+        self.assertEqual(r.round(), [])
+        self.assertRegex(r.view()["waiting"][0]["why"], "Test-Staging is red")
+        s["bases"][0]["state"] = "green"
+        self.assertEqual([d["pr"] for d in r.round()], [11])
+
     def test_restarting_or_silent_machine_gets_no_reruns(self):
         machines = [{"name": "Gaming PC", "host": "MY-PC", "key": "GAMING-PC", "online": True, "restart": {"state": "sent"}},
                     {"name": "NODE", "host": "NODE", "key": "NODE", "online": False}]

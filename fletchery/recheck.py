@@ -11,6 +11,7 @@ What it does, every EVERY seconds, from the Live snapshot (devwatch.py already s
     stopped reporting, a restart under way): re-running there fails the same way and wastes the queue;
   - re-runs the check's job on GitHub (the same call as the "Re-run" button), at most PER_TICK a round, and at most
     PER_PR times a day for one PR, so a machine that keeps failing cannot spin the queue;
+  - waits while the PR's base branch is red (the tip fix needs the machines first);
   - never touches a cancelled check (someone cancelled it on purpose) or a check that failed on the PR's own code.
 
 Turn it off with `"autoRerun": false` in the profile's workers.portal.live block. Standard library only."""
@@ -76,6 +77,8 @@ class Recheck:
             for d in self.done:
                 per_pr[(d["repo"], d["pr"])] = per_pr.get((d["repo"], d["pr"]), 0) + 1
             unfit = self._unfit(snap)
+            red = {(str(h.get("repo")), str(h.get("branch"))) for h in snap.get("bases") or []
+                   if h.get("state") == "red" and h.get("required")}
             out, waiting = [], []
             for g in snap.get("problems") or []:
                 if g.get("cause") != "machine":
@@ -86,6 +89,10 @@ class Recheck:
                     if not repo or not isinstance(job, int) or job <= 0 or (repo, job) in tried_jobs:
                         continue
                     row = {"repo": repo, "pr": number, "job": job, "check": str(p.get("check") or g.get("check") or "")[:80]}
+                    if (repo, str(g.get("base") or "")) in red:
+                        # the tip fix goes first; a re-run now would take the machine from it and may fail on the tip
+                        waiting.append({**row, "why": f"{g.get('base')} is red; re-run once it is green"})
+                        continue
                     if machine and machine.lower() in unfit:
                         waiting.append({**row, "why": f"{machine} is in trouble: {unfit[machine.lower()]}"})
                         continue
