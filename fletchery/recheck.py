@@ -38,6 +38,7 @@ class Recheck:
         self._lock = threading.Lock()
         self.last = 0.0
         self.error = ""
+        self.note = ""
         self.done: list[dict] = []       # {"at", "repo", "pr", "job", "check", "why"}: the re-runs of the last day
         self.waiting: list[dict] = []    # what the last round left alone, and why (for the page)
         if self.path and self.path.exists():
@@ -52,7 +53,8 @@ class Recheck:
             return
         try:
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"done": self.done}, indent=1), encoding="utf-8")
+            tmp.write_text(json.dumps({"done": self.done, "at": self.clock(), "note": self.note, "error": self.error,
+                                       "waiting": self.waiting}, indent=1), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError:
             pass
@@ -62,13 +64,26 @@ class Recheck:
         if not self.enabled or self.snapshot is None or at - self.last < EVERY:
             return
         self.last = at
-        self.round(at)
+        try:
+            self.round(at)
+        except Exception as e:
+            self._say(f"stopped by an error: {type(e).__name__}: {e}"[:300])
+            raise
+
+    def _say(self, note: str) -> None:
+        """What the last round did, kept in recheck.json every round and logged when it changes: a helper that does
+        nothing must say why (it was silent for 30 minutes on its first day, 2026-11-20)."""
+        if note != self.note:
+            self.log(f"re-run: {note}")
+        self.note = note
+        self._save()
 
     def round(self, at: float | None = None) -> list[dict]:
         """One pass. Returns what it re-ran."""
         at = self.clock() if at is None else at
         snap = self.snapshot() or {}
         if (snap.get("pr_count_status") or {}).get("partial") or (snap.get("fresh") or {}).get("error"):
+            self._say("waiting: GitHub was not fully read this round")
             return []          # GitHub was not fully read: decide next time
         with self._lock:
             self.done = [d for d in self.done if at - d.get("at", 0) < DAY]
@@ -105,6 +120,7 @@ class Recheck:
                     try:
                         self.gh.api(f"repos/{repo}/actions/jobs/{job}/rerun", "POST", {})
                     except Exception as e:
+                        self.log(f"re-run: GitHub refused #{number} job {job}: {type(e).__name__}: {e}"[:300])
                         waiting.append({**row, "why": f"GitHub refused the re-run ({type(e).__name__})"})
                         tried_jobs.add((repo, job))
                         self.done.append({**row, "at": at, "why": "refused"})     # asked once: a refused job is not asked again
@@ -117,9 +133,13 @@ class Recheck:
                     out.append(rec)
                     self.log(f"re-run: #{number} {row['check']} in {repo.split('/')[-1]} failed for the machine's reasons ({why}); re-run started")
             self.waiting = waiting[:40]
-            if out:
-                self._save()
             self.error = ""
+            machine_rows = sum(len(g.get("prs") or []) for g in snap.get("problems") or [] if g.get("cause") == "machine")
+            whys: dict = {}
+            for w in waiting:
+                whys[w["why"]] = whys.get(w["why"], 0) + 1
+            self._say(f"{len(out)} re-run, {len(waiting)} left alone" + (" (" + "; ".join(f"{n}: {k}" for k, n in whys.items()) + ")" if whys else "")
+                      if machine_rows else "nothing failed for a machine's reasons")
             return out
 
     @staticmethod
