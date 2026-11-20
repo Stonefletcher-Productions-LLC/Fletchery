@@ -164,7 +164,9 @@ class AppTests(unittest.TestCase):
 
     def test_live_shows_the_builds_this_backend_runs(self):
         self.app.machines = SimpleNamespace(machines=FakeMachines())
-        self.assertEqual(self.app.machine_jobs(), [{"machine": "NODE-02", "kind": "building", "since": HOUR_AGO,
+        self.assertEqual(self.app.machine_jobs(), [{"machine": "NODE-02", "kind": "queued", "since": "2000-01-01T00:00:00Z",
+                                                    "title": "Fletchery job: None (job #3)", "detail": "running job #9 first"},
+                                                   {"machine": "NODE-02", "kind": "building", "since": HOUR_AGO,
                                                     "title": "Fletchery build 0.4.6 (job #9)",
                                                     "detail": "step: Package 0.4.6 · from main"}])
 
