@@ -27,7 +27,7 @@ EVERY = 300          # seconds between rounds
 PER_TICK = 3         # checks re-run in one round
 PER_PR = 2           # automatic re-runs of one PR's checks in a day
 DAY = 86400
-TROUBLE = ("deadhold:", "idlehold:", "machine:", "restart:")   # blocker keys that mean "this machine is not fit"
+TROUBLE = ("deadhold:", "idlehold:", "machine:", "restart:", "jam:")   # blocker keys that mean "this machine is not fit"
 
 
 class Recheck:

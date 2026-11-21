@@ -215,3 +215,16 @@ come back with nobody at it. `python fletchery\restart.py status` prints what th
 ### Restart when idle
 
 A machine that is running something offers two buttons. **Restart when idle** stops nothing: the request waits (up to 12 hours) until the machine reports that no build, runner job or slot hold is alive, and restarts it then. It can be withdrawn with **Cancel restart** while it waits. **Restart now** ends what is running. From a script: `POST /api/machines/restart {"name": "SF-NODE-01", "when_idle": true}`, and `{"name": ..., "cancel": true}` to withdraw.
+
+## A finished check that still holds a machine
+
+A cancelled PR check can leave an editor that Windows accepts the kill for but that never exits. The machine then
+looks busy with a check that ended long ago, and every other check there fails at cleanup or waits.
+
+`unjam.py` looks every two minutes. When the reservation holder is "PR check #N (GitHub run R)" and GitHub says run R
+finished more than ten minutes ago, Live shows it under "Stuck or blocked" with what clears it. If the machine signs
+in by itself after a restart, Fletchery restarts it on the second sighting (the run is finished, so no build is
+ended), at most once in two hours per machine. A machine that does not sign in by itself is flagged and never
+restarted from here. `"autoUnjam": false` in the profile's `workers.portal.live` block turns the restart off; the
+flag stays. Automatic re-runs wait for a machine in this state.
+
