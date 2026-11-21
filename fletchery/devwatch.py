@@ -540,6 +540,7 @@ class DevWatch:
         self.issues: dict[str, list] = {}           # repo -> open issues
         self.reports: dict[str, dict] = {}          # machine -> its last report
         self.restarts = restartmod.Restarts(Path(state_dir) / "restarts.json" if state_dir else None)   # the Restart button
+        self.extra_blockers = None                  # callable -> [block() keyword dicts] from helpers (unjam.py)
         self.skip: dict[str, tuple[float, bool]] = {}  # path -> retry time, GitHub explicitly reported a missing ref
         self.last_ok = ""
         self.last_try = ""
@@ -1452,6 +1453,11 @@ class DevWatch:
                 block("flow", f"Nothing has merged in {repo.split('/')[-1]} for {_ago_text(f.get('since_merge') or 0)}",
                       f"{repo} · {v.get('why') or ''}", since=now_iso_at(last["at"]) if last.get("at") else "", key=f"flow:{repo}", repo=repo)
         rank = {"feed": 0, "base": 1, "machine": 2, "disk": 3, "stuck": 3, "check": 4, "runner": 5, "flow": 6, "label": 7}
+        try:
+            for extra in (self.extra_blockers() if self.extra_blockers else []):
+                block(**extra)
+        except Exception as e:              # a helper must never take the page down
+            self.log(f"live: extra blockers failed: {type(e).__name__}: {e}"[:300])
         blockers.sort(key=lambda b: (rank.get(b["kind"], 9), -_ts(b["since"])))
         project_of = {r.lower(): p["name"] for p in projects if len(p["repos"]) > 1 for r in p["repos"]}
         for b in blockers:      # alerts group by project: one notification for a project's repositories

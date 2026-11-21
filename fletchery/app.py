@@ -193,6 +193,14 @@ class App:
         self.recheck = Recheck(self.gh, self.log, self.state_dir,
                                snapshot=lambda: self.portal.live.snapshot() if self.portal and self.portal.live is not None else None,
                                enabled=not (isinstance(live_conf, dict) and live_conf.get("autoRerun") is False))
+        from unjam import Unjam
+        live = lambda: self.portal.live if self.portal and self.portal.live is not None else None   # noqa: E731
+        self.unjam = Unjam(self.gh, self.log, self.state_dir,
+                           snapshot=lambda: live().snapshot() if live() else None,
+                           restart=lambda name, reason: live().restart_machine(name, by="Fletchery", reason=reason, force=True)["message"],
+                           repos=lambda: [str(r.get("repo") or r.get("full_name") or "") for r in (live().repos if live() else [])
+                                          if isinstance(r, dict) and "/" in str(r.get("repo") or r.get("full_name") or "")],
+                           enabled=not (isinstance(live_conf, dict) and live_conf.get("autoUnjam") is False))
 
     # ---- activity ----
     def _load_activity(self) -> None:
@@ -286,6 +294,12 @@ class App:
                 self.recheck.tick()
             except Exception as e:
                 self.recheck.error = f"{type(e).__name__}: {e}"[:300]
+            try:
+                if self.portal and self.portal.live is not None and self.portal.live.extra_blockers is None:
+                    self.portal.live.extra_blockers = self.unjam.blockers
+                self.unjam.tick()
+            except Exception as e:
+                self.unjam.error = f"{type(e).__name__}: {e}"[:300]
             if self.cfg.scratch_roots and self.cfg.scratch_mode != "off" and time.monotonic() - last_scratch > SCRATCH_EVERY:
                 last_scratch = time.monotonic()
                 threading.Thread(target=self._scratch, name="fletchery-scratch", daemon=True).start()
@@ -387,7 +401,7 @@ class App:
                 "version": self.version,
                 "at": now_iso(), "errors": dict(self.errors), "builds": builds, "machines": machines,
                 "scratch": self.scratch_last, "log": list(self.lines)[-120:], "restarting": self.restart_reason,
-                "merge": self.merge.view(), "recheck": self.recheck.view()}
+                "merge": self.merge.view(), "recheck": self.recheck.view(), "unjam": self.unjam.view()}
 
     # ---- the controls (portal.py decides who may use them: the window always, the phone unless controls are off) ----
     def actions(self) -> dict:
