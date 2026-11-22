@@ -112,7 +112,7 @@ phone and make a new key.
 | "Connecting… Showing what it said …" | Normal for a few seconds after opening: the page opens from the copy saved on the phone, with the last status it had, while Tailscale connects |
 | Fletchery's log says `portal: not started` | The line says why: a bad `portal` block, or port 8772 is in use (choose another `port`) |
 | The log says `live: direct HTTPS failed ([SSL: CERTIFICATE_VERIFY_FAILED] …)` | The Live tab reads GitHub through `gh` instead, and tries direct HTTPS again every hour. Direct calls check certificates through Windows when the Python package `truststore` is installed (`python -m pip install --user truststore`), and otherwise with `certifi`. Without `truststore`, a root that Windows has not downloaded yet (GitHub's Sectigo E46 root, for example) fails |
-| The log says `live: direct HTTPS failed (… timed out)` | Three requests in a row timed out twice each, so the Live tab treats direct HTTPS as blocked and uses `gh` until the hourly retry. A single slow answer doesn't do this: it is tried again after 2 s, and if that also times out, only that one request goes through `gh` |
+| The log says `live: direct HTTPS failed (… timed out)` or `(… Remote end closed connection …)` | Three requests in a row timed out or lost their connection twice each, so the Live tab treats direct HTTPS as blocked and uses `gh` until the hourly retry. A single slow answer or dropped connection doesn't do this: it is tried again after 2 s, and if that fails the same way, only that one request goes through `gh` |
 
 ## The Live tab
 

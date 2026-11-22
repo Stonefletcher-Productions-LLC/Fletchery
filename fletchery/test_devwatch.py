@@ -1314,6 +1314,37 @@ class GhFallback(unittest.TestCase):
         self.assertFalse(devwatch._timed_out(urllib.error.URLError(PermissionError(10013, "forbidden"))))
         self.assertFalse(devwatch._timed_out(urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get issuer")))
 
+    def test_a_dropped_connection_is_retried_and_does_not_switch_to_gh(self):
+        # 2026-11-22 22:46Z, Gaming PC: "Remote end closed connection without response" flipped the feed to gh.
+        import http.client
+        import unittest.mock
+        self.assertTrue(devwatch._timed_out(http.client.RemoteDisconnected("Remote end closed connection without response")))
+        self.assertTrue(devwatch._timed_out(ConnectionResetError(10054, "An existing connection was forcibly closed")))
+
+        class Answer:
+            status = 200
+            headers = {}
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def read(self):
+                return b'{"via": "https"}'
+        calls = []
+        def urlopen(req, timeout=None, context=None):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            return Answer()
+        gh = devwatch.GitHub(lambda: "t")
+        gh.ssl_context = object()
+        slept = []
+        gh.sleep = slept.append
+        gh._gh = lambda url, etag: self.fail("went through gh")
+        with unittest.mock.patch.object(devwatch.urllib.request, "urlopen", urlopen):
+            self.assertEqual(gh.get("a"), {"via": "https"})
+        self.assertEqual((len(calls), slept, gh.via, gh.timeouts), (2, [devwatch.TIMEOUT_BACKOFF], "https", 0))
+
     def test_tls_context_verifies_through_the_os_store_or_certifi(self):
         import ssl
         ctx = devwatch.tls_context()
