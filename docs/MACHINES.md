@@ -221,12 +221,25 @@ A machine that is running something offers two buttons. **Restart when idle** st
 A cancelled PR check can leave an editor that Windows accepts the kill for but that never exits. The machine then
 looks busy with a check that ended long ago, and every other check there fails at cleanup or waits.
 
-`unjam.py` looks every two minutes. When the reservation holder is "PR check #N (GitHub run R)" and GitHub says run R
-finished more than ten minutes ago, Live shows it under "Stuck or blocked" with what clears it. If the machine signs
-in by itself after a restart, Fletchery restarts it on the second sighting (the run is finished, so no build is
-ended), at most once in two hours per machine. A machine that does not sign in by itself is flagged and never
-restarted from here. `"autoUnjam": false` in the profile's `workers.portal.live` block turns the restart off; the
-flag stays. Automatic re-runs wait for a machine in this state.
+`unjam.py` looks every two minutes. When the reservation holder is "PR check #N (GitHub run R)", it asks GitHub for
+the **latest attempt** of run R and that attempt's jobs. A re-run keeps the run's id, so nothing GitHub said about a
+run is kept from one look to the next. If every job of the latest attempt ended more than ten minutes ago, and the
+machine has been held since before that, Live shows it under "Stuck or blocked" with what clears it. A job that waits
+or runs, or jobs that cannot be read, mean it is not flagged.
+
+If the machine signs in by itself after a restart, Fletchery restarts it, at most once in two hours per machine, and
+only when nothing is working on it on two looks in a row. Any of these counts as working and stops the restart:
+
+- GitHub shows one of the machine's runners as busy, or a job on it;
+- the machine reports a `Runner.Worker` process (a runner job, and everything that job started), or a compiler
+  (`cl.exe`, `link.exe`, `clang-cl.exe`);
+- the Live feed could not read GitHub in the last five minutes, so the runners' state is not known.
+
+An Unreal editor alone does not count: the editor a cancelled check left behind is what the restart clears. While
+something works there the machine stays flagged, the text says what was seen, and **Restart now** on its card still
+restarts it by hand. A machine that does not sign in by itself is flagged and never restarted from here.
+`"autoUnjam": false` in the profile's `workers.portal.live` block turns the restart off; the flag stays. Automatic
+re-runs wait for a machine in this state.
 
 ## A waiting check that was cancelled and never put back
 
