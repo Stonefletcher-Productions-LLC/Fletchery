@@ -1245,6 +1245,36 @@ class GhFallback(unittest.TestCase):
         self.assertEqual(gh.get("user/repos"), [{"a": 1}])
         self.assertEqual((asked, gh.calls, gh.free, gh.remaining), (["", '"e1"'], 1, 1, 4990))
 
+    def test_tries_direct_https_again_after_an_hour(self):
+        gh = devwatch.GitHub(lambda: "t")
+        direct = []
+        def flaky(url, etag):
+            direct.append(url)
+            if len(direct) == 1:
+                raise devwatch.GitHubError(0, "GitHub could not be reached: [SSL: CERTIFICATE_VERIFY_FAILED]")
+            return devwatch.parse_gh_output(b'HTTP/2.0 200 OK\r\n\r\n{"via": "https"}')
+        def via_gh(url, etag):
+            return devwatch.parse_gh_output(b'HTTP/2.0 200 OK\r\n\r\n{"via": "gh"}')
+        gh._urllib, gh._gh = flaky, via_gh
+        self.assertEqual(gh.get("a"), {"via": "gh"})          # the first direct call fails: gh from now on
+        self.assertEqual(gh.get("b"), {"via": "gh"})          # within the hour: no direct try
+        self.assertEqual(len(direct), 1)
+        gh.via_since -= devwatch.HTTPS_RETRY                    # an hour later
+        self.assertEqual(gh.get("c"), {"via": "https"})
+        self.assertEqual((gh.via, len(direct)), ("https", 2))
+
+    def test_tls_context_verifies_through_the_os_store_or_certifi(self):
+        import ssl
+        ctx = devwatch.tls_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+        self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+        try:
+            import truststore
+        except ImportError:
+            return
+        self.assertIsInstance(ctx, truststore.SSLContext)
+
     def test_gh_errors(self):
         self.assertEqual(devwatch.parse_gh_output(b"", b"gh: Not Found (HTTP 404)")[0], 404)
         with self.assertRaises(devwatch.GitHubError):
