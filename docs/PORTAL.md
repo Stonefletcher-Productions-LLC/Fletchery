@@ -111,6 +111,7 @@ phone and make a new key.
 | The bell says to add it to the Home Screen | Notifications on iPhone only work from the Home Screen app, not from a Safari tab |
 | "Connecting… Showing what it said …" | Normal for a few seconds after opening: the page opens from the copy saved on the phone, with the last status it had, while Tailscale connects |
 | Fletchery's log says `portal: not started` | The line says why: a bad `portal` block, or port 8772 is in use (choose another `port`) |
+| The log says `live: direct HTTPS failed ([SSL: CERTIFICATE_VERIFY_FAILED] …)` | The Live tab reads GitHub through `gh` instead, and tries direct HTTPS again every hour. Direct calls check certificates through Windows when the Python package `truststore` is installed (`python -m pip install --user truststore`), and otherwise with `certifi`. Without `truststore`, a root that Windows has not downloaded yet (GitHub's Sectigo E46 root, for example) fails |
 
 ## The Live tab
 

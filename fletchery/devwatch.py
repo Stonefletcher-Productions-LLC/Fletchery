@@ -39,6 +39,7 @@ import http.client
 import json
 import os
 import re
+import ssl
 import statistics
 import subprocess
 import threading
@@ -282,6 +283,30 @@ def kind_of(purpose: str) -> str:
 
 
 # ---- GitHub ----
+def tls_context() -> ssl.SSLContext:
+    """The TLS context for direct GitHub calls.
+
+    Python's default context only reads the roots that are already in the Windows store; it cannot make Windows fetch
+    a missing root the way Windows' own TLS does. GitHub's certificate since 2026-10-28 chains to Sectigo Public Server
+    Authentication Root E46, which Windows downloads on first use, so on a PC where nothing had fetched it yet every
+    direct call failed with CERTIFICATE_VERIFY_FAILED ("unable to get issuer certificate"; Gaming PC, 2026-11-20..22).
+    truststore verifies through the OS (Windows CertGetCertificateChain, which fetches the root); without it, certifi's
+    bundle; without either, the default context."""
+    try:
+        import truststore
+        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    except Exception:
+        pass
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+HTTPS_RETRY = 3600      # after falling back to gh, try direct HTTPS again this often (a fault can clear itself)
+
+
 class GitHub:
     """GETs with ETags. A 304 is free and answers with the copy kept from last time."""
 
@@ -300,6 +325,8 @@ class GitHub:
         self._token_at = 0.0
         self._lock = threading.Lock()
         self.via = "https"          # or "gh" once direct HTTPS fails on this machine
+        self.via_since = 0.0        # when it fell back to gh; direct HTTPS is tried again HTTPS_RETRY later
+        self.ssl_context = None     # built on the first direct call (tls_context())
         self.gh_cmd = "gh"          # None: never fall back (tests)
 
     def token(self) -> str:
@@ -316,6 +343,9 @@ class GitHub:
         url = path if path.startswith("https://") else API + "/" + path.lstrip("/")
         with self._lock:
             etag, kept = self.cache.get(url, ("", None))
+        if self.via == "gh" and self.gh_cmd is not None and time.time() - self.via_since >= HTTPS_RETRY:
+            self.via = "https"
+            self.log("live: trying direct HTTPS to GitHub again")
         if self.via == "gh":
             code, headers, body = self._gh(url, etag)
         else:
@@ -326,7 +356,7 @@ class GitHub:
                     raise
                 # Some processes on a PC can't open sockets of their own (a sandbox, a firewall rule for one program)
                 # while `gh` can: 2026-11-18 the Gaming PC backend got URLError on every call. Use gh from then on.
-                self.via = "gh"
+                self.via, self.via_since = "gh", time.time()
                 self.log(f"live: direct HTTPS failed ({e}); reading GitHub through gh from now on")
                 code, headers, body = self._gh(url, etag)
         self._limits(headers)
@@ -365,7 +395,9 @@ class GitHub:
             **({"Authorization": "Bearer " + self.token()} if self.token() else {}),
             **({"If-None-Match": etag} if etag else {})})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            if self.ssl_context is None:
+                self.ssl_context = tls_context()
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self.ssl_context) as r:
                 return r.status, _Headers(r.headers.items()), r.read()
         except urllib.error.HTTPError as e:
             return e.code, _Headers((e.headers or {}).items()), e.read()
