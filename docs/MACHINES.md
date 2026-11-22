@@ -228,3 +228,15 @@ ended), at most once in two hours per machine. A machine that does not sign in b
 restarted from here. `"autoUnjam": false` in the profile's `workers.portal.live` block turns the restart off; the
 flag stays. Automatic re-runs wait for a machine in this state.
 
+## A waiting check that was cancelled and never put back
+
+`requeue.py` looks every five minutes. GitHub starts nothing by itself after a cancel, so a check that something
+cancelled while it waited for a machine, meaning to re-queue it, stays gone if that something fails (LifeShare #2542:
+nine builds, both machines idle for 48 minutes). A check is re-queued when it was cancelled at least ten minutes ago,
+is the newest check on the current commit of an open PR with auto-merge on, and its build never got a machine. A build
+that was running when it was cancelled is never restarted. While a "Tip fix first" run is under way nothing is
+re-queued: that run puts back what it moved. One check is re-queued at most twice a day, five checks a round; what it
+did and what it left alone is in `requeue.json` in the state folder and in the log ("re-queue: ...").
+
+To keep one PR's check from coming back, turn its auto-merge off or make it a draft. `"autoRequeue": false` in the
+profile's `workers.portal.live` block turns the whole thing off.
