@@ -91,6 +91,14 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("FLETCHERY_ANTHROPIC_API_KEY", sub)
         self.assertEqual(mergehelp.claude_env("api", "sk-ant-new", base)["ANTHROPIC_API_KEY"], "sk-ant-new")
 
+    def test_cache_ttl_is_pinned_on_the_api_only(self):
+        base = {"PATH": "x", "CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}
+        self.assertEqual(mergehelp.claude_env("api", "k", base)["CLAUDE_CODE_PROMPT_CACHE_TTL"], "5m")
+        self.assertEqual(mergehelp.claude_env("api", "k", base, cache_ttl="1h")["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h")
+        self.assertEqual(mergehelp.claude_env("api", "k", base, cache_ttl="9d")["CLAUDE_CODE_PROMPT_CACHE_TTL"], "5m")
+        self.assertEqual(mergehelp.claude_env("subscription", "", base)["CLAUDE_CODE_PROMPT_CACHE_TTL"], "1h")
+        self.assertEqual(mergehelp.claude_env("api", "k", base)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+
     def test_view_never_carries_the_key(self):
         v = json.dumps(self.helper(key="sk-ant-secret-value").view())
         self.assertNotIn("secret", v)
@@ -168,7 +176,7 @@ class ConflictTests(unittest.TestCase):
                 if resolve:
                     Path(kw["cwd"], "a.txt").write_text("one from the base and the PR\n")
                     real(["git", "add", "a.txt"], cwd=kw["cwd"], check=True)
-                out = {"total_cost_usd": 0.42, "num_turns": 3, "is_error": False, "result": "Kept both.", "usage": {"input_tokens": 10, "output_tokens": 5}}
+                out = {"total_cost_usd": 0.42, "num_turns": 3, "is_error": False, "result": "Kept both.", "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 120, "cache_creation": {"ephemeral_5m_input_tokens": 120, "ephemeral_1h_input_tokens": 0}}}
                 return subprocess.CompletedProcess(cmd, 0, json.dumps(out), "")
             return real(cmd, **kw)
         h = mergehelp.MergeHelper(cfg(self.state), self.gh, lambda *_: None, run=run, key_reader=lambda: "sk-ant-k")
@@ -188,8 +196,11 @@ class ConflictTests(unittest.TestCase):
         cmd = h.calls[0]
         self.assertIn("--max-budget-usd", cmd)
         self.assertIn("claude-opus-5-5", cmd)
+        for flag in mergehelp.CLAUDE_CACHE_FLAGS:
+            self.assertIn(flag, cmd)
         run = h.runs()[-1]
         self.assertEqual((run["result"], run["cost_usd"], run["backend"]), ("pushed", 0.42, "api"))
+        self.assertEqual((run["cache_read_tokens"], run["cache_write_tokens"], run["cache_write_1h_tokens"]), (900, 120, 0))
         self.assertIn("resolved the conflicts", self.gh.posts[0][1]["body"])
         self.assertFalse((self.state / "merge-helper" / "pr-7").exists())
 

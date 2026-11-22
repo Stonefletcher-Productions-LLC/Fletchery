@@ -25,6 +25,13 @@ read-only git only (no commit, push, gh or web). The backend is swappable from t
 Spend: every run's cost (the CLI's `total_cost_usd`) goes to <state>/merge-helper-runs.jsonl. On "api" a run stops at
 `perRunUsd`, the day at `dailyUsd`, and the credit at `budgetUsd`. After `budgetUntil` (the credit's expiry) the
 helper switches itself to "subscription" if `afterBudget` says so.
+Prompt caching (measured on the Gaming PC 2026-11-22, see docs/MERGE_HELPER_CACHING.md): Claude Code caches by
+itself. The helper keeps that cache stable and small: no user MCP servers (`--strict-mcp-config`), no skill list
+(`--disable-slash-commands`), no auto memory, and the per-folder parts of the system prompt moved out of it
+(`--exclude-dynamic-system-prompt-sections`), so every PR worktree sends the same system prompt. On "api" the cache
+TTL is pinned to `cacheTtl` (default "5m"): turns inside a run are seconds apart and runs are 10+ minutes apart,
+so the 1-hour TTL (2x write price instead of 1.25x) would cost more than it saves. Each run's cache writes and
+reads go to the ledger.
 
 Profile (all optional), workers.mergeHelper:
   {"enabled": true, "backend": "api", "model": "claude-opus-5-5", "base": "<baseBranch>", "fixChecks": true,
@@ -53,7 +60,9 @@ DEFAULTS = {"enabled": True, "backend": "api", "model": "claude-opus-5-5", "base
             "fixCheckNames": ["Cheap checks"], "budgetUsd": 230.0, "budgetFrom": "", "budgetUntil": "2026-12-01",
             "afterBudget": "subscription", "dailyUsd": 40.0, "perRunUsd": 6.0, "everyMinutes": 10, "quietMinutes": 20,
             "skipLabels": ["no-claude", "do-not-merge"], "claude": "claude", "workDir": "", "maxTurns": 80,
-            "runMinutes": 40}
+            "runMinutes": 40, "cacheTtl": "5m"}
+# Flags that keep each run's prompt small and the same across PR worktrees, so Claude Code's prompt cache holds.
+CLAUDE_CACHE_FLAGS = ["--exclude-dynamic-system-prompt-sections", "--strict-mcp-config", "--disable-slash-commands"]
 PAGE_KEYS = ("enabled", "backend", "model", "fixChecks")   # what the page may change
 CLAUDE_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", KEY_ENV)
 BELOW_NORMAL = 0x00004000
@@ -91,13 +100,17 @@ def read_key(env=None) -> str:
     return key or str(env.get(KEY_ENV) or "").strip()
 
 
-def claude_env(backend: str, key: str, base=None) -> dict:
+def claude_env(backend: str, key: str, base=None, cache_ttl: str = "5m") -> dict:
     """The environment for one `claude -p`: the API key only on "api"; on "subscription" every Anthropic key is
-    removed so the CLI uses its sign-in."""
+    removed so the CLI uses its sign-in. On "api" the prompt-cache TTL is pinned (a user-wide 1h setting would
+    otherwise raise every cache write from 1.25x to 2x the input price); the subscription keeps Claude Code's own
+    choice, which costs nothing extra there."""
     env = {k: v for k, v in (os.environ if base is None else base).items() if k not in CLAUDE_ENV_DROP}
     if backend == "api":
         env["ANTHROPIC_API_KEY"] = key
+        env["CLAUDE_CODE_PROMPT_CACHE_TTL"] = cache_ttl if cache_ttl in ("5m", "1h") else "5m"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return env
 
 
@@ -447,7 +460,8 @@ class MergeHelper:
             raise RuntimeError("no API key")
         cmd = [str(self.prof.get("claude") or "claude"), "-p", "--output-format", "json",
                "--model", str(self.setting("model")), "--max-turns", str(int(self.prof.get("maxTurns") or 80)),
-               "--allowedTools", ",".join(TOOLS_ALLOWED), "--disallowedTools", ",".join(TOOLS_DENIED)]
+               "--allowedTools", ",".join(TOOLS_ALLOWED), "--disallowedTools", ",".join(TOOLS_DENIED),
+               *CLAUDE_CACHE_FLAGS]
         if backend == "api" and float(self.prof.get("perRunUsd") or 0) > 0:
             cmd += ["--max-budget-usd", f"{float(self.prof['perRunUsd']):g}"]
         kw = {"creationflags": BELOW_NORMAL} if os.name == "nt" else {}
@@ -455,7 +469,7 @@ class MergeHelper:
         try:
             p = self._run(cmd, cwd=str(cwd), input=prompt, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=60 * float(self.prof.get("runMinutes") or 40),
-                          env=claude_env(backend, key), **kw)
+                          env=claude_env(backend, key, cache_ttl=str(self.prof.get("cacheTtl") or "5m")), **kw)
             out, code = p.stdout, p.returncode
         except subprocess.TimeoutExpired as e:
             out, code = (e.stdout or "") if isinstance(e.stdout, str) else "", -1
@@ -472,11 +486,14 @@ class MergeHelper:
             except (ValueError, TypeError):
                 res = {}
         u = res.get("usage") or {}
+        cc = u.get("cache_creation") or {}
         return {"backend": backend, "model": self.setting("model"), "exit": code, "seconds": round(time.monotonic() - started),
                 "cost_usd": round(float(res.get("total_cost_usd") or 0), 4), "turns": res.get("num_turns") or 0,
                 "is_error": bool(res.get("is_error")) or code != 0, "subtype": res.get("subtype") or "",
                 "input_tokens": int(u.get("input_tokens") or 0), "output_tokens": int(u.get("output_tokens") or 0),
                 "cache_read_tokens": int(u.get("cache_read_input_tokens") or 0),
+                "cache_write_tokens": int(u.get("cache_creation_input_tokens") or 0),
+                "cache_write_1h_tokens": int(cc.get("ephemeral_1h_input_tokens") or 0),
                 "summary": str(res.get("result") or "")[-1500:]}
 
     def test(self) -> dict:
