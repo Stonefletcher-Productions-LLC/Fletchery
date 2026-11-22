@@ -305,6 +305,16 @@ def tls_context() -> ssl.SSLContext:
 
 
 HTTPS_RETRY = 3600      # after falling back to gh, try direct HTTPS again this often (a fault can clear itself)
+TIMEOUT_BACKOFF = 2.0   # a timed-out direct request is tried once more after this many seconds
+TIMEOUTS_BEFORE_GH = 3  # this many requests in a row timing out twice each: treat it as blocked and use gh
+
+
+def _timed_out(e: BaseException) -> bool:
+    """A timeout or a response cut short: GitHub (or this process) was slow, not unreachable."""
+    if isinstance(e, (TimeoutError, http.client.IncompleteRead)):    # socket.timeout is TimeoutError since 3.10
+        return True
+    reason = getattr(e, "reason", None)
+    return isinstance(reason, TimeoutError) or "timed out" in str(reason or e).lower()
 
 
 class GitHub:
@@ -327,6 +337,8 @@ class GitHub:
         self.via = "https"          # or "gh" once direct HTTPS fails on this machine
         self.via_since = 0.0        # when it fell back to gh; direct HTTPS is tried again HTTPS_RETRY later
         self.ssl_context = None     # built on the first direct call (tls_context())
+        self.sleep = time.sleep     # the backoff before retrying a timed-out request (tests replace it)
+        self.timeouts = 0           # requests in a row whose direct tries both timed out
         self.gh_cmd = "gh"          # None: never fall back (tests)
 
     def token(self) -> str:
@@ -350,15 +362,26 @@ class GitHub:
             code, headers, body = self._gh(url, etag)
         else:
             try:
-                code, headers, body = self._urllib(url, etag)
+                code, headers, body = self._urllib_retrying(url, etag)
+                self.timeouts = 0
             except GitHubError as e:
                 if e.code or self.gh_cmd is None:
                     raise
-                # Some processes on a PC can't open sockets of their own (a sandbox, a firewall rule for one program)
-                # while `gh` can: 2026-11-18 the Gaming PC backend got URLError on every call. Use gh from then on.
-                self.via, self.via_since = "gh", time.time()
-                self.log(f"live: direct HTTPS failed ({e}); reading GitHub through gh from now on")
-                code, headers, body = self._gh(url, etag)
+                if e.timeout:
+                    self.timeouts += 1
+                if e.timeout and self.timeouts < TIMEOUTS_BEFORE_GH:
+                    # Slow, not blocked: a busy backend or a slow GitHub answer (2026-11-22, Gaming PC: one 20 s
+                    # timeout sent every read through gh for an hour). This one request goes through gh; the feed
+                    # stays on direct HTTPS.
+                    code, headers, body = self._gh(url, etag)
+                else:
+                    # Some processes on a PC can't open sockets of their own (a sandbox, a firewall rule for one
+                    # program) or can't verify GitHub's certificate, while `gh` can: 2026-11-18 the Gaming PC backend
+                    # got URLError on every call. Use gh from then on (tried again HTTPS_RETRY later). Timeouts that
+                    # keep coming (TIMEOUTS_BEFORE_GH requests in a row) are read as blocked too.
+                    self.via, self.via_since, self.timeouts = "gh", time.time(), 0
+                    self.log(f"live: direct HTTPS failed ({e}); reading GitHub through gh from now on")
+                    code, headers, body = self._gh(url, etag)
         self._limits(headers)
         if code == 304 and kept is not None:
             with self._lock:
@@ -389,6 +412,16 @@ class GitHub:
             msg = ""
         raise GitHubError(code, msg or f"HTTP {code}")
 
+    def _urllib_retrying(self, url: str, etag: str):
+        """_urllib, with one more try after TIMEOUT_BACKOFF when the first one timed out."""
+        try:
+            return self._urllib(url, etag)
+        except GitHubError as e:
+            if e.code or not e.timeout:
+                raise
+        self.sleep(TIMEOUT_BACKOFF)
+        return self._urllib(url, etag)
+
     def _urllib(self, url: str, etag: str):
         req = urllib.request.Request(url, headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Fletchery-Live",
@@ -402,7 +435,8 @@ class GitHub:
         except urllib.error.HTTPError as e:
             return e.code, _Headers((e.headers or {}).items()), e.read()
         except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, OSError) as e:
-            raise GitHubError(0, f"GitHub could not be reached: {getattr(e, 'reason', None) or e}"[:300])
+            raise GitHubError(0, f"GitHub could not be reached: {getattr(e, 'reason', None) or e}"[:300],
+                              timeout=_timed_out(e))
 
     def _gh(self, url: str, etag: str):
         """The same GET through `gh api -i` (no window): status line, headers, then the body."""
@@ -458,9 +492,10 @@ def parse_gh_output(stdout: bytes, stderr: bytes = b""):
 
 
 class GitHubError(Exception):
-    def __init__(self, code: int, message: str):
+    def __init__(self, code: int, message: str, timeout: bool = False):
         super().__init__(f"{code} {message}" if code else message)
         self.code = code
+        self.timeout = timeout      # the request timed out (or was cut short): slow, not unreachable
 
 
 def gh_token() -> str:

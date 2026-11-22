@@ -1263,6 +1263,57 @@ class GhFallback(unittest.TestCase):
         self.assertEqual(gh.get("c"), {"via": "https"})
         self.assertEqual((gh.via, len(direct)), ("https", 2))
 
+    def _timing_out(self, gh, fail_first: int):
+        """Direct tries: the first `fail_first` time out, the rest answer. Returns the list of tried URLs."""
+        tried = []
+        def direct(url, etag):
+            tried.append(url)
+            if len(tried) <= fail_first:
+                raise devwatch.GitHubError(0, "GitHub could not be reached: timed out", timeout=True)
+            return devwatch.parse_gh_output(b'HTTP/2.0 200 OK\r\n\r\n{"via": "https"}')
+        gh._urllib = direct
+        gh._gh = lambda url, etag: devwatch.parse_gh_output(b'HTTP/2.0 200 OK\r\n\r\n{"via": "gh"}')
+        return tried
+
+    def test_a_timeout_is_retried_once_and_does_not_switch_to_gh(self):
+        gh = devwatch.GitHub(lambda: "t")
+        slept = []
+        gh.sleep = slept.append
+        tried = self._timing_out(gh, fail_first=1)
+        self.assertEqual(gh.get("a"), {"via": "https"})          # the retry answered
+        self.assertEqual((len(tried), slept, gh.via), (2, [devwatch.TIMEOUT_BACKOFF], "https"))
+
+    def test_a_request_that_times_out_twice_goes_through_gh_once(self):
+        gh = devwatch.GitHub(lambda: "t")
+        gh.sleep = lambda s: None
+        tried = self._timing_out(gh, fail_first=2)
+        self.assertEqual(gh.get("a"), {"via": "gh"})             # both direct tries timed out: gh for this one
+        self.assertEqual((gh.via, gh.timeouts), ("https", 1))   # the feed stays on direct HTTPS
+        self.assertEqual(gh.get("b"), {"via": "https"})
+        self.assertEqual((len(tried), gh.timeouts), (3, 0))
+
+    def test_timeouts_that_keep_coming_switch_to_gh(self):
+        gh = devwatch.GitHub(lambda: "t")
+        gh.sleep = lambda s: None
+        tried = self._timing_out(gh, fail_first=10 ** 6)
+        for i in range(devwatch.TIMEOUTS_BEFORE_GH):
+            self.assertEqual(gh.get(f"p{i}"), {"via": "gh"})
+        self.assertEqual(gh.via, "gh")
+        self.assertEqual(len(tried), 2 * devwatch.TIMEOUTS_BEFORE_GH)
+        gh.get("later")
+        self.assertEqual(len(tried), 2 * devwatch.TIMEOUTS_BEFORE_GH)   # no more direct tries until HTTPS_RETRY
+
+    def test_timeouts_are_told_apart_from_blocked_sockets(self):
+        import http.client
+        import socket
+        import urllib.error
+        self.assertTrue(devwatch._timed_out(TimeoutError("timed out")))
+        self.assertTrue(devwatch._timed_out(socket.timeout("timed out")))
+        self.assertTrue(devwatch._timed_out(urllib.error.URLError(TimeoutError("timed out"))))
+        self.assertTrue(devwatch._timed_out(http.client.IncompleteRead(b"")))
+        self.assertFalse(devwatch._timed_out(urllib.error.URLError(PermissionError(10013, "forbidden"))))
+        self.assertFalse(devwatch._timed_out(urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get issuer")))
+
     def test_tls_context_verifies_through_the_os_store_or_certifi(self):
         import ssl
         ctx = devwatch.tls_context()
