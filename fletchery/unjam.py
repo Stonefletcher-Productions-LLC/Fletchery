@@ -8,13 +8,19 @@ and the only cure was a person at the keyboard. A restart clears it (SF-NODE-01,
 What it does, every EVERY seconds, from the Live snapshot:
 
   - takes each machine whose reservation holder is "PR check #N (GitHub run R)";
-  - asks GitHub whether run R is finished. A finished run that still holds the machine QUIET seconds later is a jam:
-    the job's own cleanup has run by then and could not end what the job left behind;
+  - asks GitHub, every round, for the latest attempt of run R and that attempt's jobs. When every job of it is
+    finished and the machine is still held QUIET seconds after the last one ended, that is a jam: the job's own cleanup
+    has run by then and could not end what the job left behind;
   - shows the jam under "Stuck or blocked" (devwatch.py reads `blockers()`), with what clears it;
   - restarts the machine when that is safe to do without a person: the machine signs in by itself after a restart
-    (restart.py reports this), the jam was seen on two rounds in a row, no restart is already under way, and this
-    machine was not restarted for a jam in the last AGAIN seconds (a restart that did not help must not loop).
-    The run that holds the machine is finished, so the restart ends no build.
+    (restart.py reports this), no restart is already under way, this machine was not restarted for a jam in the last
+    AGAIN seconds (a restart that did not help must not loop), and on two rounds in a row the jam was there and
+    nothing was working on the machine (`_working`): none of its GitHub runners busy, no Runner.Worker, no compiler.
+
+A re-run keeps the run's id, so what GitHub said about a run is never kept from one round to the next. 2026-11-22:
+attempt 16 of a run ended on one machine and was remembered as "the run is finished"; two hours later attempt 17 was
+compiling on the Gaming PC under the same id, was taken for a jam "finished 125 min ago", and the PC was restarted
+in the middle of that build (#284). Whatever cannot be read or proven counts as "not a jam" or "do not restart".
 
 A machine that does not sign in by itself is never restarted from here: it is flagged, and the text says what a person
 must do. Turn the restart off with `"autoUnjam": false` in the profile's workers.portal.live block; the flag stays.
@@ -32,6 +38,7 @@ from pathlib import Path
 EVERY = 120          # seconds between rounds
 QUIET = 600          # a finished run may hold the machine this long (its own cleanup) before it counts as a jam
 AGAIN = 2 * 3600     # one automatic restart per machine in this time
+STALE = 300          # a Live snapshot whose last good GitHub read is older than this says nothing about runners now
 _RUN = re.compile(r"PR check #(\d+) \(GitHub run (\d+)\)", re.I)
 
 
@@ -54,7 +61,7 @@ class Unjam:
         self.error = ""
         self.jams: dict[str, dict] = {}        # machine name (lower) -> the jam seen last round
         self.restarted: dict[str, float] = {}  # machine name (lower) -> when it was last restarted for a jam
-        self._finished: dict[str, dict] = {}   # run id -> {"repo", "at"} once GitHub says it is finished (final)
+        self._repo: dict[str, str] = {}        # run id -> its repository (that never changes; its state does)
         if self.path and self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -80,24 +87,53 @@ class Unjam:
         self.last = at
         self.round(at)
 
-    def _run_finished(self, run: str) -> dict | None:
-        """{"repo", "at"} when GitHub says the run is finished, None while it runs or cannot be found."""
-        if run in self._finished:
-            return self._finished[run]
-        for repo in (self.repos() if self.repos else []) or []:
+    def _latest_attempt(self, run: str) -> dict | None:
+        """{"repo", "attempt", "at"} when every job of the run's latest attempt is finished (`at`: when the last one
+        ended). None while any of them waits or runs, and when GitHub cannot be read or the run cannot be found.
+        Asked again every round: a re-run starts a new attempt under the same id at any time."""
+        for repo in [self._repo[run]] if run in self._repo else (self.repos() if self.repos else []) or []:
             try:
                 data = self.gh.api(f"repos/{repo}/actions/runs/{run}", fresh=True)
             except Exception:
                 continue                      # not this repository's run, or GitHub is unreachable: decide next round
             if not isinstance(data, dict) or not data.get("status"):
                 continue
+            self._repo[run] = repo
+            if len(self._repo) > 200:
+                self._repo.pop(next(iter(self._repo)))
             if data.get("status") != "completed":
-                return None                   # running again (a re-run reuses the id), so never cached
-            self._finished[run] = {"repo": repo, "at": _ts(data.get("updated_at")) or self.clock()}
-            if len(self._finished) > 200:
-                self._finished.pop(next(iter(self._finished)))
-            return self._finished[run]
+                return None
+            try:
+                attempt = int(data.get("run_attempt") or 1)
+                listed = self.gh.api(f"repos/{repo}/actions/runs/{run}/attempts/{attempt}/jobs?per_page=100", fresh=True)
+            except Exception:
+                return None
+            jobs = listed.get("jobs") if isinstance(listed, dict) else None
+            if not isinstance(jobs, list) or not jobs or int(listed.get("total_count") or 0) > len(jobs):
+                return None                   # its jobs cannot all be seen, so nothing is proven
+            if any(not isinstance(j, dict) or j.get("status") != "completed" for j in jobs):
+                return None
+            ended = max(_ts(j.get("completed_at")) for j in jobs)
+            return {"repo": repo, "attempt": attempt, "at": ended} if ended else None
         return None
+
+    @staticmethod
+    def _working(m: dict, snap: dict, at: float) -> str:
+        """What shows that this machine is working, as words for the page; "" when nothing does. An Unreal editor
+        alone is not counted: the editor a cancelled check left behind is the very thing a restart clears."""
+        procs = m.get("procs") or {}           # the machine's own report, at most a minute old
+        if procs.get("runner"):
+            return "A runner job is running on it (Runner.Worker)."
+        if procs.get("compiler"):
+            return "A compiler is running on it."
+        mine = {str(n).lower() for n in m.get("runners") or []}
+        for r in snap.get("runners") or []:
+            if str(r.get("name") or "").lower() in mine and (r.get("busy") or r.get("job")):
+                return f"Its runner {r.get('name')} is running a job."
+        fresh = snap.get("fresh") or {}
+        if fresh.get("error") or at - _ts(fresh.get("github")) > STALE:
+            return "GitHub cannot be read just now, so the state of its runners is not known."
+        return ""
 
     def round(self, at: float | None = None) -> list[dict]:
         """One pass. Returns the jams it sees now; restarts what it may."""
@@ -110,17 +146,22 @@ class Unjam:
             hit = _RUN.search(str((holder or {}).get("title") or ""))
             if not name or not hit or m.get("online") is False:
                 continue
-            done = self._run_finished(hit.group(2))
+            done = self._latest_attempt(hit.group(2))
             if not done or at - done["at"] < QUIET:
                 continue
+            if _ts(holder.get("since")) > done["at"]:
+                continue                      # held since after that attempt ended: a newer one has the machine
             signs_in = (m.get("after_restart") or {}).get("signs_in")
             seen[name.lower()] = {"machine": name, "pr": int(hit.group(1)), "run": hit.group(2), "repo": done["repo"],
-                                  "finished": done["at"], "signs_in": signs_in, "restart": (m.get("restart") or {}).get("state") or "",
-                                  "since": str(holder.get("since") or ""), "rounds": 1, "action": ""}
+                                  "attempt": done["attempt"], "finished": done["at"], "signs_in": signs_in,
+                                  "restart": (m.get("restart") or {}).get("state") or "", "working": self._working(m, snap, at),
+                                  "since": str(holder.get("since") or ""), "rounds": 1, "idle": 0, "action": ""}
         with self._lock:
             for key, jam in seen.items():
-                jam["rounds"] = self.jams.get(key, {}).get("rounds", 0) + 1
-                jam["action"] = self._act(key, jam, at)
+                was = self.jams.get(key, {})
+                jam["rounds"] = was.get("rounds", 0) + 1
+                jam["idle"] = 0 if jam["working"] else was.get("idle", 0) + 1
+                jam["action"] = self._act(key, jam, at, was.get("working"))
             cleared = [j["machine"] for k, j in self.jams.items() if k not in seen]
             self.jams = seen
             self.error = ""
@@ -129,8 +170,8 @@ class Unjam:
             self.log(f"unjam: {name} is no longer held by a finished check")
         return list(seen.values())
 
-    def _act(self, key: str, jam: dict, at: float) -> str:
-        """What happens to this jam now, as words for the page."""
+    def _act(self, key: str, jam: dict, at: float, before: str | None = None) -> str:
+        """What happens to this jam now, as words for the page. `before`: what was working there last round."""
         waited = at - self.restarted.get(key, 0)
         if jam["rounds"] == 1:
             self.log(f"unjam: {jam['machine']} is still held by PR check #{jam['pr']}, which finished "
@@ -145,8 +186,13 @@ class Unjam:
         if waited < AGAIN:
             return (f"Fletchery restarted it {int(waited // 60)} min ago for the same reason and it is held again, "
                     "so it will not restart it a second time. It needs a look.")
-        if jam["rounds"] < 2:
-            return "Fletchery restarts it on the next check if it is still held."
+        if jam["working"]:
+            if jam["working"] != before:
+                self.log(f"unjam: not restarting {jam['machine']}: {jam['working']}"[:300])
+            return (f"{jam['working']} Fletchery will not restart it until nothing runs there. "
+                    "Restart now on this machine's card ends what runs.")
+        if jam["idle"] < 2:
+            return "Fletchery restarts it on the next check if it is still held and nothing runs there."
         try:
             said = self.restart(jam["machine"], f"PR check #{jam['pr']} finished but still holds the machine")
         except Exception as e:
