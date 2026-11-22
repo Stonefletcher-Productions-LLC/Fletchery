@@ -309,12 +309,20 @@ TIMEOUT_BACKOFF = 2.0   # a timed-out direct request is tried once more after th
 TIMEOUTS_BEFORE_GH = 3  # this many requests in a row timing out twice each: treat it as blocked and use gh
 
 
+_TRANSIENT = (TimeoutError,                 # socket.timeout is TimeoutError since 3.10
+              http.client.IncompleteRead,   # the answer was cut short
+              ConnectionResetError)         # includes http.client.RemoteDisconnected: GitHub closed a kept-alive
+                                            # connection without answering (Gaming PC, 2026-11-22 22:46Z)
+
+
 def _timed_out(e: BaseException) -> bool:
-    """A timeout or a response cut short: GitHub (or this process) was slow, not unreachable."""
-    if isinstance(e, (TimeoutError, http.client.IncompleteRead)):    # socket.timeout is TimeoutError since 3.10
-        return True
+    """A timeout, a response cut short or a dropped connection: worth one more try, not a sign that this process
+    cannot reach GitHub at all."""
     reason = getattr(e, "reason", None)
-    return isinstance(reason, TimeoutError) or "timed out" in str(reason or e).lower()
+    if isinstance(e, _TRANSIENT) or isinstance(reason, _TRANSIENT):
+        return True
+    text = str(reason or e).lower()
+    return "timed out" in text or "remote end closed connection" in text
 
 
 class GitHub:
