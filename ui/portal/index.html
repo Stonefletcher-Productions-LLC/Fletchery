@@ -59,11 +59,11 @@
     <section class="card" id="liveChangesCard" aria-labelledby="h-lchg"><h2 id="h-lchg">Changes on their way <span class="count" id="n-lchg"></span></h2><p class="sub lead" id="liveChangesLead">Each change goes through these steps, left to right. Times come from how long each step took before.</p><ul class="rows" id="liveChanges"></ul></section>
     <section class="card" id="liveAgentsCard" aria-labelledby="h-lagents"><h2 id="h-lagents">Agents <span class="count" id="n-lagents"></span></h2><ul class="rows acts" id="liveAgents"></ul><p class="sub" id="liveAgentsQuiet" hidden></p></section>
     <section class="card" id="mergeCard" aria-labelledby="h-merge" hidden><h2 id="h-merge">Claude merge helper <span class="count" id="n-merge"></span></h2>
-      <p class="sub lead">Claude resolves conflicts with the base branch and fixes failed quick checks by pushing commits to the PR. It never merges or skips a check: the required checks and auto-merge decide.</p>
+      <p class="sub lead">Claude resolves conflicts with the base branch and fixes failed checks by pushing commits to the PR. It turns on auto-merge for every PR that is not a draft, and never skips a check: the required checks decide when it lands.</p>
       <ul class="rows" id="mergeStatus"></ul>
       <form id="mergeForm" class="form ctrl" hidden>
         <label class="check"><input type="checkbox" id="mOn"> On</label>
-        <label class="check"><input type="checkbox" id="mFix"> Also fix failed quick checks</label>
+        <label class="check"><input type="checkbox" id="mFix"> Also fix failed checks</label>
         <div class="form-row">
           <label>Pays with <select id="mBackend"><option value="api">API key (credit)</option><option value="subscription">Claude subscription</option></select></label>
           <label>Model <select id="mModel"></select></label>
