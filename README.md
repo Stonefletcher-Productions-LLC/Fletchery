@@ -15,12 +15,9 @@ The header shows your GitHub sign-in and selected project. Click the sign-in to 
 The open PR total follows the project selection. If GitHub times out, Live marks the total as partial and keeps
 the last confirmed count for each affected repository. Building now shows each running check's current GitHub step,
 elapsed time and completed steps, including checks that started before the most recent workflow runs.
-<<<<<<< HEAD
 Flow shows how long PR compile jobs waited for a runner, including the oldest still queued, alongside the all-jobs figure.
-=======
 If a later GitHub request times out, the dashboard keeps the runs and job steps it already received.
 A job that could not be refreshed keeps its last known step for the same attempt. A rerun starts with its own steps.
->>>>>>> origin/main
 During Build and test it also shows the phase reported by the machine and a rough time left based on
 finished jobs that ran at least this long. Earlier runs of the same PR take precedence.
 The live check card leads with what the machine is doing. Between phase reports, the latest observed tool
@@ -118,6 +115,8 @@ With "Also fix failed quick checks" on, a PR whose quick check (`Cheap checks`) 
 smallest fix. Fletchery checks the result, commits it and pushes the PR's branch with a normal push (never forced), and
 comments on the PR once. It never merges, approves, re-runs or skips a check: the required checks and auto-merge decide.
 One PR at a time, one try per commit, Claude running at below-normal priority with file tools and read-only git.
+A try that breaks on the PC itself (git, disk or network) does not count: it is tried again after 30 minutes, and
+only after the third break does the PR get a comment saying it needs a person.
 
 **Who pays** (switch any time on the card):
 - **API key (credit)**: the Anthropic API. Paste the key once into the card's *API key* box in the Fletchery window on
