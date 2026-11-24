@@ -24,7 +24,7 @@ class FakeGH:
         self.posts = []
 
     def api(self, path, method="GET", body=None, paginate=False, fresh=False):
-        if method == "POST":
+        if method in ("POST", "PUT"):
             self.posts.append((path, body))
             return {}
         if "/pulls?" in path:
@@ -127,6 +127,33 @@ class PickTests(unittest.TestCase):
         self.assertEqual((job["number"], job["kind"], job["check"]["id"]), (1, "fix", 9))
         h.tried["1:" + "1" * 40 + ":fix"] = "x"
         self.assertIsNone(h.next_job())
+
+    def test_any_failed_check_is_taken_unless_limited_to_named_ones(self):
+        checks = {"5" * 40: {"check_runs": [
+            {"name": "PR check / Cheap checks", "status": "completed", "conclusion": "success", "started_at": "2", "id": 1},
+            {"name": "PR check / Tip status", "status": "completed", "conclusion": "skipped", "started_at": "2", "id": 2},
+            {"name": "PR check / Compile and test", "status": "completed", "conclusion": "failure", "started_at": "1", "id": 3},
+            {"name": "PR check / Compile and test", "status": "completed", "conclusion": "success", "started_at": "0", "id": 4}]}}
+        gh = FakeGH(prs=[pr(5, "5" * 40, "e")], full={5: {"mergeable_state": "blocked"}}, checks=checks)
+        job = mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "k").next_job()
+        self.assertEqual((job["kind"], job["check"]["id"], job["check"]["name"]), ("fix", 3, "PR check / Compile and test"))
+        named = mergehelp.MergeHelper(cfg(self.dir, fixAllChecks=False), gh, lambda *_: None, key_reader=lambda: "k")
+        self.assertIsNone(named.next_job())
+
+    def test_a_check_running_again_is_not_taken(self):
+        checks = {"6" * 40: {"check_runs": [
+            {"name": "PR check / Compile and test", "status": "completed", "conclusion": "failure", "started_at": "1", "id": 3},
+            {"name": "PR check / Compile and test", "status": "in_progress", "conclusion": None, "started_at": "2", "id": 4}]}}
+        gh = FakeGH(prs=[pr(6, "6" * 40, "f")], full={6: {"mergeable_state": "blocked"}}, checks=checks)
+        self.assertIsNone(mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "k").next_job())
+
+    def test_the_log_excerpt_keeps_the_failed_lines_far_above_the_end(self):
+        log = "\n".join(["start"] + ["noise %d" % i for i in range(2000)] + ["Error: library -> pharmacy: 6 lane samples on the asphalt"]
+                        + ["cleanup %d" % i for i in range(600)])
+        out = mergehelp.log_excerpt(log)
+        self.assertIn("library -> pharmacy", out)
+        self.assertTrue(out.endswith("cleanup 599"))
+        self.assertNotIn("noise 5\n", out)
 
     def test_a_branch_pushed_minutes_ago_is_left_alone(self):
         gh = FakeGH(prs=[pr(2)], full={2: {"mergeable_state": "dirty"}}, pushed=mergehelp.now_iso())
@@ -311,6 +338,63 @@ class UnionMergeTest(unittest.TestCase):
             self.assertEqual(git("status", "--porcelain").stdout.strip(), "")
             self.assertEqual(len(git("rev-list", "--parents", "-1", "HEAD").stdout.split()), 3)   # still the merge commit
             self.assertEqual(helper._repair_union(wt), [])
+
+
+class AutoMergeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def helper(self, gh, **mh):
+        return mergehelp.MergeHelper(cfg(self.dir, **mh), gh, lambda *_: None, key_reader=lambda: "sk-ant-test")
+
+    @staticmethod
+    def full(n, state, sha="a" * 40):
+        return {"number": n, "state": "open", "mergeable_state": state, "node_id": f"PR_{n}",
+                "head": {"sha": sha, "repo": {"full_name": "o/r"}}}
+
+    def test_a_blocked_pr_gets_auto_merge_and_a_clean_one_is_merged(self):
+        gh = FakeGH([pr(1), pr(2)], {1: self.full(1, "blocked"), 2: self.full(2, "clean")})
+        self.helper(gh).arm_merges()
+        self.assertEqual(gh.posts[0][0], "graphql")
+        self.assertEqual(gh.posts[0][1]["variables"], {"id": "PR_1"})
+        self.assertEqual(gh.posts[1], ("repos/o/r/pulls/2/merge", {"merge_method": "merge", "sha": "a" * 40}))
+
+    def test_drafts_opted_out_and_already_armed_prs_are_left(self):
+        armed = dict(pr(3), auto_merge={"merge_method": "merge"})
+        gh = FakeGH([pr(1, draft=True), pr(2, labels=("do-not-merge",)), armed],
+                    {n: self.full(n, "blocked") for n in (1, 2, 3)})
+        self.helper(gh).arm_merges()
+        self.assertEqual(gh.posts, [])
+
+    def test_the_same_head_is_armed_once_and_a_new_head_again(self):
+        gh = FakeGH([pr(1)], {1: self.full(1, "blocked")})
+        h = self.helper(gh)
+        h.arm_merges()
+        h.arm_merges()
+        self.assertEqual(len(gh.posts), 1)
+        gh.prs, gh.full = [pr(1, sha="b" * 40)], {1: self.full(1, "blocked", sha="b" * 40)}
+        self.helper(gh).arm_merges()
+        self.assertEqual(len(gh.posts), 2)
+
+    def test_an_undecided_pr_waits_for_github(self):
+        gh = FakeGH([pr(1)], {1: self.full(1, "unknown")})
+        h = self.helper(gh)
+        h.arm_merges()
+        self.assertEqual(gh.posts, [])
+        gh.full = {1: self.full(1, "behind")}
+        h.arm_merges()
+        self.assertEqual(len(gh.posts), 1)
+
+    def test_it_runs_even_when_the_api_limits_pause_fixing(self):
+        gh = FakeGH([pr(1)], {1: self.full(1, "blocked")})
+        h = mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "")
+        h._pass()
+        self.assertEqual(len(gh.posts), 1)
+        self.assertIn("API key", h.last_note)
 
 
 if __name__ == "__main__":
