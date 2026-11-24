@@ -22,6 +22,18 @@ attempt 16 of a run ended on one machine and was remembered as "the run is finis
 compiling on the Gaming PC under the same id, was taken for a jam "finished 125 min ago", and the PC was restarted
 in the middle of that build (#284). Whatever cannot be read or proven counts as "not a jam" or "do not restart".
 
+A second jam, LifeShare #2530 (2026-11-23, Gaming PC): a killed UnrealEditor-Cmd became unkillable, kept the PR checkout's
+Binaries/Win64/UnrealEditor-LSBoot.dll mapped, and the next check sat 25 minutes in its checkout step. The rule above never
+saw it: that check was running, so its run was not finished. LifeShare's job now moves such files to
+<checkout>/Saved/StuckFiles and goes on; a file there that still cannot be opened for writing means the process that
+cannot be ended is alive. The reporter counts those files (reporter.py stuck_files). When a machine has shown any for
+QUIET seconds it is a jam too ("stuck-files"), handled by the same rules.
+
+A restart is always asked for "when idle": it never ends a running build. A machine whose reporter says it is someone's
+PC (presence "attended", the Gaming PC) is restarted only while nobody uses it: no keyboard or mouse input for AWAY
+seconds and none of the games LifeShare's game throttle watches running. Otherwise the jam is flagged and the card says
+it waits until they are away.
+
 A machine that does not sign in by itself is never restarted from here: it is flagged, and the text says what a person
 must do. Turn the restart off with `"autoUnjam": false` in the profile's workers.portal.live block; the flag stays.
 Standard library only."""
@@ -39,6 +51,7 @@ EVERY = 120          # seconds between rounds
 QUIET = 600          # a finished run may hold the machine this long (its own cleanup) before it counts as a jam
 AGAIN = 2 * 3600     # one automatic restart per machine in this time
 STALE = 300          # a Live snapshot whose last good GitHub read is older than this says nothing about runners now
+AWAY = 1800          # an attended PC is restarted only after this long without keyboard or mouse input
 _RUN = re.compile(r"PR check #(\d+) \(GitHub run (\d+)\)", re.I)
 
 
@@ -62,6 +75,7 @@ class Unjam:
         self.jams: dict[str, dict] = {}        # machine name (lower) -> the jam seen last round
         self.restarted: dict[str, float] = {}  # machine name (lower) -> when it was last restarted for a jam
         self._repo: dict[str, str] = {}        # run id -> its repository (that never changes; its state does)
+        self.first: dict[str, float] = {}      # machine name (lower) -> since when it has shown files still held
         if self.path and self.path.exists():
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -152,32 +166,83 @@ class Unjam:
             if _ts(holder.get("since")) > done["at"]:
                 continue                      # held since after that attempt ended: a newer one has the machine
             signs_in = (m.get("after_restart") or {}).get("signs_in")
-            seen[name.lower()] = {"machine": name, "pr": int(hit.group(1)), "run": hit.group(2), "repo": done["repo"],
-                                  "attempt": done["attempt"], "finished": done["at"], "signs_in": signs_in,
+            seen[name.lower()] = {"machine": name, "kind": "finished-check", "pr": int(hit.group(1)), "run": hit.group(2),
+                                  "repo": done["repo"], "attempt": done["attempt"], "finished": done["at"], "signs_in": signs_in,
                                   "restart": (m.get("restart") or {}).get("state") or "", "working": self._working(m, snap, at),
-                                  "since": str(holder.get("since") or ""), "rounds": 1, "idle": 0, "action": ""}
+                                  "presence": m.get("presence"), "since": str(holder.get("since") or ""), "rounds": 1, "idle": 0,
+                                  "action": ""}
+        held = set()
+        for m in snap.get("machines") or []:
+            name = str(m.get("name") or "")
+            stuck = m.get("stuck") if isinstance(m.get("stuck"), dict) else {}
+            if not name or m.get("online") is False or not int(stuck.get("locked") or 0):
+                continue
+            key = name.lower()
+            held.add(key)
+            first = self.first.setdefault(key, at)
+            if key in seen or at - first < QUIET:
+                continue
+            seen[key] = {"machine": name, "kind": "stuck-files", "pr": 0, "run": "", "repo": "", "attempt": 0,
+                         "finished": first, "locked": int(stuck["locked"]), "sample": str(stuck.get("sample") or "")[:200],
+                         "signs_in": (m.get("after_restart") or {}).get("signs_in"),
+                         "restart": (m.get("restart") or {}).get("state") or "", "working": self._working(m, snap, at),
+                         "presence": m.get("presence"), "since": datetime.fromtimestamp(first, timezone.utc).isoformat(),
+                         "rounds": 1, "idle": 0, "action": ""}
+        for key in [k for k in self.first if k not in held]:
+            del self.first[key]
         with self._lock:
             for key, jam in seen.items():
                 was = self.jams.get(key, {})
                 jam["rounds"] = was.get("rounds", 0) + 1
                 jam["idle"] = 0 if jam["working"] else was.get("idle", 0) + 1
-                jam["action"] = self._act(key, jam, at, was.get("working"))
+                jam["action"] = self._act(key, jam, at, was.get("working"), was.get("in_use"))
             cleared = [j["machine"] for k, j in self.jams.items() if k not in seen]
             self.jams = seen
             self.error = ""
             self._save()
         for name in cleared:
-            self.log(f"unjam: {name} is no longer held by a finished check")
+            self.log(f"unjam: {name} is no longer held by a finished check or a process that cannot be ended")
         return list(seen.values())
 
-    def _act(self, key: str, jam: dict, at: float, before: str | None = None) -> str:
-        """What happens to this jam now, as words for the page. `before`: what was working there last round."""
+    @staticmethod
+    def _in_use(jam: dict) -> str:
+        """Why an attended PC (the Gaming PC) must not be restarted now, as words for its card; "" when nobody uses it.
+        What cannot be read counts as "in use"."""
+        p = jam.get("presence")
+        if not isinstance(p, dict) or not p.get("attended"):
+            return ""
+        if p.get("games"):
+            return f"Waiting until you are away: {', '.join(p['games'][:3])} is running."
+        idle = p.get("input_idle")
+        if not isinstance(idle, (int, float)) or isinstance(idle, bool):
+            return "Waiting until you are away: this PC cannot tell when it was last used."
+        if idle < AWAY:
+            return (f"Waiting until you are away: this PC was used {int(idle // 60)} min ago. It restarts after "
+                    f"{AWAY // 60} min without keyboard or mouse input and with no game running.")
+        return ""
+
+    @staticmethod
+    def _why(jam: dict) -> str:
+        if jam.get("kind") == "stuck-files":
+            return (f"{jam['locked']} file(s) of its PR checkout are still held by a process that cannot be ended "
+                    "(Saved\\StuckFiles)")
+        return f"PR check #{jam['pr']} finished but still holds the machine"
+
+    def _act(self, key: str, jam: dict, at: float, before: str | None = None, was_in_use: str | None = None) -> str:
+        """What happens to this jam now, as words for the page. `before`: what was working there last round;
+        `was_in_use`: why an attended PC waited last round."""
         waited = at - self.restarted.get(key, 0)
+        jam["in_use"] = ""
         if jam["rounds"] == 1:
-            self.log(f"unjam: {jam['machine']} is still held by PR check #{jam['pr']}, which finished "
-                     f"{int((at - jam['finished']) // 60)} min ago")
+            if jam.get("kind") == "stuck-files":
+                self.log(f"unjam: {jam['machine']}: {self._why(jam)}, for {int((at - jam['finished']) // 60)} min")
+            else:
+                self.log(f"unjam: {jam['machine']} is still held by PR check #{jam['pr']}, which finished "
+                         f"{int((at - jam['finished']) // 60)} min ago")
         if jam["restart"] in ("requested", "sent"):
             return "It is restarting."
+        if jam["restart"] == "waiting":
+            return "It restarts as soon as nothing runs there."
         if jam["signs_in"] is not True:
             return ("It does not sign in by itself after a restart, so Fletchery will not restart it. End the leftover "
                     "UnrealEditor-Cmd in an elevated Task Manager, or restart it and sign in.")
@@ -191,15 +256,21 @@ class Unjam:
                 self.log(f"unjam: not restarting {jam['machine']}: {jam['working']}"[:300])
             return (f"{jam['working']} Fletchery will not restart it until nothing runs there. "
                     "Restart now on this machine's card ends what runs.")
+        in_use = self._in_use(jam)
+        jam["in_use"] = in_use
+        if in_use:
+            if not was_in_use:
+                self.log(f"unjam: not restarting {jam['machine']} yet: {in_use}"[:300])
+            return in_use
         if jam["idle"] < 2:
-            return "Fletchery restarts it on the next check if it is still held and nothing runs there."
+            return "Fletchery restarts it on the next check if it is still jammed and nothing runs there."
         try:
-            said = self.restart(jam["machine"], f"PR check #{jam['pr']} finished but still holds the machine")
+            said = self.restart(jam["machine"], self._why(jam))
         except Exception as e:
             self.log(f"unjam: could not restart {jam['machine']}: {type(e).__name__}: {e}"[:300])
             return f"Fletchery could not restart it ({type(e).__name__}: {e}). Use Restart now on this machine's card."[:300]
         self.restarted[key] = at
-        self.log(f"unjam: restarting {jam['machine']} to clear what PR check #{jam['pr']} left behind ({said})"[:300])
+        self.log(f"unjam: restarting {jam['machine']} when idle: {self._why(jam)} ({said})"[:300])
         return "Fletchery is restarting it to clear this."
 
     def blockers(self) -> list[dict]:
@@ -207,11 +278,26 @@ class Unjam:
         with self._lock:
             jams = [dict(j) for j in self.jams.values()]
         at = self.clock()
-        return [{"kind": "stuck",
-                 "title": f"{j['machine']}: PR check #{j['pr']} finished {int((at - j['finished']) // 60)} min ago but still holds the machine",
-                 "detail": "Something it left behind will not end, so every other check there fails at cleanup or waits. " + j["action"],
-                 "url": f"https://github.com/{j['repo']}/actions/runs/{j['run']}", "since": j["since"],
-                 "key": f"jam:{j['machine'].lower()}:{j['run']}", "repo": j["repo"]} for j in jams]
+        out = []
+        for j in jams:
+            if j.get("kind") == "stuck-files":
+                out.append({"kind": "stuck", "since": j["since"], "key": f"jam:{j['machine'].lower()}:stuck", "repo": "", "url": "",
+                            "title": f"{j['machine']}: a process that cannot be ended has held {j['locked']} file(s) of its PR "
+                                     f"checkout for {int((at - j['finished']) // 60)} min",
+                            "detail": "The PR check moved them aside (Saved\\StuckFiles) and went on, but that process stays until "
+                                      "a restart and may lock the next build. " + j["action"]})
+            else:
+                out.append({"kind": "stuck",
+                            "title": f"{j['machine']}: PR check #{j['pr']} finished {int((at - j['finished']) // 60)} min ago but still holds the machine",
+                            "detail": "Something it left behind will not end, so every other check there fails at cleanup or waits. " + j["action"],
+                            "url": f"https://github.com/{j['repo']}/actions/runs/{j['run']}", "since": j["since"],
+                            "key": f"jam:{j['machine'].lower()}:{j['run']}", "repo": j["repo"]})
+        return out
+
+    def notes(self) -> dict[str, str]:
+        """machine name (lower) -> what unjam says about it, for that machine's card ("waiting until you are away")."""
+        with self._lock:
+            return {k: f"Jammed: {self._why(j)}. {j['action']}" for k, j in self.jams.items()}
 
     def view(self) -> dict:
         with self._lock:

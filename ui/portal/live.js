@@ -532,6 +532,7 @@
         el('p', {class: 'sub', text: m.online ? 'Idle' : ''}),
       tools.length ? el('p', {class: 'sub', text: 'Running: ' + tools.join(', ')}) : null,
       m.runners && m.runners.length ? el('p', {class: 'sub', text: 'Runners: ' + m.runners.join(', ')}) : null,
+      m.unjam ? el('p', {class: 'why', text: m.unjam}) : null,
       restartRow(m));
   }
   function runnerRow(r) {

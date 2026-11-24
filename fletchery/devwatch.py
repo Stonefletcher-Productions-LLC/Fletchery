@@ -252,6 +252,25 @@ def _holder_name(path) -> str:
     return _text("\\".join(parts[-2:]) or "?", 80)
 
 
+def _stuck(x) -> dict | None:
+    """A reporter's count of files in a PR checkout's Saved\\StuckFiles that a process still holds (reporter.py)."""
+    if not isinstance(x, dict):
+        return None
+    n = lambda k: int(x[k]) if isinstance(x.get(k), (int, float)) and x[k] >= 0 else 0   # noqa: E731
+    return {"locked": n("locked"), "files": n("files"), "unknown": n("unknown"), "sample": _text(x.get("sample"), 200),
+            "folders": [_text(f, 200) for f in (x.get("folders") or [])[:8] if isinstance(f, str)]}
+
+
+def _presence(x) -> dict | None:
+    """Whether someone is using the machine (reporter.py presence()); None from a reporter that does not say."""
+    if not isinstance(x, dict):
+        return None
+    idle = x.get("input_idle")
+    return {"attended": x.get("attended") is True,
+            "input_idle": int(idle) if isinstance(idle, (int, float)) and not isinstance(idle, bool) and idle >= 0 else None,
+            "games": [_text(g, 40) for g in (x.get("games") or [])[:10] if isinstance(g, str)]}
+
+
 def _disk_guard(g) -> dict | None:
     """LifeShare's disk guard report (disk.json, sent by reporter.py 2+), cleaned for the page; None without one."""
     if not isinstance(g, dict) or _num(g.get("freeGB")) is None:
@@ -616,6 +635,7 @@ class DevWatch:
         self.reports: dict[str, dict] = {}          # machine -> its last report
         self.restarts = restartmod.Restarts(Path(state_dir) / "restarts.json" if state_dir else None)   # the Restart button
         self.extra_blockers = None                  # callable -> [block() keyword dicts] from helpers (unjam.py)
+        self.machine_notes = None                   # callable -> {machine name (lower): text for its card} (unjam.py)
         self.skip: dict[str, tuple[float, bool]] = {}  # path -> retry time, GitHub explicitly reported a missing ref
         self.last_ok = ""
         self.last_try = ""
@@ -705,7 +725,12 @@ class DevWatch:
         if data.get("busy") and not was.get("busy"):
             self._wake.set()      # a machine just picked something up: read GitHub soon (once, not on every report)
         lease = data.get("lease") if isinstance(data.get("lease"), dict) else None
-        idle = not data.get("busy") and not (lease and lease.get("alive") is not False)
+        # Idle for a restart that waits: no runner job, no activity, no lease held by a live process. A lease whose
+        # process is gone runs nothing (a cancelled check can leave one behind; unjam.py restarts for exactly that).
+        procs = data.get("procs") if isinstance(data.get("procs"), dict) else {}
+        # The reporter's "busy" counts any lease, so with a dead one it says no more than the runner and activities do.
+        idle = (not (lease and lease.get("alive") is not False) and not procs.get("runner") and not data.get("activities")
+                and not (data.get("busy") and not lease))
         cmd = self.restarts.poll(str(machine), data.get("boot"), _text(data.get("restart_ack"), 60), idle=idle)
         return {"ok": True, "every": 10, **({"restart": cmd} if cmd else {})}
 
@@ -1437,6 +1462,13 @@ class DevWatch:
             # else every runner that could take it is busy: a queue, shown with the runs, not stuck
 
         machines_out = self._machines(at, runners_out, block)
+        try:
+            notes = self.machine_notes() if self.machine_notes else {}
+            for m in machines_out:
+                if notes.get(str(m.get("name") or "").lower()):
+                    m["unjam"] = _text(notes[str(m["name"]).lower()], 400)
+        except Exception as e:              # a helper must never take the page down
+            self.log(f"live: machine notes failed: {type(e).__name__}: {e}"[:300])
         self._reservations(at, machines_out, runs_out)
 
         prs_out = []
@@ -2175,7 +2207,7 @@ class DevWatch:
                                 "runners": [], "version": _text(d.get("version"), 20),
                                 "key": _text(name, 63), "boot": _text(d.get("boot"), 30), "can_restart": bool(d.get("boot")),
                                 "after_restart": {k: ready.get(k) for k in ("signs_in", "guard") if isinstance(ready.get(k), bool)},
-                                "restart": restart}
+                                "restart": restart, "stuck": _stuck(d.get("stuck")), "presence": _presence(d.get("presence"))}
         for r in runners:
             key = r["machine"].lower()
             # A runner belongs to the reporting machine whose name it starts with (<COMPUTERNAME>-<label>), even when

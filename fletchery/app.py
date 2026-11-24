@@ -197,7 +197,8 @@ class App:
         live = lambda: self.portal.live if self.portal and self.portal.live is not None else None   # noqa: E731
         self.unjam = Unjam(self.gh, self.log, self.state_dir,
                            snapshot=lambda: live().snapshot() if live() else None,
-                           restart=lambda name, reason: live().restart_machine(name, by="Fletchery", reason=reason, force=True)["message"],
+                           # When idle, never forced: an automatic restart must not end a running build (LifeShare #2530).
+                           restart=lambda name, reason: live().restart_machine(name, by="Fletchery", reason=reason, when_idle=True)["message"],
                            repos=lambda: [str(r.get("repo") or r.get("full_name") or "") for r in (live().repos if live() else [])
                                           if isinstance(r, dict) and "/" in str(r.get("repo") or r.get("full_name") or "")],
                            enabled=not (isinstance(live_conf, dict) and live_conf.get("autoUnjam") is False))
@@ -302,6 +303,7 @@ class App:
             try:
                 if self.portal and self.portal.live is not None and self.portal.live.extra_blockers is None:
                     self.portal.live.extra_blockers = self.unjam.blockers
+                    self.portal.live.machine_notes = self.unjam.notes
                 self.unjam.tick()
             except Exception as e:
                 self.unjam.error = f"{type(e).__name__}: {e}"[:300]
