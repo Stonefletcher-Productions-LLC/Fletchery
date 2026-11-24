@@ -241,6 +241,29 @@ restarts it by hand. A machine that does not sign in by itself is flagged and ne
 `"autoUnjam": false` in the profile's `workers.portal.live` block turns the restart off; the flag stays. Automatic
 re-runs wait for a machine in this state.
 
+### A process that cannot be ended still holds files (LifeShare #2530)
+
+The rule above misses a jam a *running* check hits: on 2026-11-23 a killed UnrealEditor-Cmd on the Gaming PC kept
+`Binaries\Win64\UnrealEditor-LSBoot.dll` of the PR checkout mapped and the next check sat 25 minutes in its checkout
+step. LifeShare's job now moves such a file to `<PR checkout>\Saved\StuckFiles\<utc stamp>\...` and goes on. The
+reporter looks there every minute and counts the files it cannot open exclusively for writing: each one is held by a
+process that is still alive, and only a restart ends it. A machine that shows any for ten minutes is jammed, with the
+same rules as above (signs in by itself, once in two hours, nothing working on two looks in a row).
+
+The reporter finds the PR checkouts from `prCheckouts` in reporter.json, else from `PR_CHECKOUT_ROOT` in each PR
+runner's `.env` (written by LifeShare's `Tools\CI\InstallPrRunner.ps1`).
+
+### How a restart is asked for
+
+Automatic restarts are always **when idle**: a running build is never ended. A lease whose process is gone does not
+count as running.
+
+**Someone's PC** (the reporter says `attended`: `"attended": true` in reporter.json, or LifeShare's game throttle runs
+there) is restarted only when nobody uses it: no keyboard or mouse input for 30 minutes in the signed-in session and
+none of the games the game throttle watches (`yieldTo` in the lease folder's machine.json, else its defaults) running.
+Input that cannot be read counts as in use. Until then the jam stays flagged and the machine's card says
+"Waiting until you are away" and why. Other machines (SF-NODE-01) restart when idle as before.
+
 ## A waiting check that was cancelled and never put back
 
 `requeue.py` looks every five minutes. GitHub starts nothing by itself after a cancel, so a check that something

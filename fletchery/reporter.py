@@ -9,6 +9,10 @@ What it reads (reading starts, stops and changes nothing):
     rewritten for 3 minutes is ignored (its script died);
   - which tools run (GitHub job, Unreal editor, compiler, shader workers, Claude, Blender), counted by process name;
   - CPU, memory and free disk;
+  - <PR checkout>\\Saved\\StuckFiles: how many files there cannot be opened for writing, so a process that cannot be
+    ended is still alive (LifeShare #2530; unjam.py restarts the machine for it);
+  - whether someone is using this machine: seconds since the last keyboard or mouse input and which games run (for
+    unjam.py's guard on a personal PC: never restart it under someone);
   - <lease folder>/disk.json, written by LifeShare's disk guard (Tools/CI/DiskGuard.ps1) every 10 minutes: the build
     drive's free and total space, its state (ok, low, full), the thresholds, the runner services it stopped and the
     biggest folders. Sent as it is, bounded; the Live tab warns from it.
@@ -51,7 +55,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import restart as restartmod  # noqa: E402
 
-VERSION = "6"  # reports its boot time and acts on a restart request in the answer (restart.py)
+VERSION = "7"  # 6: boot time and restart requests (restart.py); 7: stuck files and presence (unjam.py)
 WINDOWS = os.name == "nt"
 DEFAULT_LEASE = r"E:\GitHubRunner\ResourceLeases\heavy.json"
 FRESH = 180                     # seconds a queue ticket or activity file stays valid without a rewrite
@@ -115,6 +119,9 @@ if WINDOWS:
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     _k32.OpenProcess.restype = wintypes.HANDLE
+    _k32.CreateFileW.restype = wintypes.HANDLE
+    _k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                 wintypes.DWORD, wintypes.HANDLE]
 
 
 def process_names() -> list[str]:
@@ -213,6 +220,120 @@ def memory() -> dict:
 
 
 GUARD_FRESH = 3600   # a disk.json older than this is left out (its guard stopped); the drive figures above stay
+
+
+STUCK_MAX = 400                 # files looked at under one checkout's Saved\StuckFiles per scan
+STUCK_EVERY = 60                # seconds between scans (each one opens files)
+LOCKED = (32, 33, 1224)         # sharing violation, lock violation, user-mapped section: a process still holds it
+GAMES = ["Wow", "WowClassic", "WowT", "WowB", "eu5"]   # LifeShare Tools/CI/GameThrottle.ps1's defaults
+
+
+def pr_checkouts(cfg: dict, runner_roots) -> list[Path]:
+    """The PR checks' standing checkouts on this machine: "prCheckouts" in reporter.json, else every folder under the
+    PR_CHECKOUT_ROOT that each PR runner's .env names (LifeShare Tools/CI/InstallPrRunner.ps1 writes it). Only that one
+    key of the .env is read."""
+    if isinstance(cfg.get("prCheckouts"), list):
+        return [Path(str(p)) for p in cfg["prCheckouts"][:8] if p]
+    out: list[Path] = []
+    for root in runner_roots or []:
+        try:
+            lines = (Path(root) / ".env").read_text(encoding="utf-8-sig").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, _, value = line.partition("=")
+            if key.strip().upper() == "PR_CHECKOUT_ROOT" and value.strip():
+                base = Path(value.strip().strip('"'))
+                try:
+                    out += sorted(p for p in base.iterdir() if p.is_dir())[:8]
+                except OSError:
+                    pass
+    return out
+
+
+def _locked(path: Path) -> bool | None:
+    """True when the file cannot be opened for writing because a process holds it; None when that cannot be told
+    (no access, gone). Opening it changes nothing in it. On Windows the open is exclusive (share none), as LifeShare's
+    Tools/CI/Stop-JobProcesses.ps1 tests it: a DLL mapped as an image lets a shared open for writing through."""
+    if WINDOWS:
+        h = _k32.CreateFileW(str(path), 0xC0000000, 0, None, 3, 0x80, None)   # read+write, share none, open existing
+        if h and h != wintypes.HANDLE(-1).value:
+            _k32.CloseHandle(h)
+            return False
+        return True if ctypes.get_last_error() in LOCKED else None
+    try:
+        with open(path, "r+b"):
+            return False
+    except OSError as e:
+        if getattr(e, "winerror", None) in LOCKED:
+            return True
+        return None
+
+
+def stuck_files(checkouts) -> dict | None:
+    """What the PR check left in <checkout>\\Saved\\StuckFiles (LifeShare #2530: Tools/CI/Stop-JobProcesses.ps1 moves a
+    file there that a process which cannot be ended keeps locked, so the build can go on). A file there that still
+    cannot be opened for writing means that process still lives: only a restart ends it. None when no checkout has
+    the folder."""
+    found = None
+    for co in checkouts or []:
+        folder = Path(co) / "Saved" / "StuckFiles"
+        if not folder.is_dir():
+            continue
+        found = found or {"locked": 0, "files": 0, "unknown": 0, "folders": [], "sample": ""}
+        found["folders"].append(str(folder)[:200])
+        try:
+            files = [p for p in islice(folder.rglob("*"), STUCK_MAX * 2) if p.is_file()][:STUCK_MAX]
+        except OSError:
+            continue
+        for p in files:
+            found["files"] += 1
+            state = _locked(p)
+            if state:
+                found["locked"] += 1
+                found["sample"] = found["sample"] or str(p.relative_to(folder))[:200]
+            elif state is None:
+                found["unknown"] += 1
+    return found
+
+
+def presence(lease_dir: Path | None, names, cfg: dict) -> dict:
+    """Whether someone is using this machine, for the restart guard on a personal PC (unjam.py).
+    attended: this machine is someone's PC: "attended" in reporter.json, else LifeShare's game throttle runs here
+    (<lease folder>\\game-throttle.last, Tools/CI/GameThrottle.ps1 writes it every minute).
+    input_idle: seconds since the last keyboard or mouse input in the signed-in session; None when that cannot be read,
+    or when this reporter is not in the console session (it would read some other session's input).
+    games: the games from GameThrottle's list (<lease folder>\\machine.json "yieldTo", else its defaults) running now."""
+    attended = cfg.get("attended")
+    if not isinstance(attended, bool):
+        attended = bool(lease_dir and (lease_dir / "game-throttle.last").exists())
+    games = GAMES
+    machine = _read_json(lease_dir / "machine.json") if lease_dir else None
+    if isinstance(machine, dict) and isinstance(machine.get("yieldTo"), list) and machine["yieldTo"]:
+        games = [str(g) for g in machine["yieldTo"]][:20]
+    running = set(names)
+    playing = sorted({g for g in games if g.lower() + ".exe" in running or g.lower() in running})
+    return {"attended": attended, "input_idle": input_idle(), "games": playing}
+
+
+def input_idle() -> int | None:
+    if not WINDOWS:
+        return None
+    try:
+        class _LII(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+        sid = wintypes.DWORD()
+        if not _k32.ProcessIdToSessionId(os.getpid(), ctypes.byref(sid)):
+            return None
+        if sid.value != _k32.WTSGetActiveConsoleSessionId():
+            return None
+        info = _LII()
+        info.cbSize = ctypes.sizeof(_LII)
+        if not ctypes.WinDLL("user32").GetLastInputInfo(ctypes.byref(info)):
+            return None
+        return int(((_k32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) // 1000)
+    except (OSError, AttributeError):
+        return None
 
 
 def disk_guard(folder: Path) -> dict | None:
@@ -517,6 +638,8 @@ class Reporter:
         if roots is None:
             roots = [str(self.lease.parent.parent / "UnrealPR")] if self.lease else []
         self.runner_logs = RunnerLogProgress(roots)
+        self.runner_roots = roots
+        self.stuck = (0.0, None)   # (scanned at, stuck_files())
         self.cpu = Cpu()
         self.idle_since = 0.0
         self.restart_ack = ""
@@ -565,7 +688,11 @@ class Reporter:
                     acts.append({k: str(rec.get(k) or "")[:300] for k in ("title", "kind", "detail", "since")})
         guard = disk_guard(self.lease.parent) if self.lease else None
         procs: dict[str, int] = {}
-        for n in process_names():
+        names = process_names()
+        if time.time() - self.stuck[0] > STUCK_EVERY:
+            self.stuck = (time.time(), stuck_files(pr_checkouts(self.cfg, self.runner_roots)))
+        here = presence(self.lease.parent if self.lease else None, names, self.cfg)
+        for n in names:
             if n in TOOLS:
                 procs[TOOLS[n]] = procs.get(TOOLS[n], 0) + 1
         cpu = self.cpu.percent()
@@ -579,6 +706,7 @@ class Reporter:
         return {"version": VERSION, "host": socket.gethostname(), "at": now_iso(), "lease": lease, "queue": queue[:10],
                 "boot": restartmod.boot_time(), "restart_ack": self.restart_ack, "after_restart": self.ready[1],
                 "activities": acts[:10], "procs": procs, "stats": stats, "disk_guard": guard,
+                "stuck": self.stuck[1], "presence": here,
                 "idle_seconds": round(time.time() - self.idle_since) if self.idle_since else 0,
                 "busy": bool(lease or procs.get("runner") or acts)}
 

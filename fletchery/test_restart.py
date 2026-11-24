@@ -222,6 +222,16 @@ class WiringTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no restart request"):
             w.restart_machine("GAMING-PC", "claude", cancel=True)
 
+    def test_a_lease_whose_process_is_gone_does_not_hold_back_a_restart_when_idle(self):
+        # unjam.py asks "when idle" for a machine a finished check still holds: that lease's process is gone.
+        w = self.watch()
+        dead = {"purpose": "PR check #12 (GitHub run 5)", "since": iso(datetime.now(timezone.utc).timestamp() - 3600), "alive": False}
+        self.report(w, lease=dead, busy=True)
+        out = w.restart_machine("GAMING-PC", "Fletchery", when_idle=True)
+        self.assertTrue(out["waiting"])
+        self.assertNotIn("restart", self.report(w, lease=dead, busy=True, procs={"runner": 1}))   # a job runs: wait
+        self.assertEqual(self.report(w, lease=dead, busy=True)["restart"]["id"], out["id"])
+
     def test_busy_machine_needs_force_and_unknown_or_old_machines_are_refused(self):
         w = self.watch()
         lease = {"purpose": "PR check #12 (GitHub run 5)", "since": iso(datetime.now(timezone.utc).timestamp() - 60), "alive": True}
