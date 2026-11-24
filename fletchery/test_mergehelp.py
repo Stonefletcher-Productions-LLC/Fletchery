@@ -210,6 +210,43 @@ class ConflictTests(unittest.TestCase):
         self.assertEqual(git(self.origin, "rev-parse", "feature"), self.sha)
         self.assertIn("needs a person", self.gh.posts[0][1]["body"])
 
+    def test_a_try_the_pc_broke_is_tried_again_later_and_told_only_at_the_last(self):
+        h = self.helper(resolve=True)
+        key = f"7:{self.sha}:conflict"
+
+        def broken():
+            raise OSError("the clone could not be fetched")
+        real_clone, h.clone = h.clone, broken
+        self.assertEqual(h.do(self.job()), "error")
+        self.assertEqual(self.gh.posts, [])                       # one bad moment is not told on the PR
+        self.assertFalse(h.may_try(key))                          # not straight away...
+        h.errors[key]["at"] = "2000-01-01T00:00:00Z"
+        self.assertTrue(h.may_try(key))                           # ...but after retryMinutes
+        saved = json.loads((self.state / "merge-helper.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["_errors"][key]["n"], 1)           # and a restart keeps the count
+        again = mergehelp.MergeHelper(cfg(self.state), self.gh, lambda *_: None, key_reader=lambda: "k")
+        self.assertEqual(again.errors[key]["n"], 1)
+        h.clone = real_clone
+        self.assertEqual(h.do(self.job()), "pushed")              # the retry lands
+        self.assertNotIn(key, h.errors)
+        self.assertFalse(h.may_try(key))
+
+    def test_a_try_that_keeps_breaking_is_told_once_and_left(self):
+        h = self.helper(resolve=True)
+        key = f"7:{self.sha}:conflict"
+
+        def broken():
+            raise OSError("disk full")
+        h.clone = broken
+        for _ in range(2):
+            self.assertEqual(h.do(self.job()), "error")
+            h.errors[key]["at"] = "2000-01-01T00:00:00Z"
+        self.assertEqual(h.do(self.job()), "gave up")
+        self.assertEqual(len(self.gh.posts), 1)
+        self.assertIn("broke 3 times", self.gh.posts[0][1]["body"])
+        h.errors[key]["at"] = "2000-01-01T00:00:00Z"
+        self.assertFalse(h.may_try(key))
+
 
 
 class UnionMergeTest(unittest.TestCase):

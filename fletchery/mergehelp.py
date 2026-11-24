@@ -13,7 +13,9 @@ Each pass (every `everyMinutes`, one PR at a time, on this PC):
      commits the merge and pushes the branch.
   3. With `fixChecks` on: a PR whose newest run of a check named in `fixCheckNames` failed on its head commit. Claude
      gets the end of that check's log and makes the smallest fix. Fletchery commits and pushes it.
-  Each PR head commit gets one try per kind; a failure is told on the PR once.
+  Each PR head commit gets one try per kind; a failure is told on the PR once. A try that breaks on this PC (git,
+  disk or network, not Claude's judgement) is not a try: it is retried after `retryMinutes`, up to `maxErrors`
+  times, and only then told on the PR, so one bad moment never leaves a conflicted PR alone for good.
 
 Claude runs as the Claude Code CLI (`claude -p`) in that worktree, at below-normal priority, with file tools and
 read-only git only (no commit, push, gh or web). The backend is swappable from the page:
@@ -60,6 +62,7 @@ DEFAULTS = {"enabled": True, "backend": "api", "model": "claude-opus-5-5", "base
             "fixCheckNames": ["Cheap checks"], "budgetUsd": 230.0, "budgetFrom": "", "budgetUntil": "2026-12-01",
             "afterBudget": "subscription", "dailyUsd": 40.0, "perRunUsd": 6.0, "everyMinutes": 10, "quietMinutes": 20,
             "skipLabels": ["no-claude", "do-not-merge"], "claude": "claude", "workDir": "", "maxTurns": 80,
+            "retryMinutes": 30, "maxErrors": 3,
             "runMinutes": 40, "cacheTtl": "5m"}
 # Flags that keep each run's prompt small and the same across PR worktrees, so Claude Code's prompt cache holds.
 CLAUDE_CACHE_FLAGS = ["--exclude-dynamic-system-prompt-sections", "--strict-mcp-config", "--disable-slash-commands"]
@@ -222,6 +225,8 @@ class MergeHelper:
         self.ledger_path = self.state_dir / "merge-helper-runs.jsonl"
         self.page = self._load_page()
         self.tried: dict[str, str] = self.page.pop("_tried", {}) if isinstance(self.page.get("_tried"), dict) else {}
+        # Tries that broke on this PC (an exception, not Claude's answer): key -> {"n": count, "at": last time}.
+        self.errors: dict[str, dict] = self.page.pop("_errors", {}) if isinstance(self.page.get("_errors"), dict) else {}
         self.busy = ""            # what runs now
         self.last_pass = ""
         self.last_note = ""
@@ -241,7 +246,8 @@ class MergeHelper:
     def _save_page(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.settings_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**self.page, "_tried": dict(list(self.tried.items())[-500:])}, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps({**self.page, "_tried": dict(list(self.tried.items())[-500:]),
+                                   "_errors": dict(list(self.errors.items())[-200:])}, indent=1), encoding="utf-8")
         tmp.replace(self.settings_path)
 
     def setting(self, name: str):
@@ -388,13 +394,23 @@ class MergeHelper:
             pushed = ((commit.get("commit") or {}).get("committer") or {}).get("date") or ""
             if _age_min(pushed) < float(self.prof.get("quietMinutes") or 0):
                 continue                              # someone is working on it
-            if full.get("mergeable_state") == "dirty" and f"{pr['number']}:{pr['sha']}:conflict" not in self.tried:
+            if full.get("mergeable_state") == "dirty" and self.may_try(f"{pr['number']}:{pr['sha']}:conflict"):
                 return {**pr, "kind": "conflict"}
-            if self.setting("fixChecks") and f"{pr['number']}:{pr['sha']}:fix" not in self.tried:
+            if self.setting("fixChecks") and self.may_try(f"{pr['number']}:{pr['sha']}:fix"):
                 failed = self._failed_quick_check(repo, pr["sha"])
                 if failed:
                     fixes.append({**pr, "kind": "fix", "check": failed})
         return fixes[0] if fixes else None
+
+    def may_try(self, key: str) -> bool:
+        """Not tried yet, or only broken by an error on this PC, fewer than `maxErrors` times, `retryMinutes` ago."""
+        if key not in self.tried:
+            return True
+        e = self.errors.get(key)
+        if not isinstance(e, dict):
+            return False
+        return int(e.get("n") or 0) < int(self.prof.get("maxErrors") or 1) and \
+            _age_min(str(e.get("at") or "")) >= float(self.prof.get("retryMinutes") or 0)
 
     def _failed_quick_check(self, repo: str, sha: str) -> dict | None:
         names = [n.lower() for n in self.setting("fixCheckNames") or []]
@@ -510,20 +526,41 @@ class MergeHelper:
     # ---- one job ----
     def do(self, job: dict) -> str:
         n, kind = job["number"], job["kind"]
-        self.tried[f"{n}:{job['sha']}:{kind}"] = now_iso()
+        key = f"{n}:{job['sha']}:{kind}"
+        self.tried[key] = now_iso()
         self._save_page()
         self.busy = f"#{n}: " + ("resolving conflicts with " + self.setting("base") if kind == "conflict"
                                  else f"fixing {job['check']['name']}")
         self.log(f"merge helper: {self.busy} ({self.backend()}, {self.setting('model')})")
-        repo_dir = self.clone()
-        wt = self._worktree(repo_dir, job)
         row = {"at": now_iso(), "pr": n, "kind": kind, "sha": job["sha"][:12]}
+        repo_dir = wt = None
         try:
+            repo_dir = self.clone()
+            wt = self._worktree(repo_dir, job)
             result, detail, r = (self._conflict(job, wt) if kind == "conflict" else self._fix(job, wt))
         except Exception as e:
             result, detail, r = "error", f"{type(e).__name__}: {e}"[:300], {}
         finally:
-            self._drop_worktree(repo_dir, wt)
+            if repo_dir is not None and wt is not None:
+                try:
+                    self._drop_worktree(repo_dir, wt)
+                except Exception as e:
+                    self.log(f"merge helper: could not drop the worktree for #{n}: {e}")
+        if result == "error":
+            # The PC broke the try, not Claude: try this head again later, and tell the PR only once it keeps breaking.
+            e = self.errors.get(key) if isinstance(self.errors.get(key), dict) else {}
+            self.errors[key] = {"n": int(e.get("n") or 0) + 1, "at": now_iso()}
+            self._save_page()
+            if self.errors[key]["n"] >= int(self.prof.get("maxErrors") or 1):
+                result = "gave up"
+                detail = f"it broke {self.errors[key]['n']} times on this PC: {detail}"
+            else:
+                self.error = detail
+                detail += f" (try {self.errors[key]['n']} of {int(self.prof.get('maxErrors') or 1)}; again in " \
+                          f"{float(self.prof.get('retryMinutes') or 0):g} min)"
+        elif key in self.errors:
+            self.errors.pop(key, None)
+            self._save_page()
         row.update({"backend": self.backend(), "model": self.setting("model"), **r, "result": result, "detail": detail[:400]})
         self._record(row)
         cost = f", ${r.get('cost_usd', 0):.2f}" if r else ""
