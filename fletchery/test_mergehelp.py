@@ -19,8 +19,9 @@ def cfg(state, **mh):
 
 
 class FakeGH:
-    def __init__(self, prs=(), full=None, checks=None, pushed="2026-01-01T00:00:00Z"):
+    def __init__(self, prs=(), full=None, checks=None, statuses=None, pushed="2026-01-01T00:00:00Z"):
         self.prs, self.full, self.checks, self.pushed = list(prs), full or {}, checks or {}, pushed
+        self.statuses = statuses or {}
         self.posts = []
 
     def api(self, path, method="GET", body=None, paginate=False, fresh=False):
@@ -31,6 +32,8 @@ class FakeGH:
             return self.prs
         if "/check-runs" in path:
             return self.checks.get(path.split("/commits/")[1].split("/")[0], {"check_runs": []})
+        if "/status?" in path:
+            return {"statuses": self.statuses.get(path.split("/commits/")[1].split("/")[0], [])}
         if "/commits/" in path:
             return {"commit": {"committer": {"date": self.pushed}}}
         if "/pulls/" in path:
@@ -146,6 +149,32 @@ class PickTests(unittest.TestCase):
             {"name": "PR check / Compile and test", "status": "in_progress", "conclusion": None, "started_at": "2", "id": 4}]}}
         gh = FakeGH(prs=[pr(6, "6" * 40, "f")], full={6: {"mergeable_state": "blocked"}}, checks=checks)
         self.assertIsNone(mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "k").next_job())
+
+    def test_a_failed_commit_status_is_taken_when_there_are_no_check_runs(self):
+        sha = "7" * 40
+        gh = FakeGH(prs=[pr(7, sha, "g")], full={7: {"mergeable_state": "blocked"}},
+                    checks={sha: {"check_runs": []}},
+                    statuses={sha: [
+                        {"context": "PR check / Cheap checks", "state": "success", "id": 11},
+                        {"context": "PR check / Compile and test", "state": "failure", "id": 12,
+                         "target_url": "https://example.org/check", "created_at": "2026-11-26T07:41:12Z"}]})
+        job = mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "k").next_job()
+        self.assertEqual((job["kind"], job["check"]["name"], job["check"]["id"]),
+                         ("fix", "PR check / Compile and test", 12))
+        self.assertEqual(job["check"]["url"], "https://example.org/check")
+
+    def test_a_pending_status_or_a_newer_success_is_not_a_failure(self):
+        sha = "8" * 40
+        old = {"context": "PR check / Compile and test", "state": "failure", "id": 21, "created_at": "1"}
+        gh = FakeGH(prs=[pr(8, sha, "h")], full={8: {"mergeable_state": "blocked"}},
+                    statuses={sha: [old, dict(old, state="pending", id=22, created_at="2")]})
+        self.assertIsNone(mergehelp.MergeHelper(cfg(self.dir), gh, lambda *_: None, key_reader=lambda: "k").next_job())
+        newer = FakeGH(prs=[pr(8, sha, "h")], full={8: {"mergeable_state": "blocked"}},
+                       checks={sha: {"check_runs": [
+                           {"name": "PR check / Compile and test", "status": "completed", "conclusion": "success",
+                            "started_at": "3", "id": 23}]}},
+                       statuses={sha: [old]})
+        self.assertIsNone(mergehelp.MergeHelper(cfg(self.dir), newer, lambda *_: None, key_reader=lambda: "k").next_job())
 
     def test_the_log_excerpt_keeps_the_failed_lines_far_above_the_end(self):
         log = "\n".join(["start"] + ["noise %d" % i for i in range(2000)] + ["Error: library -> pharmacy: 6 lane samples on the asphalt"]
