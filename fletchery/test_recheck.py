@@ -22,9 +22,9 @@ class FakeGitHub:
         return {}
 
 
-def group(cause, runner, prs, tests=("No result: the machine stayed busy",)):
-    return {"cause": cause, "check": "PR check / Compile and test", "repo": REPO, "runner": runner, "tests": list(tests),
-            "prs": [{"repo": REPO, "number": n, "job": j, "check": "PR check / Compile and test"} for n, j in prs]}
+def group(cause, runner, prs, tests=("No result: the machine stayed busy",), repo=REPO):
+    return {"cause": cause, "check": "PR check / Compile and test", "repo": repo, "runner": runner, "tests": list(tests),
+            "prs": [{"repo": repo, "number": n, "job": j, "check": "PR check / Compile and test"} for n, j in prs]}
 
 
 def snap(problems, blockers=(), machines=None, partial=False):
@@ -99,6 +99,26 @@ class RecheckTest(unittest.TestCase):
         r = self.make(state, enabled=False)
         r.tick()
         self.assertEqual(self.gh.calls, [])
+
+    def test_one_unread_repo_does_not_block_the_other(self):
+        other = "Other/Game"
+        s = snap([group("machine", "NODE-unreal-pr", [(11, 101)]),
+                  group("machine", "NODE-unreal-pr", [(12, 102)], repo=other)], partial=True)
+        s["pr_count_status"]["stale"] = {other: "2026-11-26T00:00:00Z"}
+        state = {"snap": s}
+        r = self.make(state)
+        self.assertEqual([d["pr"] for d in r.round()], [11])
+        self.assertRegex(r.view()["waiting"][0]["why"], "did not fully read Other/Game")
+
+    def test_a_named_repo_error_only_skips_that_repo(self):
+        other = "Other/Game"
+        s = snap([group("machine", "NODE-unreal-pr", [(11, 101)]),
+                  group("machine", "NODE-unreal-pr", [(12, 102)], repo=other)])
+        s["fresh"]["error"] = f"{other}: 500 from GitHub"
+        state = {"snap": s}
+        r = self.make(state)
+        self.assertEqual([d["pr"] for d in r.round()], [11])
+        self.assertRegex(r.view()["waiting"][0]["why"], "did not fully read Other/Game")
 
     def test_refused_rerun_is_asked_once_and_state_survives(self):
         with tempfile.TemporaryDirectory() as d:
