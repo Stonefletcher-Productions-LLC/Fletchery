@@ -12,6 +12,7 @@ What it does, every EVERY seconds, from the Live snapshot (devwatch.py already s
   - re-runs the check's job on GitHub (the same call as the "Re-run" button), at most PER_TICK a round, and at most
     PER_PR times a day for one PR, so a machine that keeps failing cannot spin the queue;
   - waits while the PR's base branch is red (the tip fix needs the machines first);
+  - holds back only the repositories GitHub did not fully read, so one flaky read cannot stop every repo's re-runs;
   - never touches a cancelled check (someone cancelled it on purpose) or a check that failed on the PR's own code.
 
 Turn it off with `"autoRerun": false` in the profile's workers.portal.live block. Standard library only."""
@@ -82,9 +83,19 @@ class Recheck:
         """One pass. Returns what it re-ran."""
         at = self.clock() if at is None else at
         snap = self.snapshot() or {}
-        if (snap.get("pr_count_status") or {}).get("partial") or (snap.get("fresh") or {}).get("error"):
+        counts = snap.get("pr_count_status") or {}
+        error = str((snap.get("fresh") or {}).get("error") or "")
+        unread = {str(r) for r in (counts.get("stale") or {})}
+        known = {str(r.get("name") or r.get("full_name") or "") for r in snap.get("repos") or []}
+        known.update(str(g.get("repo") or "") for g in snap.get("problems") or [])
+        known.discard("")
+        for part in error.split("; "):
+            name = part.split(":", 1)[0].strip()
+            if name in known:
+                unread.add(name)
+        if (counts.get("partial") or error) and not unread:
             self._say("waiting: GitHub was not fully read this round")
-            return []          # GitHub was not fully read: decide next time
+            return []          # no repo to blame: decide next time
         with self._lock:
             self.done = [d for d in self.done if at - d.get("at", 0) < DAY]
             tried_jobs = {(d["repo"], d["job"]) for d in self.done}
@@ -104,6 +115,9 @@ class Recheck:
                     if not repo or not isinstance(job, int) or job <= 0 or (repo, job) in tried_jobs:
                         continue
                     row = {"repo": repo, "pr": number, "job": job, "check": str(p.get("check") or g.get("check") or "")[:80]}
+                    if repo in unread:
+                        waiting.append({**row, "why": f"GitHub did not fully read {repo} this round"})
+                        continue
                     if (repo, str(g.get("base") or "")) in red:
                         # the tip fix goes first; a re-run now would take the machine from it and may fail on the tip
                         waiting.append({**row, "why": f"{g.get('base')} is red; re-run once it is green"})
