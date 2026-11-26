@@ -18,7 +18,9 @@ Each pass (every `everyMinutes`, one PR at a time, on this PC):
      commits the merge and pushes the branch.
   3. With `fixChecks` on: a PR whose newest run of any check failed on its head commit (Compile and test as much as
      Cheap checks; Alex, 2026-11-24: the coder agents are gone and several machines build, so Fletchery takes every
-     kind of stall). `fixAllChecks: false` limits it to the checks named in `fixCheckNames`. Claude gets the failed
+     kind of stall). Both check runs and legacy commit statuses count: a workflow that pushes generated content
+     with GITHUB_TOKEN starts no run on that commit and posts its results as statuses instead.
+     `fixAllChecks: false` limits it to the checks named in `fixCheckNames`. Claude gets the failed
      lines and the end of that check's log and makes the smallest fix, or changes nothing when the PR is not the
      cause (a machine problem, a file missing on the build machine, a base branch that is already red). Fletchery
      commits and pushes a fix.
@@ -483,20 +485,51 @@ class MergeHelper:
         return int(e.get("n") or 0) < int(self.prof.get("maxErrors") or 1) and \
             _age_min(str(e.get("at") or "")) >= float(self.prof.get("retryMinutes") or 0)
 
+    def _head_checks(self, repo: str, sha: str) -> list:
+        """Check runs and legacy commit statuses on a head, shaped alike, newest per name.
+
+        A workflow that pushes generated content with GITHUB_TOKEN starts no run on that commit; the PR check
+        posts its results as commit statuses instead. Reading only check-runs makes a red PR look untested.
+        """
+        state = {"success": ("completed", "success"), "failure": ("completed", "failure"),
+                 "error": ("completed", "failure"), "pending": ("in_progress", None)}
+        runs = self.gh.api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100") or {}
+        rows: list[dict] = []
+        for c in runs.get("check_runs") or []:
+            rows.append({"name": str(c.get("name") or ""), "status": c.get("status"), "conclusion": c.get("conclusion"),
+                         "id": c.get("id"), "html_url": c.get("html_url") or "",
+                         "started_at": str(c.get("started_at") or "")})
+        statuses = self.gh.api(f"repos/{repo}/commits/{sha}/status?per_page=100") or {}
+        for st in statuses.get("statuses") or []:
+            if not isinstance(st, dict) or str(st.get("state") or "") not in state:
+                continue
+            status, conclusion = state[str(st.get("state"))]
+            rows.append({"name": str(st.get("context") or ""), "status": status, "conclusion": conclusion,
+                         "id": st.get("id"), "html_url": st.get("target_url") or "",
+                         "started_at": str(st.get("created_at") or ""), "source": "status"})
+        newest: dict[str, dict] = {}
+        for row in rows:
+            n = row["name"]
+            if not n:
+                continue
+            old = newest.get(n)
+            if old is None or row["started_at"] >= old["started_at"]:
+                newest[n] = row
+        return list(newest.values())
+
     def _failed_check(self, repo: str, sha: str) -> dict | None:
-        """The PR head's first failed check: any check with `fixAllChecks`, else one named in `fixCheckNames`."""
+        """The PR head's newest failed check: any check with `fixAllChecks`, else one named in `fixCheckNames`."""
         every = bool(self.prof.get("fixAllChecks"))
         names = [n.lower() for n in self.setting("fixCheckNames") or []]
-        data = self.gh.api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100") or {}
         newest: dict[str, dict] = {}
-        for c in data.get("check_runs") or []:
-            n = str(c.get("name") or "")
+        for c in self._head_checks(repo, sha):
+            n = c["name"]
             if every or any(n.lower() == x or n.lower().endswith("/ " + x) for x in names):
-                if n not in newest or str(c.get("started_at") or "") > str(newest[n].get("started_at") or ""):
+                if n not in newest or c["started_at"] > newest[n]["started_at"]:
                     newest[n] = c
         for n, c in newest.items():
-            if c.get("status") == "completed" and c.get("conclusion") == "failure":
-                return {"name": n, "id": c.get("id"), "url": c.get("html_url") or ""}
+            if c["status"] == "completed" and c["conclusion"] in ("failure", "error"):
+                return {"name": n, "id": c["id"], "url": c["html_url"]}
         return None
 
     # ---- git ----

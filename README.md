@@ -112,7 +112,9 @@ The window and the phone have the same controls. Anything that stops work asks f
 The **Claude merge helper** card (Live tab) keeps pull requests landable. Every 10 minutes it looks at the open PRs into
 the base branch. A PR that conflicts with the base gets the base merged in, and Claude resolves the conflicted files.
 With "Also fix failed checks" on, a PR whose newest commit failed any check (Compile and test as well as Cheap checks) gets the
-smallest fix. Fletchery checks the result, commits it and pushes the PR's branch with a normal push (never forced), and
+smallest fix. A failure reported as a legacy commit status counts too: the PR check uses those for the generated-content
+commits it pushes with its own token, which start no workflow run. Fletchery checks the result, commits it and pushes
+the PR's branch with a normal push (never forced), and
 comments on the PR once. It never approves, re-runs or skips a check. It does merge: every open, non-draft PR into
 the base gets auto-merge turned on (or is merged at once when its checks are already green), so the required checks
 decide when it lands. Label a PR `do-not-merge` to keep it out.
