@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -417,6 +417,32 @@ class AutoMergeTests(unittest.TestCase):
         gh.full = {1: self.full(1, "behind")}
         h.arm_merges()
         self.assertEqual(len(gh.posts), 1)
+
+    def test_a_refused_auto_merge_is_retried_after_the_wait_and_cleared_on_success(self):
+        class RefuseOnce(FakeGH):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                self.refuse = True
+
+            def api(self, path, method="GET", body=None, paginate=False, fresh=False):
+                if self.refuse and method == "POST" and path == "graphql":
+                    self.refuse = False
+                    raise RuntimeError("Pull request is in unstable status")
+                return super().api(path, method, body, paginate=paginate, fresh=fresh)
+
+        gh = RefuseOnce([pr(1)], {1: self.full(1, "blocked")})
+        h = self.helper(gh)
+        h.arm_merges()
+        self.assertEqual(gh.posts, [])
+        key = "1:" + "a" * 40 + ":merge"
+        self.assertEqual(h.errors[key]["n"], 1)
+        h.arm_merges()                                  # still inside the retry window
+        self.assertEqual(gh.posts, [])
+        old = (datetime.now(timezone.utc) - timedelta(minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        h.errors[key]["at"] = old
+        h.arm_merges()
+        self.assertEqual(len(gh.posts), 1)
+        self.assertNotIn(key, h.errors)
 
     def test_it_runs_even_when_the_api_limits_pause_fixing(self):
         gh = FakeGH([pr(1)], {1: self.full(1, "blocked")})

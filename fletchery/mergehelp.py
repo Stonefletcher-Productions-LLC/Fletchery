@@ -446,7 +446,7 @@ class MergeHelper:
             if skip & {str(lb.get("name") or "").lower() for lb in p.get("labels") or []}:
                 continue
             key = f"{n}:{sha}:merge"
-            if key in self.tried:
+            if not self.may_try(key):
                 continue
             full = self.gh.api(f"repos/{repo}/pulls/{n}") or {}
             if (full.get("head") or {}).get("sha") != sha or full.get("state") != "open" or full.get("auto_merge"):
@@ -469,14 +469,26 @@ class MergeHelper:
                         raise RuntimeError("; ".join(str(e.get("message") or e) for e in r["errors"])[:300])
                     what = "auto-merge on (it lands when its checks pass)"
             except Exception as e:
-                what = f"could not turn on merging: {e}"[:300]
+                # A transient GitHub refusal is not a decision on this head: use the same retry ledger as PC errors.
+                old = self.errors.get(key) if isinstance(self.errors.get(key), dict) else {}
+                count = int(old.get("n") or 0) + 1
+                self.errors[key] = {"n": count, "at": now_iso()}
+                maximum = int(self.prof.get("maxErrors") or 1)
+                what = f"could not turn on merging: {e}"[:240]
+                if count < maximum:
+                    what += f" (try {count} of {maximum}; again in {float(self.prof.get('retryMinutes') or 0):g} min)"
+                else:
+                    what += f" (gave up after {count} tries)"
+            else:
+                self.errors.pop(key, None)
+            self._save_page()
             self.log(f"merge helper: #{n} {what}")
             self._record({"at": now_iso(), "pr": n, "kind": "merge", "sha": sha[:12], "result": what, "cost_usd": 0})
             done.append((n, what))
         return done
 
     def may_try(self, key: str) -> bool:
-        """Not tried yet, or only broken by an error on this PC, fewer than `maxErrors` times, `retryMinutes` ago."""
+        """Not tried yet, or only broken by an error (this PC or GitHub), fewer than `maxErrors` times, `retryMinutes` ago."""
         if key not in self.tried:
             return True
         e = self.errors.get(key)
