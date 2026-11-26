@@ -235,8 +235,9 @@ def required_checks(branch_rules, protection) -> list:
 #
 # Checked in this order; the first that fits wins:
 #   cancelled  the check was cancelled (by a newer run, a person or an agent): it needs a re-run, not a fix
-#   machine    the system broke, not the code (OpenTelemetry "error"): no verdict ("No result"), a startup failure,
-#              a timeout with no failed step, a failed setup step (checkout, LFS, disk), or a known machine message
+#   machine    the system broke, not the code (OpenTelemetry "error"): no verdict ("No result", unless the check says
+#              the PR no longer merges cleanly), a startup failure, a timeout with no failed step, a failed setup step
+#              (checkout, LFS, disk), or a known machine message
 #   base       the same check fails on the PR's base branch right now (and, where both name tests, the same tests)
 #   flaky      the same check failed and then passed on the same commit (Trunk's pass-on-retry)
 #   own        anything else: a real bug in this PR
@@ -247,6 +248,10 @@ SETUP_STEP = re.compile(r"^(set up|check ?out|git |fetch|lfs|clean|free|disk|dow
 MACHINE_TEXT = (r"no result", r"runner .*(lost|shut ?down|offline|stopped)", r"lost communication", r"no space left",
                 r"disk (is )?full", r"not enough (disk )?space", r"out of memory", r"git-lfs|lfs .*(fail|error)",
                 r"the hosted runner", r"received a shutdown signal", r"machine (was )?busy")
+# A PR that no longer merges cleanly prints "No result" too, but re-running it only wastes the queue (2026-11-26:
+# #2655, #2372, #2664, #2675). Check this before MACHINE_TEXT so the recheck helper leaves it for a person.
+CONFLICT_TEXT = (r"no longer merges cleanly", r"nothing was built[^\n]*\bmerge\b", r"\bmerge conflicts?\b",
+                 r"\bneeds? (?:a )?rebase\b")
 
 
 def _norm(name: str) -> str:
@@ -270,6 +275,8 @@ def classify(check: dict, *, failed_step: str = "", tests=(), text: str = "", ba
     if concl == "cancelled":
         return "cancelled"
     blob = " ".join([failed_step or "", text or "", str(check.get("why") or "")])
+    if any(re.search(p, blob, re.I) for p in CONFLICT_TEXT):
+        return "own"
     if check.get("no_result") or concl == "startup_failure" or (failed_step and SETUP_STEP.search(failed_step)) \
             or (concl == "timed_out" and not failed_step) or any(re.search(p, blob, re.I) for p in machine_patterns):
         return "machine"

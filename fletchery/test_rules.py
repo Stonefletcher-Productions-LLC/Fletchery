@@ -200,6 +200,14 @@ class CausesTest(unittest.TestCase):
         self.assertEqual(rules.classify(c(), retried_ok=True), "flaky")
         self.assertEqual(rules.classify(c()), "own")
 
+    def test_a_pr_conflict_is_not_a_machine_failure_even_with_no_result(self):
+        c = lambda **k: {"name": "PR check / Compile and test", "conclusion": "failure", **k}
+        words = "No result: PR no longer merges cleanly into Test-Staging (6489a7f840). Nothing was built: merge Te"
+        self.assertEqual(rules.classify(c(no_result=True), text=words), "own")
+        self.assertEqual(rules.classify(c(no_result=True, why=words)), "own")
+        self.assertEqual(rules.classify(c(), text=words), "own")
+        self.assertEqual(rules.classify(c(no_result=True), text="No result: the machine stayed busy"), "machine")
+
     def test_problems_group_and_summary(self):
         f = lambda n, cause, tests=(), runner="", check="Compile and test": {
             "repo": REPO, "number": n, "title": f"PR {n}", "url": "u", "base": BASE, "check": check, "cause": cause,
