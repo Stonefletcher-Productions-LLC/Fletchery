@@ -121,6 +121,10 @@ decide when it lands. Label a PR `do-not-merge` to keep it out.
 One PR at a time, one try per commit, Claude running at below-normal priority with file tools and read-only git.
 A try that breaks on the PC itself (git, disk or network) does not count: it is tried again after 30 minutes, and
 only after the third break does the PR get a comment saying it needs a person.
+It takes every repository Live watches, not only the profile's: the profile's repository into its `baseBranch`,
+any other into its GitHub default branch (`workers.mergeHelper.projects` can name another, or turn auto-merge or fixes
+off for one repository; `exclude` leaves a repository out). Each repository's own required checks decide. Where a
+repository's *Allow auto-merge* setting is off, its PRs are merged directly once GitHub calls them clean.
 
 **Who pays** (switch any time on the card):
 - **API key (credit)**: the Anthropic API. Paste the key once into the card's *API key* box in the Fletchery window on

@@ -9,6 +9,16 @@ non-draft PR into `base` without a `skipLabels` label gets GitHub auto-merge tur
 commit, so it lands the moment its required checks pass. A PR GitHub already calls "clean" (nothing left to wait
 for; GitHub refuses auto-merge there) is merged at once, pinned to the head commit that was checked. This needs no
 Claude, so it runs even when the API limits pause the fixing. Label a PR `do-not-merge` to keep it out.
+Which repositories (Alex, 2026-11-24: "make sure Fletchery is able to merge all of our synced projects"): the profile's
+own repository and, with `repos: "watched"` (the default), every repository Live watches (workers.portal.live: the
+`owners`, pushed in the last `activeDays`, not in `exclude`), minus the helper's own `exclude`. Before this it took
+only the profile's repository, so silhouette #58 waited for a hand merge. The profile's repository merges into `base`
+(the profile's baseBranch); any other into its GitHub default branch, unless `projects` names another. `projects` can
+also change autoMerge, fixChecks, fixAllChecks, fixCheckNames, skipLabels and mergeMethod for one repository. Required
+checks are never listed here: each repository's own branch rules decide, which is what auto-merge waits on. A
+repository whose "Allow auto-merge" setting is off is merged directly once GitHub calls the PR "clean", and any PR
+merged directly waits `quietMinutes` after its last push (a repository with no checks is "clean" at once). The merge
+method is the first of merge, squash and rebase that the repository allows.
 
 Each pass (every `everyMinutes`, one PR at a time, on this PC):
   1. Lists the open PRs into `base` in the project's repository (no forks, drafts, `skipLabels`, or a branch someone
@@ -48,6 +58,7 @@ reads go to the ledger.
 
 Profile (all optional), workers.mergeHelper:
   {"enabled": true, "backend": "api", "model": "claude-opus-5-5", "base": "<baseBranch>", "fixChecks": true,
+   "repos": "watched", "exclude": ["Owner/Old"], "projects": {"Owner/Repo": {"base": "develop", "fixChecks": false}},
    "fixCheckNames": ["Cheap checks"], "budgetUsd": 230, "budgetFrom": "2026-11-20", "budgetUntil": "2026-12-01",
    "afterBudget": "subscription", "dailyUsd": 40, "perRunUsd": 6, "everyMinutes": 10, "quietMinutes": 20,
    "skipLabels": ["no-claude", "do-not-merge"], "claude": "claude", "workDir": ""}
@@ -62,6 +73,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.parse
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -74,7 +86,13 @@ DEFAULTS = {"enabled": True, "backend": "api", "model": "claude-opus-5-5", "base
             "afterBudget": "subscription", "dailyUsd": 40.0, "perRunUsd": 6.0, "everyMinutes": 10, "quietMinutes": 20,
             "skipLabels": ["no-claude", "do-not-merge"], "claude": "claude", "workDir": "", "maxTurns": 80,
             "retryMinutes": 30, "maxErrors": 3, "autoMerge": True,
-            "runMinutes": 40, "cacheTtl": "5m"}
+            "runMinutes": 40, "cacheTtl": "5m", "repos": "watched", "exclude": [], "projects": {}}
+# What `projects` may change for one repository.
+PROJECT_KEYS = ("base", "autoMerge", "fixChecks", "fixAllChecks", "fixCheckNames", "skipLabels", "mergeMethod")
+MERGE_METHODS = ("merge", "squash", "rebase")
+REPO_NAME = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
+REPO_INFO_SECONDS = 3600          # how long a repository's default branch and merge settings are kept
+NO_AUTO = re.compile(r"auto.?merge is not allowed|auto.?merge.{0,40}not enabled|protected branch rules not configured", re.I)
 # Flags that keep each run's prompt small and the same across PR worktrees, so Claude Code's prompt cache holds.
 CLAUDE_CACHE_FLAGS = ["--exclude-dynamic-system-prompt-sections", "--strict-mcp-config", "--disable-slash-commands"]
 PAGE_KEYS = ("enabled", "backend", "model", "fixChecks")   # what the page may change
@@ -230,8 +248,12 @@ End with one short paragraph: the cause and what you changed."""
 
 
 class MergeHelper:
-    def __init__(self, cfg, gh, log, run=subprocess.run, key_reader=read_key):
+    def __init__(self, cfg, gh, log, run=subprocess.run, key_reader=read_key, repos=None):
+        """`repos()` lists the "owner/name" repositories Live watches (app.py), taken with `repos: "watched"`."""
         self.cfg = cfg
+        self._watched = repos
+        self._info: dict[str, tuple] = {}     # repo (lower) -> (monotonic time, GET repos/<repo>)
+        self.no_auto: dict[str, float] = {}   # repo (lower) -> when GitHub said auto-merge is off there
         self.gh = gh
         self.log = log
         self._run = run
@@ -268,7 +290,7 @@ class MergeHelper:
     def _save_page(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.settings_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**self.page, "_tried": dict(list(self.tried.items())[-500:]),
+        tmp.write_text(json.dumps({**self.page, "_tried": dict(list(self.tried.items())[-2000:]),
                                    "_errors": dict(list(self.errors.items())[-200:])}, indent=1), encoding="utf-8")
         tmp.replace(self.settings_path)
 
@@ -378,11 +400,10 @@ class MergeHelper:
         try:
             self.error = ""
             self.last_pass = now_iso()
-            if self.prof.get("autoMerge"):
-                try:
-                    self.arm_merges()
-                except Exception as e:
-                    self.log(f"merge helper: auto-merge pass: {type(e).__name__}: {e}"[:300])
+            try:
+                self.arm_merges()
+            except Exception as e:
+                self.log(f"merge helper: auto-merge pass: {type(e).__name__}: {e}"[:300])
             why = self.why_not()
             if why:
                 self.last_note = why
@@ -398,54 +419,182 @@ class MergeHelper:
         finally:
             self.busy = ""
 
-    # ---- what to work on ----
+    # ---- which repositories ----
+    def _main(self, repo: str) -> bool:
+        return str(repo or "").lower() == str(self.cfg.repo or "").lower()
+
     def _repo(self) -> str:
         return self.cfg.repo
 
+    def repos(self) -> list:
+        """owner/name of every repository the helper takes: the profile's own first, then every repository Live
+        watches (`repos: "watched"`) or the ones `repos` lists, never one in `exclude`."""
+        want = self.prof.get("repos")
+        more: list = []
+        if isinstance(want, list):
+            more = [str(r) for r in want]
+        elif want == "watched" and self._watched:
+            try:
+                more = [str(r) for r in (self._watched() or [])]
+            except Exception as e:      # Live not up yet: the profile's own repository still goes on
+                self.log(f"merge helper: the watched repositories could not be read: {type(e).__name__}: {e}"[:300])
+        skip = {str(x).lower() for x in self.prof.get("exclude") or []}
+        out, seen = [], set()
+        for r in [str(self.cfg.repo or ""), *more]:
+            if not REPO_NAME.match(r) or r.lower() in seen or r.lower() in skip:
+                continue
+            seen.add(r.lower())
+            out.append(r)
+        return out
+
+    def _project(self, repo: str) -> dict:
+        projects = self.prof.get("projects") if isinstance(self.prof.get("projects"), dict) else {}
+        for name, own in projects.items():
+            if str(name).lower() == repo.lower() and isinstance(own, dict):
+                return {k: own[k] for k in PROJECT_KEYS if k in own}
+        return {}
+
+    def opt(self, repo: str, name: str):
+        """One repository's setting: the page's fixes switch turns fixing off everywhere, then `projects`, then the
+        profile."""
+        own = self._project(repo)
+        if name == "fixChecks":
+            return bool(self.setting("fixChecks")) and bool(own.get("fixChecks", True))
+        if name in own:
+            return own[name]
+        return self.setting(name) if name in PAGE_KEYS else self.prof.get(name)
+
+    def _repo_info(self, repo: str) -> dict:
+        """GET repos/<repo>, kept an hour: the default branch and which merge methods and auto-merge it allows."""
+        at, info = self._info.get(repo.lower(), (0.0, None))
+        if info is None or time.monotonic() - at > REPO_INFO_SECONDS:
+            try:
+                got = self.gh.api(f"repos/{repo}")
+            except Exception:
+                if info is None:
+                    raise
+                return info                   # GitHub had a bad moment: the last answer will do
+            info = got if isinstance(got, dict) else {}
+            self._info[repo.lower()] = (time.monotonic(), info)
+        return info
+
+    def base_of(self, repo: str) -> str:
+        """Where a repository's PRs land: `projects` first, the profile's base for its own repository, else the
+        repository's default branch on GitHub."""
+        own = self._project(repo).get("base")
+        if own:
+            return str(own)
+        if self._main(repo):
+            return str(self.setting("base"))
+        return str(self._repo_info(repo).get("default_branch") or "")
+
+    def _method(self, repo: str) -> str:
+        own = self._project(repo).get("mergeMethod")
+        if own in MERGE_METHODS:
+            return own
+        info = self._repo_info(repo)
+        for m in MERGE_METHODS:
+            if info.get("allow_merge_commit" if m == "merge" else f"allow_{m}_merge") is not False:
+                return m
+        return "merge"
+
+    def _auto_allowed(self, repo: str) -> bool:
+        """False when the repository's "Allow auto-merge" is off (its settings, or GitHub said so in the last 6 h)."""
+        if self._repo_info(repo).get("allow_auto_merge") is False:
+            return False
+        return time.monotonic() - self.no_auto.get(repo.lower(), -1e12) > 6 * 3600
+
+    @staticmethod
+    def _k(repo_is_main: bool, repo: str, n, sha: str, kind: str) -> str:
+        # The profile's repository keeps its old keys, so what it tried before the upgrade still counts.
+        return f"{n}:{sha}:{kind}" if repo_is_main else f"{repo}#{n}:{sha}:{kind}"
+
+    def _tkey(self, repo: str, n, sha: str, kind: str) -> str:
+        return self._k(self._main(repo), repo, n, sha, kind)
+
+    def _label(self, repo: str, n) -> str:
+        return f"#{n}" if self._main(repo) else f"{repo}#{n}"
+
+    def _open_prs(self, repo: str, base: str) -> list:
+        q = urllib.parse.quote(base, safe="/")
+        return self.gh.api(f"repos/{repo}/pulls?state=open&base={q}&per_page=100", paginate=True) or []
+
+    def _pushed_min(self, repo: str, sha: str) -> float:
+        commit = self.gh.api(f"repos/{repo}/commits/{sha}") or {}
+        return _age_min(((commit.get("commit") or {}).get("committer") or {}).get("date") or "")
+
+    # ---- what to work on ----
     def next_job(self) -> dict | None:
-        repo, base = self._repo(), self.setting("base")
-        prs = self.gh.api(f"repos/{repo}/pulls?state=open&base={base}&per_page=100", paginate=True) or []
-        skip = {s.lower() for s in self.setting("skipLabels") or []}
         fixes = []
+        for repo in self.repos():
+            try:
+                job = self._next_in(repo, fixes)
+            except Exception as e:          # one repository GitHub can't answer for must not stop the others
+                self.log(f"merge helper: {repo}: {type(e).__name__}: {e}"[:300])
+                continue
+            if job:
+                return job
+        return fixes[0] if fixes else None
+
+    def _next_in(self, repo: str, fixes: list) -> dict | None:
+        """A conflicted PR in this repository at once; PRs with a failed check go on `fixes`."""
+        base = self.base_of(repo)
+        if not base:
+            return None
+        prs = self._open_prs(repo, base)
+        skip = {s.lower() for s in self.opt(repo, "skipLabels") or []}
         for p in sorted(prs, key=lambda p: p.get("number") or 0):
             head = p.get("head") or {}
-            if p.get("draft") or (head.get("repo") or {}).get("full_name") != repo:
+            if p.get("draft") or str((head.get("repo") or {}).get("full_name") or "").lower() != repo.lower():
                 continue
             if skip & {str(lb.get("name") or "").lower() for lb in p.get("labels") or []}:
                 continue
             pr = {"number": p["number"], "title": p.get("title") or "", "body": p.get("body") or "",
-                  "head": head.get("ref") or "", "sha": head.get("sha") or ""}
+                  "head": head.get("ref") or "", "sha": head.get("sha") or "", "repo": repo, "base": base}
             if not pr["head"] or not pr["sha"]:
                 continue
             full = self.gh.api(f"repos/{repo}/pulls/{pr['number']}") or {}
             if (full.get("head") or {}).get("sha") not in (None, pr["sha"]):
                 continue                              # pushed while we looked
-            commit = self.gh.api(f"repos/{repo}/commits/{pr['sha']}") or {}
-            pushed = ((commit.get("commit") or {}).get("committer") or {}).get("date") or ""
-            if _age_min(pushed) < float(self.prof.get("quietMinutes") or 0):
+            if self._pushed_min(repo, pr["sha"]) < float(self.prof.get("quietMinutes") or 0):
                 continue                              # someone is working on it
-            if full.get("mergeable_state") == "dirty" and self.may_try(f"{pr['number']}:{pr['sha']}:conflict"):
+            if full.get("mergeable_state") == "dirty" and self.may_try(self._tkey(repo, pr["number"], pr["sha"], "conflict")):
                 return {**pr, "kind": "conflict"}
-            if self.setting("fixChecks") and self.may_try(f"{pr['number']}:{pr['sha']}:fix"):
+            if self.opt(repo, "fixChecks") and self.may_try(self._tkey(repo, pr["number"], pr["sha"], "fix")):
                 failed = self._failed_check(repo, pr["sha"])
                 if failed:
                     fixes.append({**pr, "kind": "fix", "check": failed})
-        return fixes[0] if fixes else None
+        return None
 
     def arm_merges(self) -> list:
-        """Turn on auto-merge for every open, non-draft PR into the base that lacks it; merge a "clean" one now."""
-        repo, base = self._repo(), self.setting("base")
-        prs = self.gh.api(f"repos/{repo}/pulls?state=open&base={base}&per_page=100", paginate=True) or []
-        skip = {s.lower() for s in self.setting("skipLabels") or []}
+        """In every repository taken: turn on auto-merge for each open, non-draft PR into its base that lacks it, and
+        merge a "clean" one now."""
+        done = []
+        for repo in self.repos():
+            if not self.opt(repo, "autoMerge"):
+                continue
+            try:
+                done += self._arm_repo(repo)
+            except Exception as e:          # one repository GitHub can't answer for must not stop the others
+                self.log(f"merge helper: auto-merge pass for {repo}: {type(e).__name__}: {e}"[:300])
+        return done
+
+    def _arm_repo(self, repo: str) -> list:
+        base = self.base_of(repo)
+        if not base:
+            return []
+        prs = self._open_prs(repo, base)
+        skip = {s.lower() for s in self.opt(repo, "skipLabels") or []}
         done = []
         for p in sorted(prs, key=lambda p: p.get("number") or 0):
             head = p.get("head") or {}
             n, sha = p.get("number"), head.get("sha") or ""
-            if p.get("draft") or p.get("auto_merge") or not sha or (head.get("repo") or {}).get("full_name") != repo:
+            if p.get("draft") or p.get("auto_merge") or not sha or \
+                    str((head.get("repo") or {}).get("full_name") or "").lower() != repo.lower():
                 continue
             if skip & {str(lb.get("name") or "").lower() for lb in p.get("labels") or []}:
                 continue
-            key = f"{n}:{sha}:merge"
+            key = self._tkey(repo, n, sha, "merge")
             if not self.may_try(key):
                 continue
             full = self.gh.api(f"repos/{repo}/pulls/{n}") or {}
@@ -454,21 +603,36 @@ class MergeHelper:
             state = full.get("mergeable_state") or ""
             if state in ("unknown", ""):
                 continue                              # GitHub is still working it out; next pass
+            if state != "clean" and not self._auto_allowed(repo):
+                continue                              # auto-merge is off there: merged directly once it is clean
+            if state == "clean" and self._pushed_min(repo, sha) < float(self.prof.get("quietMinutes") or 0):
+                continue                              # pushed minutes ago (no checks means clean at once): next pass
+            method = self._method(repo)
             self.tried[key] = now_iso()
             self._save_page()
             try:
                 if state == "clean":
-                    self.gh.api(f"repos/{repo}/pulls/{n}/merge", "PUT", {"merge_method": "merge", "sha": sha})
+                    self.gh.api(f"repos/{repo}/pulls/{n}/merge", "PUT", {"merge_method": method, "sha": sha})
                     what = "merged (checks already green)"
                 else:
                     r = self.gh.api("graphql", "POST", {
-                        "query": "mutation($id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $id, "
-                                 "mergeMethod: MERGE}) { clientMutationId } }",
-                        "variables": {"id": full.get("node_id") or p.get("node_id")}}) or {}
+                        "query": "mutation($id: ID!, $m: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: "
+                                 "{pullRequestId: $id, mergeMethod: $m}) { clientMutationId } }",
+                        "variables": {"id": full.get("node_id") or p.get("node_id"), "m": method.upper()}}) or {}
                     if r.get("errors"):
                         raise RuntimeError("; ".join(str(e.get("message") or e) for e in r["errors"])[:300])
                     what = "auto-merge on (it lands when its checks pass)"
             except Exception as e:
+                if state != "clean" and NO_AUTO.search(str(e)):
+                    # The repository's setting, not this PR: no try is spent, and its PRs are merged directly once
+                    # GitHub calls them clean. Asked again in 6 hours, in case the setting is turned on.
+                    self.tried.pop(key, None)
+                    self.errors.pop(key, None)
+                    self._save_page()
+                    if repo.lower() not in self.no_auto:
+                        self.log(f"merge helper: auto-merge is off in {repo}; its PRs are merged once their checks pass")
+                    self.no_auto[repo.lower()] = time.monotonic()
+                    continue
                 # A transient GitHub refusal is not a decision on this head: use the same retry ledger as PC errors.
                 old = self.errors.get(key) if isinstance(self.errors.get(key), dict) else {}
                 count = int(old.get("n") or 0) + 1
@@ -482,9 +646,9 @@ class MergeHelper:
             else:
                 self.errors.pop(key, None)
             self._save_page()
-            self.log(f"merge helper: #{n} {what}")
-            self._record({"at": now_iso(), "pr": n, "kind": "merge", "sha": sha[:12], "result": what, "cost_usd": 0})
-            done.append((n, what))
+            self.log(f"merge helper: {self._label(repo, n)} {what}")
+            self._record({"at": now_iso(), "repo": repo, "pr": n, "kind": "merge", "sha": sha[:12], "result": what, "cost_usd": 0})
+            done.append((n, what) if self._main(repo) else (f"{repo}#{n}", what))
         return done
 
     def may_try(self, key: str) -> bool:
@@ -531,8 +695,8 @@ class MergeHelper:
 
     def _failed_check(self, repo: str, sha: str) -> dict | None:
         """The PR head's newest failed check: any check with `fixAllChecks`, else one named in `fixCheckNames`."""
-        every = bool(self.prof.get("fixAllChecks"))
-        names = [n.lower() for n in self.setting("fixCheckNames") or []]
+        every = bool(self.opt(repo, "fixAllChecks"))
+        names = [n.lower() for n in self.opt(repo, "fixCheckNames") or []]
         newest: dict[str, dict] = {}
         for c in self._head_checks(repo, sha):
             n = c["name"]
@@ -545,8 +709,12 @@ class MergeHelper:
         return None
 
     # ---- git ----
-    def work_root(self) -> Path:
-        return Path(self.prof.get("workDir") or (self.state_dir / "merge-helper"))
+    def work_root(self, repo: str = "") -> Path:
+        """The profile's repository works where it always did; any other in a folder of its own beside it."""
+        root = Path(self.prof.get("workDir") or (self.state_dir / "merge-helper"))
+        if not repo or self._main(repo):
+            return root
+        return root / "repos" / re.sub(r"[^A-Za-z0-9._-]", "__", repo)
 
     def _git(self, args: list, cwd, check=True, timeout=1800, env=None) -> subprocess.CompletedProcess:
         e = dict(os.environ if env is None else env)
@@ -557,22 +725,28 @@ class MergeHelper:
             raise RuntimeError(f"git {' '.join(args[:3])}: {(p.stderr or p.stdout).strip()[-400:]}")
         return p
 
-    def clone(self) -> Path:
-        root = self.work_root()
+    def clone(self, repo: str = "") -> Path:
+        repo = repo or self._repo()
+        root = self.work_root(repo)
         repo_dir = root / "repo"
         if not (repo_dir / ".git").exists() and not (repo_dir / "HEAD").exists():
             root.mkdir(parents=True, exist_ok=True)
-            self.log(f"merge helper: making its own clone of {self._repo()} (blobless, no LFS files)")
-            self._git(["clone", "--filter=blob:none", "--no-checkout", f"https://github.com/{self._repo()}.git", str(repo_dir)],
+            self.log(f"merge helper: making its own clone of {repo} (blobless, no LFS files)")
+            self._git(["clone", "--filter=blob:none", "--no-checkout", f"https://github.com/{repo}.git", str(repo_dir)],
                       root, timeout=7200)
         return repo_dir
 
+    @staticmethod
+    def _job_base(job: dict, fallback: str) -> str:
+        return str(job.get("base") or fallback)
+
     def _worktree(self, repo_dir: Path, pr: dict) -> Path:
-        wt = self.work_root() / f"pr-{pr['number']}"
+        wt = self.work_root(pr.get("repo") or "") / f"pr-{pr['number']}"
+        base = self._job_base(pr, self.setting("base"))
         if wt.exists():
             self._git(["worktree", "remove", "--force", str(wt)], repo_dir, check=False)
             shutil.rmtree(wt, ignore_errors=True)
-        self._git(["fetch", "--no-tags", "origin", f"+refs/heads/{self.setting('base')}:refs/remotes/origin/{self.setting('base')}",
+        self._git(["fetch", "--no-tags", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}",
                    f"+refs/heads/{pr['head']}:refs/remotes/origin/{pr['head']}"], repo_dir, timeout=3600)
         got = self._git(["rev-parse", f"refs/remotes/origin/{pr['head']}"], repo_dir).stdout.strip()
         if got != pr["sha"]:
@@ -643,17 +817,21 @@ class MergeHelper:
 
     # ---- one job ----
     def do(self, job: dict) -> str:
-        n, kind = job["number"], job["kind"]
-        key = f"{n}:{job['sha']}:{kind}"
+        job = {**job, "repo": job.get("repo") or self._repo()}
+        job["base"] = self._job_base(job, self.setting("base") if self._main(job["repo"]) else "")
+        n, kind, repo = job["number"], job["kind"], job["repo"]
+        key = self._tkey(repo, n, job["sha"], kind)
         self.tried[key] = now_iso()
         self._save_page()
-        self.busy = f"#{n}: " + ("resolving conflicts with " + self.setting("base") if kind == "conflict"
-                                 else f"fixing {job['check']['name']}")
+        self.busy = f"{self._label(repo, n)}: " + ("resolving conflicts with " + job["base"] if kind == "conflict"
+                                                    else f"fixing {job['check']['name']}")
         self.log(f"merge helper: {self.busy} ({self.backend()}, {self.setting('model')})")
-        row = {"at": now_iso(), "pr": n, "kind": kind, "sha": job["sha"][:12]}
+        row = {"at": now_iso(), "repo": repo, "pr": n, "kind": kind, "sha": job["sha"][:12]}
         repo_dir = wt = None
         try:
-            repo_dir = self.clone()
+            if not job["base"]:
+                raise RuntimeError(f"no base branch known for {repo}")
+            repo_dir = self.clone(repo)
             wt = self._worktree(repo_dir, job)
             result, detail, r = (self._conflict(job, wt) if kind == "conflict" else self._fix(job, wt))
         except Exception as e:
@@ -682,14 +860,14 @@ class MergeHelper:
         row.update({"backend": self.backend(), "model": self.setting("model"), **r, "result": result, "detail": detail[:400]})
         self._record(row)
         cost = f", ${r.get('cost_usd', 0):.2f}" if r else ""
-        self.log(f"merge helper: #{n} {kind}: {result}{cost}. {detail[:200]}")
-        self.last_note = f"#{n} {kind}: {result}"
+        self.log(f"merge helper: {self._label(repo, n)} {kind}: {result}{cost}. {detail[:200]}")
+        self.last_note = f"{self._label(repo, n)} {kind}: {result}"
         if result in ("pushed", "gave up"):
-            self._comment(n, result, kind, detail, r)
+            self._comment(n, result, kind, detail, r, repo=repo, base=job["base"])
         return result
 
     def _conflict(self, job: dict, wt: Path):
-        base = self.setting("base")
+        base = self._job_base(job, self.setting("base"))
         m = self._git(["merge", "--no-edit", "--no-ff", f"origin/{base}", "-m", f"Merge {base} into {job['head']}"], wt, check=False)
         if m.returncode == 0:
             fixed = self._repair_union(wt)
@@ -738,7 +916,7 @@ class MergeHelper:
         return fixed
 
     def _fix(self, job: dict, wt: Path):
-        repo, check = self._repo(), job["check"]
+        repo, check = job.get("repo") or self._repo(), job["check"]
         try:
             log = self.gh._request(f"repos/{repo}/actions/jobs/{check['id']}/logs") if hasattr(self.gh, "_request") else ""
         except Exception as e:
@@ -778,26 +956,40 @@ class MergeHelper:
         """A normal push of the branch: refused (and nothing lost) if anyone pushed meanwhile. Never forced."""
         self._git(["push", "--no-verify", "origin", f"HEAD:refs/heads/{job['head']}"], wt, timeout=1800)
 
-    def _comment(self, n: int, result: str, kind: str, detail: str, r: dict) -> None:
-        what = "resolved the conflicts with " + self.setting("base") if kind == "conflict" else "pushed a fix for a failed check"
+    def _comment(self, n: int, result: str, kind: str, detail: str, r: dict, repo: str = "", base: str = "") -> None:
+        repo, base = repo or self._repo(), base or self.setting("base")
+        what = "resolved the conflicts with " + base if kind == "conflict" else "pushed a fix for a failed check"
         if result != "pushed":
-            what = ("could not resolve the conflicts with " + self.setting("base") if kind == "conflict"
+            what = ("could not resolve the conflicts with " + base if kind == "conflict"
                     else "could not fix the failed check") + "; this needs a person (or a Claude thread)"
         cost = f" ({r.get('backend')}, {r.get('model')}, ${float(r.get('cost_usd') or 0):.2f})" if r else ""
         body = f"Fletchery merge helper {what}{cost}.\n\n{detail[:1500]}{FOOTER}"
         try:
-            self.gh.api(f"repos/{self._repo()}/issues/{n}/comments", "POST", {"body": body})
+            self.gh.api(f"repos/{repo}/issues/{n}/comments", "POST", {"body": body})
         except Exception as e:
-            self.log(f"merge helper: could not comment on #{n}: {e}")
+            self.log(f"merge helper: could not comment on {self._label(repo, n)}: {e}")
 
     # ---- what the page shows ----
     def view(self) -> dict:
         runs = self.runs(12)
         return {"enabled": bool(self.setting("enabled")), "backend": self.backend(), "chosen": self.setting("backend"),
                 "model": self.setting("model"), "models": list(MODELS), "fix_checks": bool(self.setting("fixChecks")),
-                "base": self.setting("base"), "key_set": bool(self._key()), "busy": self.busy,
+                "base": self.setting("base"), "repos": self.covered(), "key_set": bool(self._key()), "busy": self.busy,
                 "waiting": self.why_not(), "note": self.last_note, "error": self.error, "last_pass": self.last_pass,
                 "spend": self.spend(),
-                "runs": [{"at": r.get("at"), "pr": r.get("pr"), "kind": r.get("kind"), "result": r.get("result"),
+                "runs": [{"at": r.get("at"), "repo": "" if self._main(r.get("repo") or "") else (r.get("repo") or ""),
+                          "pr": r.get("pr"), "kind": r.get("kind"), "result": r.get("result"),
                           "backend": r.get("backend"), "model": r.get("model"), "cost_usd": r.get("cost_usd") or 0,
                           "detail": str(r.get("detail") or "")[:200]} for r in reversed(runs)]}
+
+    def covered(self) -> list:
+        """[{"repo", "base"}] for the page: every repository the helper takes now, with the base it merges into ("" when
+        GitHub has not said yet). Reads only what is already known, so the page never waits on GitHub."""
+        out = []
+        for repo in self.repos():
+            own = self._project(repo).get("base")
+            info = (self._info.get(repo.lower()) or (0.0, None))[1] or {}
+            base = str(own or (self.setting("base") if self._main(repo) else info.get("default_branch") or ""))
+            out.append({"repo": repo, "base": base, "auto_merge": bool(self.opt(repo, "autoMerge")),
+                        "direct_only": info.get("allow_auto_merge") is False or repo.lower() in self.no_auto})
+        return out[:100]

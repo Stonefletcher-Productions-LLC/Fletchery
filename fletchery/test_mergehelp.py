@@ -270,7 +270,7 @@ class ConflictTests(unittest.TestCase):
         h = self.helper(resolve=True)
         key = f"7:{self.sha}:conflict"
 
-        def broken():
+        def broken(*_):
             raise OSError("the clone could not be fetched")
         real_clone, h.clone = h.clone, broken
         self.assertEqual(h.do(self.job()), "error")
@@ -291,7 +291,7 @@ class ConflictTests(unittest.TestCase):
         h = self.helper(resolve=True)
         key = f"7:{self.sha}:conflict"
 
-        def broken():
+        def broken(*_):
             raise OSError("disk full")
         h.clone = broken
         for _ in range(2):
@@ -389,7 +389,7 @@ class AutoMergeTests(unittest.TestCase):
         gh = FakeGH([pr(1), pr(2)], {1: self.full(1, "blocked"), 2: self.full(2, "clean")})
         self.helper(gh).arm_merges()
         self.assertEqual(gh.posts[0][0], "graphql")
-        self.assertEqual(gh.posts[0][1]["variables"], {"id": "PR_1"})
+        self.assertEqual(gh.posts[0][1]["variables"], {"id": "PR_1", "m": "MERGE"})
         self.assertEqual(gh.posts[1], ("repos/o/r/pulls/2/merge", {"merge_method": "merge", "sha": "a" * 40}))
 
     def test_drafts_opted_out_and_already_armed_prs_are_left(self):
@@ -450,6 +450,191 @@ class AutoMergeTests(unittest.TestCase):
         h._pass()
         self.assertEqual(len(gh.posts), 1)
         self.assertIn("API key", h.last_note)
+
+
+class MultiGH:
+    """GitHub for several repositories: {"o/x": {"info": {...}, "prs": [...], "full": {n: {...}}}}."""
+
+    def __init__(self, repos, pushed="2026-01-01T00:00:00Z", broken=()):
+        self.repos, self.pushed, self.broken = repos, pushed, set(broken)
+        self.posts, self.gets = [], []
+
+    def api(self, path, method="GET", body=None, paginate=False, fresh=False):
+        if method in ("POST", "PUT"):
+            self.posts.append((path, body))
+            return {}
+        self.gets.append(path)
+        parts = path.split("/")
+        repo = "/".join(parts[1:3]) if parts[0] == "repos" else ""
+        if repo in self.broken:
+            raise RuntimeError(f"gh api GET {path}: HTTP 502")
+        r = self.repos.get(repo) or {}
+        if len(parts) == 3:
+            return r.get("info") or {}
+        if "/pulls?" in path:
+            return list(r.get("prs") or [])
+        if "/check-runs" in path:
+            return {"check_runs": []}
+        if "/status?" in path:
+            return {"statuses": []}
+        if "/commits/" in path:
+            return {"commit": {"committer": {"date": self.pushed}}}
+        if "/pulls/" in path:
+            return (r.get("full") or {}).get(int(path.rsplit("/", 1)[1]), {})
+        return {}
+
+
+def mpr(repo, n, sha="c" * 40, ref="feature", draft=False):
+    return {"number": n, "title": f"PR {n}", "body": "", "draft": draft, "labels": [], "node_id": f"PR_{repo}_{n}",
+            "head": {"ref": ref, "sha": sha, "repo": {"full_name": repo}}}
+
+
+def mfull(repo, n, state, sha="c" * 40):
+    return {"number": n, "state": "open", "mergeable_state": state, "node_id": f"PR_{repo}_{n}",
+            "head": {"sha": sha, "repo": {"full_name": repo}}}
+
+
+class EveryRepositoryTests(unittest.TestCase):
+    """2026-11-24: the helper took only the profile's repository, so silhouette #58 waited for a hand merge. Now it
+    takes every repository Live watches, each into its own base."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def helper(self, gh, watched=("o/r", "o/art", "o/site"), **mh):
+        return mergehelp.MergeHelper(cfg(self.dir, **mh), gh, lambda *_: None, key_reader=lambda: "k",
+                                     repos=lambda: list(watched))
+
+    def test_the_profiles_repository_comes_first_then_every_watched_one(self):
+        h = self.helper(MultiGH({}), watched=("o/art", "O/R", "o/site", "not a repo", "o/old"), exclude=["o/old"])
+        self.assertEqual(h.repos(), ["o/r", "o/art", "o/site"])
+        self.assertEqual(self.helper(MultiGH({}), repos=["o/art"]).repos(), ["o/r", "o/art"])
+        self.assertEqual(self.helper(MultiGH({}), repos="own").repos(), ["o/r"])
+        broken = mergehelp.MergeHelper(cfg(self.dir), MultiGH({}), lambda *_: None, key_reader=lambda: "k",
+                                       repos=lambda: 1 / 0)
+        self.assertEqual(broken.repos(), ["o/r"])        # Live not up yet: its own repository still goes on
+
+    def test_each_repository_merges_into_its_own_base(self):
+        gh = MultiGH({
+            "o/r": {"prs": [mpr("o/r", 1)], "full": {1: mfull("o/r", 1, "blocked")}},
+            "o/art": {"info": {"default_branch": "main"}, "prs": [mpr("o/art", 58)], "full": {58: mfull("o/art", 58, "blocked")}},
+            "o/site": {"info": {"default_branch": "trunk"}, "prs": [mpr("o/site", 3)], "full": {3: mfull("o/site", 3, "clean")}}})
+        h = self.helper(gh)
+        h.arm_merges()
+        self.assertIn("repos/o/r/pulls?state=open&base=Test-Staging&per_page=100", gh.gets)
+        self.assertIn("repos/o/art/pulls?state=open&base=main&per_page=100", gh.gets)
+        self.assertIn("repos/o/site/pulls?state=open&base=trunk&per_page=100", gh.gets)
+        self.assertEqual([x[1]["variables"]["id"] for x in gh.posts if x[0] == "graphql"], ["PR_o/r_1", "PR_o/art_58"])
+        self.assertIn(("repos/o/site/pulls/3/merge", {"merge_method": "merge", "sha": "c" * 40}), gh.posts)
+        # The profile's repository keeps its old keys (what it tried before the upgrade still counts); others are named.
+        self.assertIn("1:" + "c" * 40 + ":merge", h.tried)
+        self.assertIn("o/art#58:" + "c" * 40 + ":merge", h.tried)
+        self.assertEqual({r["repo"]: r["base"] for r in h.covered()}, {"o/r": "Test-Staging", "o/art": "main", "o/site": "trunk"})
+        h.arm_merges()
+        self.assertEqual(len(gh.posts), 3)               # once per head, in every repository
+
+    def test_projects_set_one_repositorys_base_and_switches(self):
+        gh = MultiGH({"o/art": {"info": {"default_branch": "main"}, "prs": [mpr("o/art", 4)], "full": {4: mfull("o/art", 4, "blocked")}},
+                      "o/site": {"info": {"default_branch": "main"}, "prs": [mpr("o/site", 5)], "full": {5: mfull("o/site", 5, "blocked")}}})
+        h = self.helper(gh, projects={"O/Art": {"base": "develop"}, "o/site": {"autoMerge": False, "fixChecks": False}})
+        h.arm_merges()
+        self.assertIn("repos/o/art/pulls?state=open&base=develop&per_page=100", gh.gets)
+        self.assertFalse(any("o/site" in x[1]["variables"]["id"] for x in gh.posts if x[0] == "graphql"))
+        self.assertFalse(h.opt("o/site", "fixChecks"))
+        self.assertTrue(h.opt("o/art", "fixChecks"))
+        h.set({"fixChecks": False})                      # the page's switch turns fixing off everywhere
+        self.assertFalse(h.opt("o/art", "fixChecks"))
+
+    def test_a_repository_without_auto_merge_is_merged_directly_once_clean(self):
+        gh = MultiGH({"o/art": {"info": {"default_branch": "main", "allow_auto_merge": False, "allow_merge_commit": False},
+                                "prs": [mpr("o/art", 6), mpr("o/art", 7, sha="d" * 40)],
+                                "full": {6: mfull("o/art", 6, "blocked"), 7: mfull("o/art", 7, "clean", sha="d" * 40)}}})
+        h = self.helper(gh, watched=("o/art",))
+        h.arm_merges()
+        self.assertEqual(gh.posts, [("repos/o/art/pulls/7/merge", {"merge_method": "squash", "sha": "d" * 40})])
+        self.assertNotIn("o/art#6:" + "c" * 40 + ":merge", h.tried)      # no try spent: it is merged once green
+        gh.repos["o/art"]["full"][6] = mfull("o/art", 6, "clean")
+        h.arm_merges()
+        self.assertIn(("repos/o/art/pulls/6/merge", {"merge_method": "squash", "sha": "c" * 40}), gh.posts)
+        self.assertTrue([r for r in h.covered() if r["repo"] == "o/art"][0]["direct_only"])
+
+    def test_auto_merge_refused_by_the_repositorys_setting_spends_no_try(self):
+        class Refuse(MultiGH):
+            def api(self, path, method="GET", body=None, paginate=False, fresh=False):
+                if method == "POST" and path == "graphql":
+                    raise RuntimeError("Auto merge is not allowed for this repository")
+                return super().api(path, method, body, paginate, fresh)
+        gh = Refuse({"o/art": {"info": {"default_branch": "main"}, "prs": [mpr("o/art", 8)], "full": {8: mfull("o/art", 8, "blocked")}}})
+        h = self.helper(gh, watched=("o/art",))
+        h.arm_merges()
+        key = "o/art#8:" + "c" * 40 + ":merge"
+        self.assertNotIn(key, h.tried)
+        self.assertNotIn(key, h.errors)
+        self.assertIn("o/art", h.no_auto)
+        gh.repos["o/art"]["full"][8] = mfull("o/art", 8, "clean")
+        h.arm_merges()
+        self.assertEqual(gh.posts, [("repos/o/art/pulls/8/merge", {"merge_method": "merge", "sha": "c" * 40})])
+
+    def test_a_clean_pr_pushed_minutes_ago_waits(self):
+        gh = MultiGH({"o/site": {"info": {"default_branch": "main"}, "prs": [mpr("o/site", 9)],
+                                 "full": {9: mfull("o/site", 9, "clean")}}}, pushed=mergehelp.now_iso())
+        h = self.helper(gh, watched=("o/site",))
+        h.arm_merges()
+        self.assertEqual(gh.posts, [])
+        self.assertNotIn("o/site#9:" + "c" * 40 + ":merge", h.tried)
+
+    def test_one_repository_github_cannot_answer_for_does_not_stop_the_others(self):
+        gh = MultiGH({"o/site": {"info": {"default_branch": "main"}, "prs": [mpr("o/site", 2)], "full": {2: mfull("o/site", 2, "dirty")}}},
+                     broken=("o/art",))
+        h = self.helper(gh)
+        h.arm_merges()
+        self.assertEqual(len(gh.posts), 1)
+        job = h.next_job()
+        self.assertEqual((job["repo"], job["base"], job["number"], job["kind"]), ("o/site", "main", 2, "conflict"))
+
+    def test_a_conflict_in_another_repository_is_resolved_in_its_own_clone(self):
+        d = self.dir
+        origin = d / "origin.git"
+        git(d, "init", "--bare", "-b", "main", str(origin))
+        seed = d / "seed"
+        git(d, "clone", str(origin), str(seed))
+        (seed / "a.txt").write_text("one\n")
+        git(seed, "add", "."); git(seed, "commit", "-m", "base"); git(seed, "push", "origin", "HEAD:main")
+        git(seed, "checkout", "-b", "feature")
+        (seed / "a.txt").write_text("one from the PR\n")
+        git(seed, "commit", "-am", "pr"); git(seed, "push", "origin", "feature")
+        sha = git(seed, "rev-parse", "HEAD")
+        git(seed, "checkout", "main")
+        (seed / "a.txt").write_text("one from main\n")
+        git(seed, "commit", "-am", "main change"); git(seed, "push", "origin", "main")
+        state = d / "state"
+        gh = MultiGH({})
+        real = subprocess.run
+
+        def run(cmd, **kw):
+            if cmd[0] == "claude":
+                Path(kw["cwd"], "a.txt").write_text("one from main and the PR\n")
+                real(["git", "add", "a.txt"], cwd=kw["cwd"], check=True)
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"total_cost_usd": 0.1, "result": "Kept both."}), "")
+            return real(cmd, **kw)
+        h = mergehelp.MergeHelper(cfg(state), gh, lambda *_: None, run=run, key_reader=lambda: "k", repos=lambda: ["o/art"])
+        work = h.work_root("o/art")
+        self.assertNotEqual(work, h.work_root("o/r"))
+        work.mkdir(parents=True)
+        git(work, "clone", "--no-checkout", str(origin), str(work / "repo"))
+        job = {"number": 7, "title": "t", "body": "", "head": "feature", "sha": sha, "kind": "conflict",
+               "repo": "o/art", "base": "main"}
+        self.assertEqual(h.do(job), "pushed")
+        tip = git(origin, "rev-parse", "feature")
+        self.assertEqual(git(origin, "show", f"{tip}:a.txt"), "one from main and the PR")
+        self.assertEqual(gh.posts[0][0], "repos/o/art/issues/7/comments")
+        self.assertIn("resolved the conflicts with main", gh.posts[0][1]["body"])
+        self.assertIn("o/art#7:" + sha + ":conflict", h.tried)
+        self.assertEqual(h.view()["runs"][0]["repo"], "o/art")
 
 
 if __name__ == "__main__":

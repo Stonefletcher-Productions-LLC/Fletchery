@@ -178,6 +178,9 @@ def _merge(m) -> dict | None:
     return {"enabled": bool(m.get("enabled")), "backend": _text(m.get("backend"), 20), "chosen": _text(m.get("chosen"), 20),
             "model": _text(m.get("model"), 60), "models": [_text(x, 60) for x in (m.get("models") or [])[:8]],
             "fix_checks": bool(m.get("fix_checks")), "base": _text(m.get("base"), 80), "key_set": bool(m.get("key_set")),
+            "repos": [{"repo": _text(r.get("repo"), 140), "base": _text(r.get("base"), 80),
+                       "auto_merge": bool(r.get("auto_merge")), "direct_only": bool(r.get("direct_only"))}
+                      for r in (m.get("repos") or [])[:100] if isinstance(r, dict)],
             "busy": _text(m.get("busy"), 200), "waiting": _text(_scrub(m.get("waiting")), 200),
             "note": _text(_scrub(m.get("note")), 200), "error": _text(_scrub(m.get("error")), 300),
             "last_pass": _text(m.get("last_pass"), 40),
@@ -185,7 +188,8 @@ def _merge(m) -> dict | None:
                       if k in ("api_total_usd", "api_today_usd", "budget_usd", "budget_left_usd", "budget_until", "days_left",
                                "per_day_to_use_it", "daily_cap_usd", "per_run_cap_usd", "subscription_runs",
                                "subscription_equiv_usd", "runs_today")},
-            "runs": [{"at": _text(r.get("at"), 40), "pr": int(r.get("pr") or 0), "kind": _text(r.get("kind"), 20),
+            "runs": [{"at": _text(r.get("at"), 40), "repo": _text(r.get("repo"), 140), "pr": int(r.get("pr") or 0),
+                      "kind": _text(r.get("kind"), 20),
                       "result": _text(r.get("result"), 20), "backend": _text(r.get("backend"), 20),
                       "model": _text(r.get("model"), 60), "cost_usd": num(r.get("cost_usd")),
                       "detail": _text(_scrub(r.get("detail")), 200)} for r in (m.get("runs") or [])[:12] if isinstance(r, dict)]}
