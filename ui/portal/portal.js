@@ -274,7 +274,8 @@
     const rows = [
       el('li', null, el('div', {class: 'title', text: m.busy || (api ? 'Paid from the API credit' : 'Uses the Claude subscription on this PC')}),
         el('span', {class: 'chip ' + state[1], text: state[0]}),
-        el('p', {class: 'sub', text: [m.model, 'into ' + m.base, m.fix_checks ? 'conflicts and quick-check fixes' : 'conflicts only',
+        el('p', {class: 'sub', text: [m.model, 'into ' + m.base, (m.repos || []).length > 1 ? m.repos.length + ' repositories' : '',
+          m.fix_checks ? 'conflicts and quick-check fixes' : 'conflicts only',
           m.last_pass ? 'last check ' + ago(m.last_pass) : ''].filter(Boolean).join(' · ')}),
         (m.waiting || m.error || m.note) ? el('p', {class: 'sub', text: m.error || m.waiting || m.note}) : null),
       el('li', null, el('div', {class: 'title', text: 'API credit: ' + usd(sp.api_total_usd) + ' spent of ' + usd(sp.budget_usd) + ', ' + usd(sp.budget_left_usd) + ' left'}),
@@ -284,7 +285,7 @@
           (sp.subscription_runs ? ' · subscription: ' + sp.subscription_runs + ' runs (about ' + usd(sp.subscription_equiv_usd) + ' at API prices)' : '')}))];
     fill($('mergeStatus'), rows, '');
     fill($('mergeRuns'), (m.runs || []).map(r => el('li', null,
-      el('div', {class: 'title', text: (r.pr ? '#' + r.pr + ' ' : '') + (r.kind === 'conflict' ? 'conflicts' : r.kind === 'fix' ? 'quick-check fix' : r.kind)}),
+      el('div', {class: 'title', text: (r.pr ? (r.repo ? r.repo.split('/').pop() + ' ' : '') + '#' + r.pr + ' ' : '') + (r.kind === 'conflict' ? 'conflicts' : r.kind === 'fix' ? 'quick-check fix' : r.kind)}),
       el('span', {class: 'chip ' + (r.result === 'pushed' || r.result === 'ok' ? 'run' : r.result === 'no change' ? '' : 'bad'), text: r.result || '?'}),
       el('p', {class: 'sub', text: [when(r.at), r.backend, r.model, usd(r.cost_usd)].filter(Boolean).join(' · ')}),
       r.detail ? el('p', {class: 'sub', text: r.detail}) : null)), 'No runs yet.');

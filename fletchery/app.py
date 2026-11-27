@@ -186,26 +186,27 @@ class App:
         self._stop = threading.Event()
         from builds import Builds
         self.builds = Builds(self)
-        from mergehelp import MergeHelper
-        self.merge = MergeHelper(cfg, self.gh, self.log)
         from recheck import Recheck
         live_conf = (cfg.portal or {}).get("live") if isinstance(getattr(cfg, "portal", None), dict) else None
+        live = lambda: self.portal.live if self.portal and self.portal.live is not None else None   # noqa: E731
+        # Every repository Live watches: the merge helper, unjam and requeue all take the same list.
+        watched = lambda: [str(r.get("repo") or r.get("full_name") or "") for r in (live().repos if live() else [])   # noqa: E731
+                           if isinstance(r, dict) and "/" in str(r.get("repo") or r.get("full_name") or "")]
+        from mergehelp import MergeHelper
+        self.merge = MergeHelper(cfg, self.gh, self.log, repos=watched)
         self.recheck = Recheck(self.gh, self.log, self.state_dir,
                                snapshot=lambda: self.portal.live.snapshot() if self.portal and self.portal.live is not None else None,
                                enabled=not (isinstance(live_conf, dict) and live_conf.get("autoRerun") is False))
         from unjam import Unjam
-        live = lambda: self.portal.live if self.portal and self.portal.live is not None else None   # noqa: E731
         self.unjam = Unjam(self.gh, self.log, self.state_dir,
                            snapshot=lambda: live().snapshot() if live() else None,
                            # When idle, never forced: an automatic restart must not end a running build (LifeShare #2530).
                            restart=lambda name, reason: live().restart_machine(name, by="Fletchery", reason=reason, when_idle=True)["message"],
-                           repos=lambda: [str(r.get("repo") or r.get("full_name") or "") for r in (live().repos if live() else [])
-                                          if isinstance(r, dict) and "/" in str(r.get("repo") or r.get("full_name") or "")],
+                           repos=watched,
                            enabled=not (isinstance(live_conf, dict) and live_conf.get("autoUnjam") is False))
         from requeue import Requeue
         self.requeue = Requeue(self.gh, self.log, self.state_dir,
-                               repos=lambda: [str(r.get("repo") or r.get("full_name") or "") for r in (live().repos if live() else [])
-                                              if isinstance(r, dict) and "/" in str(r.get("repo") or r.get("full_name") or "")],
+                               repos=watched,
                                enabled=not (isinstance(live_conf, dict) and live_conf.get("autoRequeue") is False))
 
     # ---- activity ----
